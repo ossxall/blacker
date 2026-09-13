@@ -45,22 +45,27 @@ class Timeframe:
                 for id, series in self._series.items()
             },
         }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Timeframe':
+        timeframe = cls()
 
-    def set_state(self, state: dict) -> None:
-        self.id = state.get("id")
-        self.timeframe_ms = state.get("timeframe_ms")
-        self.live = (
-            Bar.from_dict(state["live"])
-            if state.get("live") is not None
+        timeframe.id = data.get("id")
+        timeframe.timeframe_ms = data.get("timeframe_ms")
+        timeframe.live = (
+            Bar.from_dict(data["live"])
+            if data.get("live") is not None
             else None
         )
-        self.closed = (
-            Bar.from_dict(state["closed"])
-            if state.get("closed") is not None
+        timeframe.closed = (
+            Bar.from_dict(data["closed"])
+            if data.get("closed") is not None
             else None
         )        
-        self.is_new = state.get("is_new")
-        self.is_closed = state.get("is_closed")
+        timeframe.is_new = data.get("is_new")
+        timeframe.is_closed = data.get("is_closed")
+
+        return timeframe
 
     def add_series(self, series: Series):
         series._timeframe = self

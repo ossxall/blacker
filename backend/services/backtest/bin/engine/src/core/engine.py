@@ -34,15 +34,11 @@ class TradingEngine:
         self.timeframes: dict[str, Timeframe] = {}
         self.bar_aggregator: BarAggregator | None = None
         self.strategy: Strategy | None = None
-
-        self.portfolio = Portfolio()
-        self.risk = {}
-        self.risk_manager = RiskManager()
-        self.order_manager = OrderManager(
-            portfolio=self.portfolio,
-            risk_manager=self.risk_manager,
-        )
-        self.execution = Execution(self.order_manager)
+        self.portfolio: Portfolio | None = None
+        self.risk: dict = {}
+        self.risk_manager: RiskManager | None = None
+        self.order_manager: OrderManager | None = None
+        self.execution: Execution | None = None
 
     def reset(self):
         print("Reseting engine...")
@@ -54,30 +50,22 @@ class TradingEngine:
         self.timeframes = {}
         self.bar_aggregator = None
         self.strategy = None
-
-        self.portfolio = Portfolio()
+        self.portfolio = None
         self.risk = {}
-        self.risk_manager = RiskManager()
-        self.order_manager = OrderManager(
-            portfolio=self.portfolio,
-            risk_manager=self.risk_manager,
-        )
-        self.execution = Execution(self.order_manager)
+        self.risk_manager = None
+        self.order_manager = None
+        self.execution = None
 
     def set_state(self, boot_id: str, config_id: str, engine_state: dict) -> None:
         """
         Restores the engine state from a serialized dictionary.
         """
-        self.boot_id = boot_id
-        self.config_id = config_id
-
         timeframes = {}
         #
         # Setup timeframes and series
         #
         for tf_value in engine_state["timeframes"].values():
-            timeframe = Timeframe()
-            timeframe.set_state(tf_value)
+            timeframe = Timeframe().from_dict(tf_value)
             #
             # Add Timeframe series
             #
@@ -107,32 +95,32 @@ class TradingEngine:
             engine_state["strategy"]["params"]        
         )
         strategy.set_state(engine_state["strategy"])
+        #
+        # Required statements.
+        #
+        self.boot_id = boot_id
+
+        self.config_id = config_id
 
         self.timeframes = timeframes
-        self.bar_aggregator = BarAggregator(
-            timeframes=self.timeframes
-        )
+
+        self.bar_aggregator = BarAggregator(timeframes=self.timeframes)
+
         self.strategy = strategy
-        #
-        # Restore portfolio and order pipeline
-        #
+
+        self.portfolio = Portfolio.from_dict(engine_state.get("portfolio"))
+
         self.risk = engine_state.get("risk", {})
 
-        self.portfolio = Portfolio.from_dict(
-            engine_state.get("portfolio")
-        )
-        self.risk_manager = RiskManager(
-            self.risk
-        )
+        self.risk_manager = RiskManager(self.risk)
+
         self.order_manager = OrderManager.from_dict(
             engine_state.get("orders"),
             portfolio=self.portfolio,
             risk_manager=self.risk_manager,
         )
         self.execution = Execution(self.order_manager)
-        #
-        # Engine state
-        #
+
         self.state = EngineState(
             boot_id=self.boot_id,
             config_id=self.config_id,
