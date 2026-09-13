@@ -55,6 +55,12 @@ pub struct EngineState {
     pub time: u64,
     pub timeframes: HashMap<String, Timeframe>,
     pub strategy: EngineStrategy,
+    #[serde(default)]
+    pub risk: HashMap<String, Value>,
+    #[serde(default)]
+    pub portfolio: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    pub orders: Option<HashMap<String, Value>>,
 }
 
 impl Default for EngineState {
@@ -68,6 +74,9 @@ impl Default for EngineState {
                 params: HashMap::new(),
                 extra: None
             },
+            risk: HashMap::new(),
+            portfolio: None,
+            orders: None,
         }
     }
 }
@@ -80,6 +89,12 @@ pub struct EngineStateMessage {
     pub time: u64,
     pub timeframes: HashMap<String, Timeframe>,
     pub strategy: EngineStrategy,
+    #[serde(default)]
+    pub risk: HashMap<String, Value>,
+    #[serde(default)]
+    pub portfolio: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    pub orders: Option<HashMap<String, Value>>,
 }
 
 impl DeserializeMessage for EngineStateMessage {

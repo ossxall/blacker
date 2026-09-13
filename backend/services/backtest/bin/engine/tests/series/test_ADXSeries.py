@@ -13,10 +13,12 @@ class Candle:
 
 def test_compute_step_first_candle_initializes_state():
     adx = ADXSeries(
-        level=0,
-        name="ADX",
         id="adx",
-        source="candles",
+        kind="ADXSeries",
+        level=0,
+        primary=False,
+        overlay=True,
+        params={},
     )
 
     candle = Candle(

@@ -2,6 +2,7 @@ import json
 import msgpack
 from strategy.base import Strategy
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class EngineState:
@@ -11,6 +12,9 @@ class EngineState:
     time: int
     timeframes: dict
     strategy: Strategy
+    portfolio: Optional[object] = None
+    risk: Optional[dict] = None
+    orders: Optional[dict] = None
 
     def to_dict(self):
         return {
@@ -22,7 +26,14 @@ class EngineState:
                 key: timeframe.to_dict()
                 for key, timeframe in self.timeframes.items()
             },
-            "strategy": self.strategy.to_dict()
+            "strategy": self.strategy.to_dict(),
+            "portfolio": (
+                self.portfolio.to_dict()
+                if self.portfolio is not None
+                else None
+            ),
+            "risk": self.risk or {},
+            "orders": self.orders or None,
         }
 
     def to_json(self) -> str:
@@ -37,4 +48,3 @@ class EngineState:
             self.to_dict(),
             use_bin_type=True,
         )
-    

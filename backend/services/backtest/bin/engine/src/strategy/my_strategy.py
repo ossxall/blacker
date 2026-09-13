@@ -1,42 +1,24 @@
+# BLACKER
+# Copyright (C) 2026 Juan José Caballero Rey
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 from core.engine_state import EngineState
 from .base import Strategy
-from orders import Signal, OrderType
+from orders import Signal, Side
 
 
 class Strategy1(Strategy):
-
-    FLAT = "FLAT"
-    LONG = "LONG"
-    SHORT = "SHORT"
-
-    def __init__(
-        self,
-        kind: str,
-        params: dict
-    ):
-        super().__init__(
-            kind,
-            params,
-        )
-
-        self.position_state: str = self.FLAT
-
-    def to_dict(self):
-        return {
-            "kind": self.kind,
-            "params": self.params,
-            "position_state": self.position_state,
-        }
-
-    def set_state(
-        self,
-        state: dict
-    ) -> None:
-
-        position_state = state.get("position_state")
-
-        if position_state is not None:
-            self.position_state = position_state
 
     def evaluate(
         self,
@@ -75,27 +57,29 @@ class Strategy1(Strategy):
         )
 
         # --------------------------------------------------
+        # The position is owned by the portfolio.
+        # --------------------------------------------------
+
+        portfolio = state.portfolio
+
+        position = portfolio.position if portfolio is not None else None
+
+        # --------------------------------------------------
         # FLAT
         # --------------------------------------------------
 
-        if self.position_state == self.FLAT:
+        if position is None:
 
             if cross_up:
-                self.position_state = self.LONG
-
                 return Signal(
                     action="BUY",
                     quantity=1,
-                    order_type=OrderType.MARKET,
                 )
 
             if cross_down:
-                self.position_state = self.SHORT
-
                 return Signal(
                     action="SELL",
                     quantity=1,
-                    order_type=OrderType.MARKET,
                 )
 
             return None
@@ -104,13 +88,9 @@ class Strategy1(Strategy):
         # LONG
         # --------------------------------------------------
 
-        if self.position_state == self.LONG:
+        if position.side == Side.BUY:
 
-            # No se puede abrir otra posición.
-            # El cruce bajista únicamente cierra LONG.
             if cross_down:
-                self.position_state = self.FLAT
-
                 return Signal(
                     action="EXIT",
                 )
@@ -121,13 +101,9 @@ class Strategy1(Strategy):
         # SHORT
         # --------------------------------------------------
 
-        if self.position_state == self.SHORT:
+        if position.side == Side.SELL:
 
-            # No se puede abrir otra posición.
-            # El cruce alcista únicamente cierra SHORT.
             if cross_up:
-                self.position_state = self.FLAT
-
                 return Signal(
                     action="EXIT",
                 )

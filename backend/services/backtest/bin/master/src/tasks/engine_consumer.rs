@@ -112,7 +112,10 @@ pub async fn run(state: AppState, pulsar: Arc<Pulsar<TokioExecutor>>) -> Result<
                         tick_index: engine_state_message.tick_index,
                         time: engine_state_message.time,
                         timeframes: engine_state_message.timeframes,
-                        strategy: engine_state_message.strategy
+                        strategy: engine_state_message.strategy,
+                        risk: engine_state_message.risk,
+                        portfolio: engine_state_message.portfolio,
+                        orders: engine_state_message.orders,
                     };
                 }
                 Err(reason) => {

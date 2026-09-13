@@ -16,10 +16,14 @@
 from aggregator.bar_aggregator import BarAggregator
 from strategy.base import Strategy
 from core.engine_state import EngineState
+from core.portfolio import Portfolio
 from strategy.registry import STRATEGY_REGISTRY
 from ingestion.tick import Tick
 from timeframes.timeframe import Timeframe
 from series.registry import SERIES_REGISTRY
+from orders.order_manager import OrderManager
+from orders.risk_manager import RiskManager
+from execution.execution import Execution
 
 class TradingEngine:
     def __init__(self):
@@ -31,6 +35,15 @@ class TradingEngine:
         self.bar_aggregator: BarAggregator | None = None
         self.strategy: Strategy | None = None
 
+        self.portfolio = Portfolio()
+        self.risk = {}
+        self.risk_manager = RiskManager()
+        self.order_manager = OrderManager(
+            portfolio=self.portfolio,
+            risk_manager=self.risk_manager,
+        )
+        self.execution = Execution(self.order_manager)
+
     def reset(self):
         print("Reseting engine...")
 
@@ -41,6 +54,15 @@ class TradingEngine:
         self.timeframes = {}
         self.bar_aggregator = None
         self.strategy = None
+
+        self.portfolio = Portfolio()
+        self.risk = {}
+        self.risk_manager = RiskManager()
+        self.order_manager = OrderManager(
+            portfolio=self.portfolio,
+            risk_manager=self.risk_manager,
+        )
+        self.execution = Execution(self.order_manager)
 
     def set_state(self, boot_id: str, config_id: str, engine_state: dict) -> None:
         """
@@ -90,7 +112,24 @@ class TradingEngine:
         self.bar_aggregator = BarAggregator(
             timeframes=self.timeframes
         )
-        self.strategy = strategy        
+        self.strategy = strategy
+        #
+        # Restore portfolio and order pipeline
+        #
+        self.risk = engine_state.get("risk", {})
+
+        self.portfolio = Portfolio.from_dict(
+            engine_state.get("portfolio")
+        )
+        self.risk_manager = RiskManager(
+            self.risk
+        )
+        self.order_manager = OrderManager.from_dict(
+            engine_state.get("orders"),
+            portfolio=self.portfolio,
+            risk_manager=self.risk_manager,
+        )
+        self.execution = Execution(self.order_manager)
         #
         # Engine state
         #
@@ -100,7 +139,10 @@ class TradingEngine:
             tick_index=engine_state["tick_index"],
             time=engine_state["time"], 
             timeframes=self.timeframes,
-            strategy=self.strategy 
+            strategy=self.strategy,
+            portfolio=self.portfolio,
+            risk=self.risk,
+            orders=self.order_manager.to_dict(),
         )
 
     def on_tick(self, tick: Tick):
@@ -115,29 +157,41 @@ class TradingEngine:
             tick_index=tick.tick_index,
             time=tick.time,
             timeframes=self.timeframes, 
-            strategy=self.strategy  
+            strategy=self.strategy,
+            portfolio=self.portfolio,
+            risk=self.risk,
+            orders=self.order_manager.to_dict(),
         )
+
+        # --------------------------------------------------
+        # 1. Resolve protective orders first.
+        #    Stops and targets are matched before the strategy
+        #    sees the updated state, so it never acts on a
+        #    position that was already closed by a bracket.
+        # --------------------------------------------------
+
+        fills = self.execution.update(self.state, tick)
+
+        # --------------------------------------------------
+        # 2. Evaluate the strategy on the consistent state.
+        # --------------------------------------------------
 
         signal = self.strategy.evaluate(self.state)
 
-        #orders = self.order_manager.handle(self.state, signal)
+        # --------------------------------------------------
+        # 3. Translate the alpha intent into orders and queue
+        #    them for the next tick.
+        # --------------------------------------------------
+
+        orders = self.order_manager.handle(signal)
+
+        self.execution.submit(orders)
+
+        # --------------------------------------------------
+        # 4. The published state must reflect everything this
+        #    tick has done (fills, position, order book).
+        # --------------------------------------------------
+
+        self.state.orders = self.order_manager.to_dict()
 
         return self.state, signal
-
-
-
-"""
-        fills = self.execution.process(
-            tick,
-            orders,
-        )
-
-        for fill in fills:
-            new_orders = self.order_manager.on_fill(fill)
-
-            self.execution.submit(new_orders)
-
-"""
-
-
-

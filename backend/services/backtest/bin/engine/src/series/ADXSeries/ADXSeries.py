@@ -1,9 +1,25 @@
+# BLACKER
+# Copyright (C) 2026 Juan José Caballero Rey
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 from collections import deque
 from dataclasses import asdict, dataclass
 from series.series import Series
-from ingestion.tick import Tick
+
 
 MAX_HISTORY_LEN = 500
+
 
 @dataclass(frozen=True)
 class Adx:
@@ -11,7 +27,7 @@ class Adx:
     start_ts: int
     end_ts: int
 
-    # ── Salida pública (equivalente a las columnas del DataFrame de adx.py) ──
+    # Public output columns (equivalent to the adx.py DataFrame columns)
     adx: float
     plus_di: float
     minus_di: float
@@ -19,7 +35,7 @@ class Adx:
     is_reversal: bool
     reversal_level: float | None
 
-    # ── Estado interno de continuidad (necesario para calcular el siguiente valor) ──
+    # Internal continuity state, needed to compute the next value
     high: float
     low: float
     close: float
@@ -27,65 +43,86 @@ class Adx:
     plus_dm_rma: float
     minus_dm_rma: float
 
+
 class ADXSeries(Series):
-    def __init__(self, level: int, name: str, id: str, source: str,
-                 dilen: int = 14, adxlen: int = 14, key_level: float = 23):
-        super().__init__(level, name, id)
+    def __init__(
+        self,
+        id: str,
+        kind: str,
+        level: int,
+        primary: bool,
+        overlay: bool,
+        params: dict,
+    ):
+        super().__init__(
+            id,
+            kind,
+            level,
+            primary,
+            overlay,
+            params,
+        )
 
-        self.source = source
-        self.dilen = dilen
-        self.adxlen = adxlen
-        self.key_level = key_level
+        self.dilen = int(params.get("dilen", 14))
+        self.adxlen = int(params.get("adxlen", 14))
+        self.key_level = float(params.get("key_level", 23))
 
-        self._internal: Adx | None = None  # estado real, nunca suprimido
-        self.live: Adx | None = None       # estado visible (None durante warm-up)
+        # Internal chain state, never suppressed.
+        self._internal: Adx | None = None
+
+        # Visible state (None during warm-up).
+        self._live: Adx | None = None
 
         self.history: deque[Adx] = deque(maxlen=MAX_HISTORY_LEN)
 
-    def to_dict(self):
+    @property
+    def live(self) -> Adx | None:
+        return self._live
+
+    @live.setter
+    def live(self, value: Adx | None):
+        self._live = value
+
+    def to_dict(self) -> dict:
         return {
-            "params": {
-                "level": self.level,
-                "name": self.name,
-                "id": self.id,
-                "source": self.source,
-                "dilen": self.dilen,
-                "adxlen": self.adxlen,
-                "key_level": self.key_level,
-            },
+            "id": self.id,
+            "kind": self.kind,
+            "level": self.level,
+            "primary": self.primary,
+            "overlay": self.overlay,
+            "params": self.params,
             "live": asdict(self.live) if self.live is not None else None,
             "history": [asdict(a) for a in self.history],
         }
 
     def set_state(self, state: dict) -> None:
         self.history = deque(
-            (Adx(**a) for a in state["history"]),
+            (Adx(**a) for a in (state.get("history") or [])),
             maxlen=MAX_HISTORY_LEN,
         )
 
+        live_state = state.get("live")
+
         self.live = (
-            Adx(**state["live"]) if state["live"] is not None else None
+            Adx(**live_state) if live_state is not None else None
         )
 
-        # _internal se reconstruye desde live, o desde el último history
-        # si live está suprimido por warm-up
+        # The internal state is rebuilt from live, or from the last history
+        # entry when live is suppressed by the warm-up period.
         self._internal = self.live or (self.history[-1] if self.history else None)
 
-    def update(self, tick: Tick) -> None:
-        source = self.timeframe.get_series(self.source)
+    def update(self) -> None:
+        candle = self._timeframe.live
 
-        # Wait until the source has produced its first candle.
-        if source.live is None:
+        if candle is None:
             return
-
-        candle = source.live
 
         # True when updating the current open candle.
         is_same_candle = (
             self._internal is not None
             and self._internal.start_ts == candle.start_ts
         )
-        
+
         # Select the previous state used to continue the RMA chain.
         if self._internal is None:
             prev_chain = None
@@ -105,7 +142,7 @@ class ADXSeries(Series):
 
         # Compute the current ADX state.
         self._internal = self._compute_step(candle, prev_chain, prev1, prev2)
-        
+
         # Expose values only after the required warm-up period.
         if len(self.history) >= self.dilen + self.adxlen - 1:
             self.live = self._internal
@@ -147,10 +184,10 @@ class ADXSeries(Series):
             plus_dm_rma = plus_dm * di_alpha + prev_chain.plus_dm_rma * (1 - di_alpha)
             minus_dm_rma = minus_dm * di_alpha + prev_chain.minus_dm_rma * (1 - di_alpha)
 
-       # Directional Indicators.
+        # Directional Indicators.
         plus_di = 100 * plus_dm_rma / tr_rma if tr_rma != 0 else 0.0
         minus_di = 100 * minus_dm_rma / tr_rma if tr_rma != 0 else 0.0
-        
+
         # Directional Index (DX).
         summ = plus_di + minus_di
         divisor = summ if summ != 0 else 1.0
@@ -173,7 +210,7 @@ class ADXSeries(Series):
             is_reversal = rule1 and rule2 and rule3
         else:
             is_reversal = False
-            
+
         # Preserve the ADX peak that triggered the reversal.
         reversal_level = prev1.adx if (is_reversal and prev1 is not None) else None
 

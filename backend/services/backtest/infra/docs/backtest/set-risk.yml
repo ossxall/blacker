@@ -1,0 +1,43 @@
+info:
+  name: set-risk
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: http://localhost:3002/api/backtest/master/set-risk
+  body:
+    type: json
+    data: |-
+      {
+        "config": {
+          "stop": {
+            "type": "percent",
+            "value": 0.01
+          },
+          "targets": [
+            {
+              "type": "percent",
+              "value": 0.02
+            },
+            {
+              "type": "percent",
+              "value": 0.03
+            }
+          ],
+          "trailing": {
+            "enabled": false,
+            "distance": {
+              "type": "percent",
+              "value": 0.005
+            }
+          }
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
