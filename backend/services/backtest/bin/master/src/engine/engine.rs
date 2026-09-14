@@ -60,7 +60,7 @@ pub struct EngineState {
     #[serde(default)]
     pub portfolio: HashMap<String, Value>,
     #[serde(default)]
-    pub orders: Option<HashMap<String, Value>>,
+    pub orders: HashMap<String, Value>,
 }
 
 pub fn default_portfolio(initial_cash: f64) -> HashMap<String, Value> {
@@ -70,6 +70,16 @@ pub fn default_portfolio(initial_cash: f64) -> HashMap<String, Value> {
         ("position".to_string(), Value::Null),
         ("realized_pnl".to_string(), Value::from(0.0)),
         ("trades".to_string(), Value::Array(vec![])),
+    ])
+}
+
+pub fn default_orders() -> HashMap<String, Value> {
+    HashMap::from([
+        ("next_order_id".to_string(), Value::from(0)),
+        ("next_group_id".to_string(), Value::from(0)),
+        ("next_fill_id".to_string(), Value::from(0)),
+        ("orders".to_string(), Value::Array(vec![])),
+        ("groups".to_string(), Value::Array(vec![])),
     ])
 }
 
@@ -86,7 +96,7 @@ impl Default for EngineState {
             },
             risk: HashMap::new(),
             portfolio: default_portfolio(100_000.0),
-            orders: None,
+            orders: default_orders(),
         }
     }
 }
@@ -104,7 +114,7 @@ pub struct EngineStateMessage {
     #[serde(default)]
     pub portfolio: HashMap<String, Value>,
     #[serde(default)]
-    pub orders: Option<HashMap<String, Value>>,
+    pub orders: HashMap<String, Value>,
 }
 
 impl DeserializeMessage for EngineStateMessage {
