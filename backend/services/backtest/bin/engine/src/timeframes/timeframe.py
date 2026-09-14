@@ -24,7 +24,7 @@ class Timeframe:
         self._series: dict[str, Series] = {}
         self._levels: list[list[Series]] = []
 
-        self.id: str = ""
+        self.id: str | None = None
         self.timeframe_ms: int = 0
         # Used by BarAggregator, Series
         self.live: Bar | None = None
