@@ -58,9 +58,19 @@ pub struct EngineState {
     #[serde(default)]
     pub risk: HashMap<String, Value>,
     #[serde(default)]
-    pub portfolio: Option<HashMap<String, Value>>,
+    pub portfolio: HashMap<String, Value>,
     #[serde(default)]
     pub orders: Option<HashMap<String, Value>>,
+}
+
+pub fn default_portfolio(initial_cash: f64) -> HashMap<String, Value> {
+    HashMap::from([
+        ("initial_cash".to_string(), Value::from(initial_cash)),
+        ("cash".to_string(), Value::from(initial_cash)),
+        ("position".to_string(), Value::Null),
+        ("realized_pnl".to_string(), Value::from(0.0)),
+        ("trades".to_string(), Value::Array(vec![])),
+    ])
 }
 
 impl Default for EngineState {
@@ -75,7 +85,7 @@ impl Default for EngineState {
                 extra: None
             },
             risk: HashMap::new(),
-            portfolio: None,
+            portfolio: default_portfolio(100_000.0),
             orders: None,
         }
     }
@@ -92,7 +102,7 @@ pub struct EngineStateMessage {
     #[serde(default)]
     pub risk: HashMap<String, Value>,
     #[serde(default)]
-    pub portfolio: Option<HashMap<String, Value>>,
+    pub portfolio: HashMap<String, Value>,
     #[serde(default)]
     pub orders: Option<HashMap<String, Value>>,
 }

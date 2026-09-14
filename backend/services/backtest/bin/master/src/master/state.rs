@@ -16,7 +16,7 @@
 use crate::{
     config::AppConfig,
     engine::{
-        engine::{EngineState}
+        engine::{EngineState, default_portfolio}
     },
     snapshot::ReplaySnapshot,
     tasks::ReplayStep,
@@ -149,12 +149,17 @@ impl AppState {
                 snapshot.engine_state,
             ),
 
-            None => (
-                Uuid::now_v7().to_string(),
-                0,
-                ReplayStep::PublishTick,
-                EngineState::default(),
-            ),
+            None => {
+                let mut engine_state: EngineState = EngineState::default();
+                engine_state.portfolio = default_portfolio(config.initial_cash);
+
+                (
+                    Uuid::now_v7().to_string(),
+                    0,
+                    ReplayStep::PublishTick,
+                    engine_state,
+                )
+            }
         };
 
         let master_state: MasterState = MasterState {
