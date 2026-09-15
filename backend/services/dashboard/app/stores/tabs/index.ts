@@ -6,6 +6,10 @@ import { TabKind, type Tab } from "../tabManager.store";
 import { useBacktestingTabStore } from "./backtesting-tab.store";
 import { useTradingTabStore } from "./trading-tab.store";
 import { EMA, type EMAConfig } from "~/packages/playground/series/EMASeries/EMASeries";
+import {
+  ReversalTrap,
+  type ReversalTrapConfig,
+} from "~/packages/playground/series/ReversalTrap/ReversalTrap";
 
 export function useTabContentStore(tab: Tab) {
   if (!tab) return null;
@@ -22,6 +26,7 @@ export function useTabContentStore(tab: Tab) {
 export const seriesRegistry = {
   Candlestick: (config: CandlestickConfig) => Candlestick(config),
   EMA: (config: EMAConfig) => EMA(config),
+  ReversalTrap: (config: ReversalTrapConfig) => ReversalTrap(config),
 } as const;
 export type SeriesRegistry = typeof seriesRegistry;
 export type SeriesKind = keyof SeriesRegistry;

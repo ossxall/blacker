@@ -14,7 +14,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from core.engine_state import EngineState
-from .base import Strategy
+from strategy.base import Strategy
 from orders import Signal, Side
 
 
@@ -25,40 +25,19 @@ class Strategy1(Strategy):
         state: EngineState
     ):
 
-        tf = state.timeframes.get("1m")
+        tf = state.timeframes.get("30m")
 
-        ema_55 = tf.get_series(
-            "EMA",
-            "EMA 55"
-        )
-
-        ema_200 = tf.get_series(
-            "EMA",
-            "EMA 200"
-        )
-
-        if not ema_55.history or not ema_200.history:
+        if tf is None:
             return None
 
-        previous_55 = ema_55.history[-1]
-        previous_200 = ema_200.history[-1]
+        rt = self._get_reversal_trap(tf)
 
-        current_55 = ema_55.live
-        current_200 = ema_200.live
+        # The ReversalTrap series is not part of the layout or is still
+        # inside its warm-up window (live is suppressed).
+        if rt is None or rt.live is None:
+            return None
 
-        cross_up = (
-            previous_55.value <= previous_200.value
-            and current_55.value > current_200.value
-        )
-
-        cross_down = (
-            previous_55.value >= previous_200.value
-            and current_55.value < current_200.value
-        )
-
-        # --------------------------------------------------
-        # The position is owned by the portfolio.
-        # --------------------------------------------------
+        live = rt.live
 
         portfolio = state.portfolio
 
@@ -70,13 +49,16 @@ class Strategy1(Strategy):
 
         if position is None:
 
-            if cross_up:
+            if not live.allowed_by_limits:
+                return None
+
+            if live.bull_trap:
                 return Signal(
                     action="BUY",
                     quantity=1,
                 )
 
-            if cross_down:
+            if live.bear_trap:
                 return Signal(
                     action="SELL",
                     quantity=1,
@@ -90,7 +72,7 @@ class Strategy1(Strategy):
 
         if position.side == Side.BUY:
 
-            if cross_down:
+            if live.bear_trap or not live.active_bull:
                 return Signal(
                     action="EXIT",
                 )
@@ -103,11 +85,32 @@ class Strategy1(Strategy):
 
         if position.side == Side.SELL:
 
-            if cross_up:
+            if live.bull_trap or not live.active_bear:
                 return Signal(
                     action="EXIT",
                 )
 
             return None
+
+        return None
+
+    def _get_reversal_trap(self, tf):
+        """
+        Resolves the ReversalTrap series of the timeframe.
+
+        The canonical label matches the dashboard's series registry entry;
+        if it is absent the first ReversalTrap series found is used so the
+        strategy still works under any configured label.
+        """
+        try:
+            return tf.get_series("ReversalTrap", "Reversal Trap")
+        except KeyError:
+            pass
+
+        for name in ("Reversal Trap", "RT", "ReversalTrap"):
+            try:
+                return tf.get_series("ReversalTrap", name)
+            except KeyError:
+                continue
 
         return None
