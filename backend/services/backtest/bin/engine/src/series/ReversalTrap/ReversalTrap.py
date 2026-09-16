@@ -1,8 +1,8 @@
 # Reversal Trap
 #
-# Engine-compatible Series port of the Script  indicator whose
-# reference lives in `reversal`. The mathematical logic is kept as
-# close to 1:1 with as the engine's bar-driven model allows:
+# Engine-compatible Series port of the reference indicator
+# The calculation/order of operations below intentionally
+# mirrors  as closely as the engine's bar-driven model allows.
 #
 #   - basis = ta.ema(close, envelope_len)          (SMA-seeded EMA)
 #   - vola  = ta.atr(envelope_len)                 (RMA of true range)
@@ -19,10 +19,11 @@
 #   - per-bucket (RSI) win/loss database + total_trades_count guardrails
 #
 # Engine adaptations:
-#   * `bars_from_live = last_bar_index - bar_index` is not known
-#     to a streaming series, so the engine always operates at the live
-#     edge (`bars_from_live == 0`); `max_bars` therefore has no effect
-#     and `max_trades` is the active guardrail.
+#   * 's `bars_from_live = last_bar_index - bar_index` requires the
+#     final historical bar index, which the current streaming Series
+#     interface does not expose. The engine therefore evaluates the
+#     condition at the live edge (`bars_from_live == 0`) while preserving
+#     the  guardrail expression structurally.
 #   * The label/line drawing primitives are dropped; the trap flags,
 #     active trackers and target/stop prices are exposed as data so
 #     downstream consumers can build signals themselves.
@@ -203,12 +204,17 @@ class ReversalTrap(Series):
         self.multiplier = float(_get_param(params, "multiplier", 4.0))
         self.trap_window = int(_get_param(params, "trap_window", 10))
         self.signal_gap = int(_get_param(params, "signal_gap", 10))
-        self.rsi_len = int(_get_param(params, "rsi_len", 20))
+        #  fixes RSI length at 20 (it is not an input). Keep the public
+        # engine parameter surface backward-compatible, but do not let an
+        # external value change the  calculation.
+        self.rsi_len = 20
         self.stop_mult = float(_get_param(params, "stop_mult", 0.5))
         self.max_bars = int(_get_param(params, "max_bars", 5000))
         self.max_trades = int(_get_param(params, "max_trades", 500))
-        self.atr_len = int(_get_param(params, "atr_len", 100))
-        self.target_source = str(_get_param(params, "target_source", "Basis Line"))
+        #  uses ta.atr(100) and a fixed "Basis Line" target.
+        # Keep these as constants so the Python math cannot silently diverge.
+        self.atr_len = 100
+        self.target_source = "Basis Line"
 
         if self.envelope_len <= 0:
             raise ValueError("envelope_len must be greater than 0")
@@ -682,13 +688,8 @@ class ReversalTrap(Series):
             total_trades_count += 1
             bull_entry_bar = bar_index
 
-            # calculated_target = target_source == "Basis Line"
-            #                       ? basis : upper_band
-            calculated_target = (
-                basis
-                if self.target_source == "Basis Line"
-                else upper_band
-            )
+            # : target_source is fixed to "Basis Line".
+            calculated_target = basis
 
             bull_target_price = calculated_target
             bull_stop_price = bull_stop_level
@@ -726,13 +727,8 @@ class ReversalTrap(Series):
             total_trades_count += 1
             bear_entry_bar = bar_index
 
-            # calculated_target = target_source == "Basis Line"
-            #                       ? basis : lower_band
-            calculated_target = (
-                basis
-                if self.target_source == "Basis Line"
-                else lower_band
-            )
+            # : target_source is fixed to "Basis Line".
+            calculated_target = basis
 
             bear_target_price = calculated_target
             bear_stop_price = bear_stop_level
