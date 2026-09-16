@@ -139,7 +139,7 @@ impl AppState {
 
         let boot_id: String = Uuid::now_v7().to_string();
 
-        let replay_batch_size: usize = 300000;
+        let replay_batch_size: usize = 600000;
 
         let (config_id, tick_index, replay_step, engine_state) = match snapshot {
             Some(snapshot) => (
