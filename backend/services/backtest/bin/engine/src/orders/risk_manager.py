@@ -34,6 +34,9 @@ class RiskLevels:
     trailing_distance: float = 0.0
 
 
+DEFAULT_STOP_CONFIG = {"type": "percent", "value": 0.01}
+
+
 class RiskManager:
     """
     Converts a risk configuration into concrete stop / target prices.
@@ -57,6 +60,10 @@ class RiskManager:
                 "distance": {"type": "percent", "value": 0.005},
             }
         }
+
+    Every order is protected by a stop-loss. If the configuration does
+    not provide a ``stop`` key, a default of 1% below/above the entry
+    price is used (``DEFAULT_STOP_CONFIG``).
     """
 
     def __init__(self, config: Optional[dict] = None, context: Optional[dict] = None):
@@ -64,13 +71,13 @@ class RiskManager:
         self.context = context or {}
 
     def apply(self, side: Side, entry_price: float) -> RiskLevels:
-        stop_spec = self.config.get("stop")
+        stop_spec = self.config.get("stop") or DEFAULT_STOP_CONFIG
         target_specs = self.config.get("targets") or []
         trailing_spec = self.config.get("trailing") or {}
 
         levels = RiskLevels()
 
-        stop_offset = self._offset(stop_spec, entry_price) if stop_spec else None
+        stop_offset = self._offset(stop_spec, entry_price)
         if stop_offset is not None:
             levels.stop_price = self._below(stop_offset, entry_price, side)
 

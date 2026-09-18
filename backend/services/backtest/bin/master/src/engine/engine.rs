@@ -83,6 +83,13 @@ pub fn default_orders() -> HashMap<String, Value> {
     ])
 }
 
+/// Default protective risk configuration: a 1% stop-loss from entry.
+pub fn default_risk() -> HashMap<String, Value> {
+    HashMap::from([
+        ("stop".to_string(), serde_json::json!({"type": "percent", "value": 0.01})),
+    ])
+}
+
 impl Default for EngineState {
     fn default() -> Self {
         Self {
@@ -94,7 +101,7 @@ impl Default for EngineState {
                 params: HashMap::new(),
                 extra: None
             },
-            risk: HashMap::new(),
+            risk: default_risk(),
             portfolio: default_portfolio(100_000.0),
             orders: default_orders(),
         }

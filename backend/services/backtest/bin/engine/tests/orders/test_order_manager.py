@@ -99,6 +99,36 @@ def test_entry_fill_creates_stop_and_target_bracket():
     assert position.avg_price == 100.0
 
 
+def test_default_risk_places_default_stop_when_none_configured():
+    manager = OrderManager(portfolio=Portfolio())
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    working = manager.working_orders()
+
+    stops = find_role(working, OrderRole.STOP)
+
+    assert len(stops) == 1
+    assert stops[0].price == 99.0
+    assert stops[0].quantity == 1.0
+
+
+def test_explicit_stop_overrides_default():
+    config = {
+        "stop": {"type": "percent", "value": 0.02},
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    stops = find_role(manager.working_orders(), OrderRole.STOP)
+
+    assert len(stops) == 1
+    assert stops[0].price == 98.0
+
+
 def test_target_fill_closes_position_and_cancels_siblings():
     config = {
         "targets": [{"type": "percent", "value": 0.03}],
