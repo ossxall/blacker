@@ -108,6 +108,7 @@ const timeframeSelected = ref("1m");
 //----------------------------------------------------------------------------------------------------------------------
 
 const seriesModalOpen = ref(false);
+const statsModalOpen = ref(false);
 const seriesModalTitle = ref("Add Series");
 const seriesData: Series[] = [
   {
@@ -138,13 +139,49 @@ const seriesData: Series[] = [
       color: "#FF9800",
       priceTagColor: "#FF9800",
       lineWidth: 1.5,
-      envelope_len: { value: 55, affectsCompute: true, min: 1, max: 200, step: 1 },
-      multiplier: { value: 4, affectsCompute: true, min: 0.1, max: 20, step: 0.1 },
-      trap_window: { value: 10, affectsCompute: true, min: 1, max: 100, step: 1 },
-      signal_gap: { value: 10, affectsCompute: true, min: 0, max: 100, step: 1 },
+      envelope_len: {
+        value: 55,
+        affectsCompute: true,
+        min: 1,
+        max: 200,
+        step: 1,
+      },
+      multiplier: {
+        value: 4,
+        affectsCompute: true,
+        min: 0.1,
+        max: 20,
+        step: 0.1,
+      },
+      trap_window: {
+        value: 10,
+        affectsCompute: true,
+        min: 1,
+        max: 100,
+        step: 1,
+      },
+      signal_gap: {
+        value: 10,
+        affectsCompute: true,
+        min: 0,
+        max: 100,
+        step: 1,
+      },
       rsi_len: { value: 20, affectsCompute: true, min: 1, max: 100, step: 1 },
-      stop_mult: { value: 0.5, affectsCompute: true, min: 0.1, max: 5, step: 0.1 },
-      max_trades: { value: 500, affectsCompute: true, min: 1, max: 5000, step: 1 },
+      stop_mult: {
+        value: 0.5,
+        affectsCompute: true,
+        min: 0.1,
+        max: 5,
+        step: 0.1,
+      },
+      max_trades: {
+        value: 500,
+        affectsCompute: true,
+        min: 1,
+        max: 5000,
+        step: 1,
+      },
       atr_len: { value: 100, affectsCompute: true, min: 1, max: 300, step: 1 },
       target_source: {
         value: "Basis Line",
@@ -203,9 +240,7 @@ async function onTimeframeSelected() {
 
 async function onSeriesSelected(series: Series) {
   try {
-    
-    await tabStore.addSeries(props.activeTimeframe, series)
-
+    await tabStore.addSeries(props.activeTimeframe, series);
   } catch (err: any) {
     toast.add({
       title: "Error adding series",
@@ -311,6 +346,34 @@ async function onSeriesSelected(series: Series) {
 
         <template #body>
           <SeriesSearch :data="seriesData" @select="onSeriesSelected" />
+        </template>
+      </UModal>
+
+      <USeparator orientation="vertical" class="h-10 pl-4 pr-4" />
+
+      <UModal
+        v-model:open="statsModalOpen"
+        title="Stats"
+        :close="{
+          color: 'neutral',
+          variant: 'outline',
+          class: 'rounded-full',
+        }"
+        :overlay="false"
+        :ui="{
+          content: 'w-fit max-w-none rounded-lg shadow-lg ring ring-default',
+        }"
+      >
+        <UButton
+          title="Stats"
+          color="neutral"
+          variant="outline"
+          icon="lucide:chart-column-big"
+          size="xs"
+        />
+
+        <template #body>
+          <StatsPanel :dashboard="tabStore.globalState" />
         </template>
       </UModal>
 

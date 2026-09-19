@@ -5,44 +5,47 @@ from orders import Signal, Side
 
 class Strategy1(Strategy):
     """
-    Estrategia EMA Multi-Timeframe: 5m + 1m
+    EMA Multi-Timeframe V3
 
-    TIMEFRAME 5m
+    5m
+    --
+    EMA 55 > EMA 200 -> tendencia alcista
+    EMA 55 < EMA 200 -> tendencia bajista
+
+    1m
+    --
+    EMA 21 > EMA 55 -> estructura alcista
+    EMA 21 < EMA 55 -> estructura bajista
+
+    ENTRADA LONG
     ------------
-    Define la tendencia principal:
+    5m alcista
+    +
+    1m EMA21 > EMA55
+    +
+    EMA9 cruza EMA21 al alza sobre vela cerrada
 
-        EMA 55 > EMA 200 -> tendencia alcista
-        EMA 55 < EMA 200 -> tendencia bajista
+    ENTRADA SHORT
+    -------------
+    5m bajista
+    +
+    1m EMA21 < EMA55
+    +
+    EMA9 cruza EMA21 a la baja sobre vela cerrada
 
-    TIMEFRAME 1m
+    SALIDA LONG
+    -----------
+    5m cambia a bajista
+    OR
+    1m EMA21 cruza por debajo de EMA55
+
+    SALIDA SHORT
     ------------
-    Busca confirmación de entrada:
+    5m cambia a alcista
+    OR
+    1m EMA21 cruza por encima de EMA55
 
-    LONG:
-        EMA 9 > EMA 21 > EMA 55
-
-    SHORT:
-        EMA 9 < EMA 21 < EMA 55
-
-    ENTRADAS
-    --------
-    LONG:
-        5m alcista + 1m con estructura alcista
-
-    SHORT:
-        5m bajista + 1m con estructura bajista
-
-    SALIDAS
-    -------
-    LONG:
-        5m pierde tendencia alcista
-        OR
-        EMA 9 < EMA 21 en 1m
-
-    SHORT:
-        5m pierde tendencia bajista
-        OR
-        EMA 9 > EMA 21 en 1m
+    No utiliza __init__ ni estado propio.
     """
 
     def evaluate(self, state: EngineState):
@@ -53,17 +56,29 @@ class Strategy1(Strategy):
         if tf5 is None or tf1 is None:
             return None
 
-        # --------------------------------------------------
-        # EMA 5m
-        # --------------------------------------------------
+        # ==================================================
+        # 5m
+        # ==================================================
 
-        ema55_5m = self._get_series(tf5, "EMA", "EMA 55")
-        ema200_5m = self._get_series(tf5, "EMA", "EMA 200")
+        ema55_5m = self._get_series(
+            tf5,
+            "EMA",
+            "EMA 55",
+        )
+
+        ema200_5m = self._get_series(
+            tf5,
+            "EMA",
+            "EMA 200",
+        )
 
         if ema55_5m is None or ema200_5m is None:
             return None
 
-        if ema55_5m.live is None or ema200_5m.live is None:
+        if (
+            ema55_5m.live is None
+            or ema200_5m.live is None
+        ):
             return None
 
         value55_5m = ema55_5m.live.value
@@ -79,51 +94,95 @@ class Strategy1(Strategy):
         else:
             return None
 
-        # --------------------------------------------------
-        # EMA 1m
-        # --------------------------------------------------
+        # ==================================================
+        # 1m
+        # ==================================================
 
-        ema9_1m = self._get_series(tf1, "EMA", "EMA 9")
-        ema21_1m = self._get_series(tf1, "EMA", "EMA 21")
-        ema55_1m = self._get_series(tf1, "EMA", "EMA 55")
+        ema9 = self._get_series(
+            tf1,
+            "EMA",
+            "EMA 9",
+        )
+
+        ema21 = self._get_series(
+            tf1,
+            "EMA",
+            "EMA 21",
+        )
+
+        ema55 = self._get_series(
+            tf1,
+            "EMA",
+            "EMA 55",
+        )
 
         if (
-            ema9_1m is None
-            or ema21_1m is None
-            or ema55_1m is None
+            ema9 is None
+            or ema21 is None
+            or ema55 is None
         ):
             return None
 
         if (
-            ema9_1m.live is None
-            or ema21_1m.live is None
-            or ema55_1m.live is None
+            ema9.live is None
+            or ema21.live is None
+            or ema55.live is None
         ):
             return None
 
-        value9_1m = ema9_1m.live.value
-        value21_1m = ema21_1m.live.value
-        value55_1m = ema55_1m.live.value
+        # ==================================================
+        # VALORES LIVE
+        # ==================================================
 
-        # --------------------------------------------------
-        # Estructura 1m
-        # --------------------------------------------------
+        value9 = ema9.live.value
+        value21 = ema21.live.value
+        value55 = ema55.live.value
 
-        bullish_1m = (
-            value9_1m > value21_1m
-            and value21_1m > value55_1m
+        # ==================================================
+        # HISTORIAL CERRADO
+        # ==================================================
+
+        previous9 = self._previous_closed(ema9)
+        previous21 = self._previous_closed(ema21)
+
+        previous21_older = self._older_closed(ema21)
+        previous55_older = self._older_closed(ema55)
+
+        if previous9 is None or previous21 is None:
+            return None
+
+        # ==================================================
+        # CRUCE EMA 9 / EMA 21
+        # ==================================================
+
+        bullish_cross = (
+            previous9 <= previous21
+            and value9 > value21
         )
 
-        bearish_1m = (
-            value9_1m < value21_1m
-            and value21_1m < value55_1m
+        bearish_cross = (
+            previous9 >= previous21
+            and value9 < value21
         )
 
-        # --------------------------------------------------
-        # POSICIÓN
-        # --------------------------------------------------
+        # ==================================================
+        # ESTRUCTURA 1m
+        # ==================================================
+
+        bullish_structure = (
+            value21 > value55
+        )
+
+        bearish_structure = (
+            value21 < value55
+        )
+
+        # ==================================================
+        # PORTFOLIO
+        # ==================================================
 
         portfolio = state.portfolio
+
         position = (
             portfolio.position
             if portfolio is not None
@@ -136,21 +195,29 @@ class Strategy1(Strategy):
 
         if position is None:
 
-            # -----------------------------
+            # ----------------------------------------------
             # LONG
-            # -----------------------------
+            # ----------------------------------------------
 
-            if trend_5m == "UP" and bullish_1m:
+            if (
+                trend_5m == "UP"
+                and bullish_structure
+                and bullish_cross
+            ):
                 return Signal(
                     action="BUY",
                     quantity=1,
                 )
 
-            # -----------------------------
+            # ----------------------------------------------
             # SHORT
-            # -----------------------------
+            # ----------------------------------------------
 
-            if trend_5m == "DOWN" and bearish_1m:
+            if (
+                trend_5m == "DOWN"
+                and bearish_structure
+                and bearish_cross
+            ):
                 return Signal(
                     action="SELL",
                     quantity=1,
@@ -164,12 +231,15 @@ class Strategy1(Strategy):
 
         if position.side == Side.BUY:
 
-            # La tendencia principal cambió
+            # Tendencia 5m invertida
             if trend_5m == "DOWN":
                 return Signal(action="EXIT")
 
-            # Se pierde estructura rápida 1m
-            if value9_1m < value21_1m:
+            # Estructura 1m completamente deteriorada
+            if (
+                value21 < value55
+                and value9 < value21
+            ):
                 return Signal(action="EXIT")
 
             return None
@@ -180,12 +250,15 @@ class Strategy1(Strategy):
 
         if position.side == Side.SELL:
 
-            # La tendencia principal cambió
+            # Tendencia 5m invertida
             if trend_5m == "UP":
                 return Signal(action="EXIT")
 
-            # Se pierde estructura rápida 1m
-            if value9_1m > value21_1m:
+            # Estructura 1m completamente invertida
+            if (
+                value21 > value55
+                and value9 > value21
+            ):
                 return Signal(action="EXIT")
 
             return None
@@ -193,15 +266,40 @@ class Strategy1(Strategy):
         return None
 
     # ======================================================
-    # HELPERS
+    # HISTORIAL
+    # ======================================================
+
+    def _previous_closed(self, series):
+        """
+        Último valor de EMA correspondiente a una vela cerrada.
+        """
+
+        history = getattr(series, "history", None)
+
+        if not history:
+            return None
+
+        return history[-1].value
+
+    def _older_closed(self, series):
+        """
+        Segundo último valor cerrado.
+        """
+
+        history = getattr(series, "history", None)
+
+        if not history or len(history) < 2:
+            return None
+
+        return history[-2].value
+
+    # ======================================================
+    # SERIES
     # ======================================================
 
     def _get_series(self, tf, kind, label):
-        """
-        Obtiene una serie configurada sin provocar
-        una excepción si no existe.
-        """
         try:
             return tf.get_series(kind, label)
+
         except KeyError:
             return None
