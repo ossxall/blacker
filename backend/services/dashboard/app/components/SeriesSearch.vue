@@ -54,6 +54,7 @@ function onSelect(e: Event, row: TableRow<Series>) {
         :data="props.data"
         :columns="columns"
         @select="onSelect"
+        :ui="{ td: 'select-none cursor-default' }"
       />
     </div>
   </div>

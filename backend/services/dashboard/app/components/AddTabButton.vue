@@ -39,7 +39,7 @@ const onSelect = (e: any) => {
 <template>
   <div class="tab-add flex items-center h-[inherit]">
     <UButton
-      class="mt-0"
+      class="mt-[5px]"
       icon="i-lucide-plus"
       size="sm"
       color="neutral"

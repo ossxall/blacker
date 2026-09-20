@@ -92,7 +92,13 @@ function onSelect(e: Event, row: TableRow<Instrument>) {
 <template>
   <div class="flex flex-col w-[800px] h-[500px]">
     <div class="py-4 pt-0 border-b border-accented">
-      <UInput v-model="globalFilter" class="w-full" placeholder="Search" size="lg" icon="i-lucide-search"/>
+      <UInput
+        v-model="globalFilter"
+        class="w-full"
+        placeholder="Search"
+        size="lg"
+        icon="i-lucide-search"
+      />
     </div>
 
     <div class="flex-1 overflow-y-auto">
@@ -102,6 +108,7 @@ function onSelect(e: Event, row: TableRow<Instrument>) {
         :data="props.data"
         :columns="columns"
         @select="onSelect"
+        :ui="{ td: 'select-none cursor-default' }"
       />
     </div>
   </div>
