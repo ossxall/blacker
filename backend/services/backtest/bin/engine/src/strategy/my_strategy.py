@@ -5,45 +5,22 @@ from orders import Signal, Side
 
 class Strategy1(Strategy):
     """
-    EMA Multi-Timeframe V3
+    EMA Multi-Timeframe V3.1
 
-    5m
-    --
-    EMA 55 > EMA 200 -> tendencia alcista
-    EMA 55 < EMA 200 -> tendencia bajista
+    MEJORA SOBRE V3:
+    ----------------
+    Se mantiene intacta la lógica de entrada de V3.
 
-    1m
-    --
-    EMA 21 > EMA 55 -> estructura alcista
-    EMA 21 < EMA 55 -> estructura bajista
+    Único filtro nuevo:
+        LONG:
+            EMA55 5m > EMA200
+            +
+            EMA55 5m subiendo
 
-    ENTRADA LONG
-    ------------
-    5m alcista
-    +
-    1m EMA21 > EMA55
-    +
-    EMA9 cruza EMA21 al alza sobre vela cerrada
-
-    ENTRADA SHORT
-    -------------
-    5m bajista
-    +
-    1m EMA21 < EMA55
-    +
-    EMA9 cruza EMA21 a la baja sobre vela cerrada
-
-    SALIDA LONG
-    -----------
-    5m cambia a bajista
-    OR
-    1m EMA21 cruza por debajo de EMA55
-
-    SALIDA SHORT
-    ------------
-    5m cambia a alcista
-    OR
-    1m EMA21 cruza por encima de EMA55
+        SHORT:
+            EMA55 5m < EMA200
+            +
+            EMA55 5m bajando
 
     No utiliza __init__ ni estado propio.
     """
@@ -84,7 +61,10 @@ class Strategy1(Strategy):
         value55_5m = ema55_5m.live.value
         value200_5m = ema200_5m.live.value
 
-        # Tendencia principal
+        # ==================================================
+        # Tendencia 5m
+        # ==================================================
+
         if value55_5m > value200_5m:
             trend_5m = "UP"
 
@@ -93,6 +73,36 @@ class Strategy1(Strategy):
 
         else:
             return None
+
+        # ==================================================
+        # Pendiente EMA55 5m
+        # ==================================================
+
+        previous55_5m = self._previous_closed(
+            ema55_5m
+        )
+
+        if previous55_5m is None:
+            return None
+
+        ema55_rising = (
+            value55_5m > previous55_5m
+        )
+
+        ema55_falling = (
+            value55_5m < previous55_5m
+        )
+
+        # Filtro de tendencia mejorada
+        long_trend = (
+            trend_5m == "UP"
+            and ema55_rising
+        )
+
+        short_trend = (
+            trend_5m == "DOWN"
+            and ema55_falling
+        )
 
         # ==================================================
         # 1m
@@ -131,7 +141,7 @@ class Strategy1(Strategy):
             return None
 
         # ==================================================
-        # VALORES LIVE
+        # Valores LIVE
         # ==================================================
 
         value9 = ema9.live.value
@@ -139,20 +149,20 @@ class Strategy1(Strategy):
         value55 = ema55.live.value
 
         # ==================================================
-        # HISTORIAL CERRADO
+        # Historial cerrado
         # ==================================================
 
         previous9 = self._previous_closed(ema9)
         previous21 = self._previous_closed(ema21)
 
-        previous21_older = self._older_closed(ema21)
-        previous55_older = self._older_closed(ema55)
-
-        if previous9 is None or previous21 is None:
+        if (
+            previous9 is None
+            or previous21 is None
+        ):
             return None
 
         # ==================================================
-        # CRUCE EMA 9 / EMA 21
+        # Cruce EMA9 / EMA21
         # ==================================================
 
         bullish_cross = (
@@ -166,7 +176,7 @@ class Strategy1(Strategy):
         )
 
         # ==================================================
-        # ESTRUCTURA 1m
+        # Estructura 1m
         # ==================================================
 
         bullish_structure = (
@@ -178,7 +188,7 @@ class Strategy1(Strategy):
         )
 
         # ==================================================
-        # PORTFOLIO
+        # Portfolio
         # ==================================================
 
         portfolio = state.portfolio
@@ -195,12 +205,9 @@ class Strategy1(Strategy):
 
         if position is None:
 
-            # ----------------------------------------------
             # LONG
-            # ----------------------------------------------
-
             if (
-                trend_5m == "UP"
+                long_trend
                 and bullish_structure
                 and bullish_cross
             ):
@@ -209,12 +216,9 @@ class Strategy1(Strategy):
                     quantity=1,
                 )
 
-            # ----------------------------------------------
             # SHORT
-            # ----------------------------------------------
-
             if (
-                trend_5m == "DOWN"
+                short_trend
                 and bearish_structure
                 and bearish_cross
             ):
@@ -231,16 +235,19 @@ class Strategy1(Strategy):
 
         if position.side == Side.BUY:
 
-            # Tendencia 5m invertida
+            # Mantener el exit original de V3
             if trend_5m == "DOWN":
-                return Signal(action="EXIT")
+                return Signal(
+                    action="EXIT"
+                )
 
-            # Estructura 1m completamente deteriorada
             if (
                 value21 < value55
                 and value9 < value21
             ):
-                return Signal(action="EXIT")
+                return Signal(
+                    action="EXIT"
+                )
 
             return None
 
@@ -250,16 +257,19 @@ class Strategy1(Strategy):
 
         if position.side == Side.SELL:
 
-            # Tendencia 5m invertida
+            # Mantener el exit original de V3
             if trend_5m == "UP":
-                return Signal(action="EXIT")
+                return Signal(
+                    action="EXIT"
+                )
 
-            # Estructura 1m completamente invertida
             if (
                 value21 > value55
                 and value9 > value21
             ):
-                return Signal(action="EXIT")
+                return Signal(
+                    action="EXIT"
+                )
 
             return None
 
@@ -271,27 +281,20 @@ class Strategy1(Strategy):
 
     def _previous_closed(self, series):
         """
-        Último valor de EMA correspondiente a una vela cerrada.
+        Último valor de EMA correspondiente
+        a una vela cerrada.
         """
 
-        history = getattr(series, "history", None)
+        history = getattr(
+            series,
+            "history",
+            None,
+        )
 
         if not history:
             return None
 
         return history[-1].value
-
-    def _older_closed(self, series):
-        """
-        Segundo último valor cerrado.
-        """
-
-        history = getattr(series, "history", None)
-
-        if not history or len(history) < 2:
-            return None
-
-        return history[-2].value
 
     # ======================================================
     # SERIES
@@ -299,7 +302,10 @@ class Strategy1(Strategy):
 
     def _get_series(self, tf, kind, label):
         try:
-            return tf.get_series(kind, label)
+            return tf.get_series(
+                kind,
+                label,
+            )
 
         except KeyError:
             return None
