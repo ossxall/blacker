@@ -1,4 +1,5 @@
 from src.series import ADXSeries
+from src.series.registry import SERIES_REGISTRY
 import pytest
 
 class Candle:
@@ -57,3 +58,39 @@ def test_compute_step_first_candle_initializes_state():
     assert result.high == 110.0
     assert result.low == 100.0
     assert result.close == 105.0
+
+
+def test_registry_instantiates_and_restores_like_candlestick():
+    # ADXSeries must be registered the same way Candlestick is, so the
+    # engine can build and restore an ADXSeries from serialized state.
+    assert "ADXSeries" in SERIES_REGISTRY
+
+    adx = SERIES_REGISTRY["ADXSeries"](
+        id="adx",
+        kind="ADXSeries",
+        level=1,
+        primary=False,
+        overlay=True,
+        params={"dilen": 14, "adxlen": 14, "key_level": 23},
+    )
+
+    state = {
+        "id": "adx",
+        "kind": "ADXSeries",
+        "level": 1,
+        "primary": False,
+        "overlay": True,
+        "params": {"dilen": 14, "adxlen": 14, "key_level": 23},
+        "live": None,
+        "history": [],
+    }
+
+    adx.set_state(state)
+
+    assert adx.id == "adx"
+    assert adx.kind == "ADXSeries"
+    assert adx.dilen == 14
+    assert adx.adxlen == 14
+    assert adx.key_level == pytest.approx(23.0)
+    assert adx.live is None
+    assert adx._internal is None
