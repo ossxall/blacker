@@ -1,4 +1,4 @@
-from src.series import ADXSeries
+from src.series.ADX import ADX
 import pytest
 
 class Candle:
@@ -12,7 +12,7 @@ class Candle:
 
 
 def test_compute_step_first_candle_initializes_state():
-    adx = ADXSeries(
+    adx = ADX(
         level=0,
         name="ADX",
         id="adx",

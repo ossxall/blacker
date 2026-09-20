@@ -54,8 +54,8 @@ engine_config = {
         {   
             "params": {
                 "level": 1,
-                "name": "ADXSeries",
-                "id": "ADXSeries",
+                "name": "ADX",
+                "id": "ADX",
                 "source": "CandleBubbleSeries1",
                 "dilen": 14,
                 "adxlen": 14,

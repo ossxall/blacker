@@ -27,7 +27,7 @@ class Adx:
     plus_dm_rma: float
     minus_dm_rma: float
 
-class ADXSeries(Series):
+class ADX(Series):
     def __init__(self, level: int, name: str, id: str, source: str,
                  dilen: int = 14, adxlen: int = 14, key_level: float = 23):
         super().__init__(level, name, id)
