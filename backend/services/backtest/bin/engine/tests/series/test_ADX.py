@@ -1,6 +1,7 @@
-from src.series import ADXSeries
+from src.series import ADX
 from src.series.registry import SERIES_REGISTRY
 import pytest
+
 
 class Candle:
     def __init__(self, high, low, close):
@@ -13,9 +14,9 @@ class Candle:
 
 
 def test_compute_step_first_candle_initializes_state():
-    adx = ADXSeries(
+    adx = ADX(
         id="adx",
-        kind="ADXSeries",
+        kind="ADX",
         level=0,
         primary=False,
         overlay=True,
@@ -61,13 +62,13 @@ def test_compute_step_first_candle_initializes_state():
 
 
 def test_registry_instantiates_and_restores_like_candlestick():
-    # ADXSeries must be registered the same way Candlestick is, so the
-    # engine can build and restore an ADXSeries from serialized state.
-    assert "ADXSeries" in SERIES_REGISTRY
+    # ADX must be registered the same way Candlestick is, so the
+    # engine can build and restore an ADX from serialized state.
+    assert "ADX" in SERIES_REGISTRY
 
-    adx = SERIES_REGISTRY["ADXSeries"](
+    adx = SERIES_REGISTRY["ADX"](
         id="adx",
-        kind="ADXSeries",
+        kind="ADX",
         level=1,
         primary=False,
         overlay=True,
@@ -76,7 +77,7 @@ def test_registry_instantiates_and_restores_like_candlestick():
 
     state = {
         "id": "adx",
-        "kind": "ADXSeries",
+        "kind": "ADX",
         "level": 1,
         "primary": False,
         "overlay": True,
@@ -88,9 +89,31 @@ def test_registry_instantiates_and_restores_like_candlestick():
     adx.set_state(state)
 
     assert adx.id == "adx"
-    assert adx.kind == "ADXSeries"
+    assert adx.kind == "ADX"
     assert adx.dilen == 14
     assert adx.adxlen == 14
     assert adx.key_level == pytest.approx(23.0)
     assert adx.live is None
     assert adx._internal is None
+
+
+def test_params_accept_ui_descriptor_objects():
+    # The frontend sends parameter descriptor objects carrying the value
+    # (as it does for EMA), so the engine must unwrap them on instantiation.
+    adx = ADX(
+        id="adx",
+        kind="ADX",
+        level=1,
+        primary=False,
+        overlay=True,
+        params={
+            "dilen": {"value": 21, "affectsCompute": True, "min": 1},
+            "adxlen": {"value": 7, "affectsCompute": True, "min": 1},
+            "key_level": {"value": 30, "affectsCompute": True, "min": 1},
+            "label": "ADX",
+        },
+    )
+
+    assert adx.dilen == 21
+    assert adx.adxlen == 7
+    assert adx.key_level == pytest.approx(30.0)

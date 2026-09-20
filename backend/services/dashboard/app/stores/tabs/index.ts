@@ -2,6 +2,10 @@ import {
   Candlestick,
   type CandlestickConfig,
 } from "~/packages/playground/series/Candlestick/Candlestick";
+import {
+  ADXSeries,
+  type ADXConfig,
+} from "~/packages/playground/series/ADXSeries/ADXSeries";
 import { TabKind, type Tab } from "../tabManager.store";
 import { useBacktestingTabStore } from "./backtesting-tab.store";
 import { useTradingTabStore } from "./trading-tab.store";
@@ -24,6 +28,7 @@ export function useTabContentStore(tab: Tab) {
 }
 
 export const seriesRegistry = {
+  ADX: (config: ADXConfig) => ADXSeries(config),
   Candlestick: (config: CandlestickConfig) => Candlestick(config),
   EMA: (config: EMAConfig) => EMA(config),
   ReversalTrap: (config: ReversalTrapConfig) => ReversalTrap(config),

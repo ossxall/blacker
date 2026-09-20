@@ -112,6 +112,29 @@ const statsModalOpen = ref(false);
 const seriesModalTitle = ref("Add Series");
 const seriesData: Series[] = [
   {
+    id: "adx",
+    kind: "ADX",
+    level: 1,
+    primary: false,
+    overlay: false,
+    params: {
+      label: "ADX 14",
+      layer: "foreground",
+      color: "#2962FF",
+      priceTagColor: "#2962FF",
+      dilen: { value: 14, affectsCompute: true, min: 1, max: 200, step: 1 },
+      adxlen: { value: 14, affectsCompute: true, min: 1, max: 200, step: 1 },
+      key_level: {
+        value: 23,
+        affectsCompute: true,
+        min: 1,
+        max: 100,
+        step: 1,
+      },
+    },
+    name: "Average Directional Index",
+  },
+  {
     id: "ema",
     kind: "EMA",
     level: 1,

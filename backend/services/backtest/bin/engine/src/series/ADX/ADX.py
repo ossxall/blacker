@@ -63,9 +63,22 @@ class ADX(Series):
             params,
         )
 
-        self.dilen = int(params.get("dilen", 14))
-        self.adxlen = int(params.get("adxlen", 14))
-        self.key_level = float(params.get("key_level", 23))
+        # The frontend can send each parameter either as a plain number
+        # or as a parameter descriptor object carrying the value.
+        dilen = params.get("dilen", 14)
+        if isinstance(dilen, dict):
+            dilen = dilen.get("value", 14)
+        self.dilen = int(dilen)
+
+        adxlen = params.get("adxlen", 14)
+        if isinstance(adxlen, dict):
+            adxlen = adxlen.get("value", 14)
+        self.adxlen = int(adxlen)
+
+        key_level = params.get("key_level", 23)
+        if isinstance(key_level, dict):
+            key_level = key_level.get("value", 23)
+        self.key_level = float(key_level)
 
         # Internal chain state, never suppressed.
         self._internal: Adx | None = None
