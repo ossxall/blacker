@@ -1,10 +1,10 @@
-from series.ADXSeries import ADXSeries
+from series.ADX import ADX
 from series.Candlestick import Candlestick
 from series.EMA import EMA
 from series.ReversalTrap import ReversalTrap
 
 SERIES_REGISTRY = {
-    "ADXSeries": ADXSeries,
+    "ADX": ADX,
     "Candlestick": Candlestick,
     "EMA": EMA,
     "ReversalTrap": ReversalTrap,

@@ -44,7 +44,7 @@ class Adx:
     minus_dm_rma: float
 
 
-class ADXSeries(Series):
+class ADX(Series):
     def __init__(
         self,
         id: str,
