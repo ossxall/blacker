@@ -5,14 +5,25 @@ from orders import Signal, Side
 
 class Strategy1(Strategy):
     """
-    Strategy V3.5
-    EMA Multi-Timeframe + ADX Directional Filter + Selective Entries
+    Strategy V3.6
+    EMA Multi-Timeframe + ADX Directional Filter + ADX Momentum Confirmation
 
     Objetivo:
-        Reducir las entradas de baja calidad que generan muchas pérdidas
-        pequeñas y dejan la curva de equity lateral.
+        Corregir la curva de equity lateral: las ganancias se diluyen
+        con pérdidas pequeñas y constantes. Se logra actuando sobre
+        dos frentes, ambos basados en ADX:
 
-    5m:
+        1. Entradas 1m con confirmación de momentum ADX.
+           Cada cruce de EMA en 1m solo se acepta si el ADX de 1m está
+           subiendo, supera un suelo de fuerza y el DMI queda alineado
+           con la dirección. Elimina los cruces sin seguimiento real.
+
+        2. Salidas 5m anticipadas por pérdida de fuerza.
+           El ADX de 5m en reversal (pico) o un cruce de DI en contra
+           con ADX débil cierra la posición antes de devolver las
+           ganancias acumuladas.
+
+    5m (régimen de tendencia):
         LONG:
             EMA55 > EMA200
             EMA55 subiendo
@@ -25,37 +36,49 @@ class Strategy1(Strategy):
             ADX > 23
             -DI > +DI
 
-    1m:
+    ADX 5m - salidas:
+        LONG:
+            - tendencia 5m pasa a DOWN
+            - ADX 5m en reversal (pico de fuerza)
+            - -DI >= +DI con ADX 5m < 23
+            - estructura 1m pasa a bajista
+
+        SHORT:
+            - tendencia 5m pasa a UP
+            - ADX 5m en reversal (pico de fuerza)
+            - +DI >= -DI con ADX 5m < 23
+            - estructura 1m pasa a alcista
+
+    1m (timing de entrada):
         LONG:
             EMA21 > EMA55
             EMA9 > EMA21 mediante cruce
             EMA21 subiendo
             EMA55 subiendo
+            ADX 1m >= 12 y subiendo
+            +DI 1m > -DI 1m
 
         SHORT:
             EMA21 < EMA55
             EMA9 < EMA21 mediante cruce
             EMA21 bajando
             EMA55 bajando
+            ADX 1m >= 12 y subiendo
+            -DI 1m > +DI 1m
 
     ADX reversal:
-        No abre nuevas operaciones mientras el ADX esté marcando
-        reversal. No se usa como salida.
-
-    SALIDAS:
-        LONG:
-            - tendencia 5m pasa a DOWN
-            - estructura 1m pasa a bajista
-
-        SHORT:
-            - tendencia 5m pasa a UP
-            - estructura 1m pasa a alcista
+        No abre nuevas operaciones mientras el ADX 5m esté marcando
+        reversal. A diferencia de V3.5, aquí sí se usa como salida
+        para proteger las ganancias de la tendencia.
 
     Nota:
-        El objetivo de V3.5 es calidad de entrada, no maximizar el
-        número de operaciones. El resultado debe validarse mediante
-        backtest con el mismo periodo y costes.
+        Si la serie "ADX 14" no existe en 1m, el filtro de momentum
+        1m se omite y la estrategia conserva el comportamiento de
+        V3.5 para no detener el trading.
     """
+
+    ADX_5M_THRESHOLD = 23.0
+    ADX_1M_FLOOR = 12.0
 
     def evaluate(self, state: EngineState):
 
@@ -101,15 +124,13 @@ class Strategy1(Strategy):
             return None
 
         # ============================================================
-        # ADX FILTER
+        # 5M ADX FILTER
         # ============================================================
 
-        # 23 coincide con el key_level por defecto del ADX personalizado
-        # y evita aceptar demasiadas fases de tendencia débil.
-        adx_threshold = 23.0
+        adx_has_strength = value_adx_5m > self.ADX_5M_THRESHOLD
 
-        adx_has_strength = value_adx_5m > adx_threshold
-
+        # Pico de fuerza: el ADX acumuló fuerza y empieza a ceder.
+        # Es una señal de salida (no de entrada inversa).
         adx_reversal = bool(
             getattr(adx_live, "is_reversal", False)
         )
@@ -227,6 +248,51 @@ class Strategy1(Strategy):
         ema55_falling = value55 < previous55
 
         # ============================================================
+        # 1M ADX MOMENTUM CONFIRMATION
+        # ============================================================
+        # Requiere que el movimiento de 1m tenga fuerza real: ADX por
+        # encima de un suelo, subiendo y con el DMI alineado.
+        #
+        # Si la serie "ADX 14" no está configurada en 1m, el filtro se
+        # omite y se conserva el comportamiento de V3.5.
+
+        momentum_long_1m = True
+        momentum_short_1m = True
+
+        adx_1m = self._get_series(tf1, "ADX", "ADX 14")
+        previous_adx_1m = self._last_closed(adx_1m)
+
+        if (
+            adx_1m is not None
+            and adx_1m.live is not None
+            and previous_adx_1m is not None
+        ):
+
+            value_adx_1m = adx_1m.live.adx
+            plus_di_1m = getattr(adx_1m.live, "plus_di", None)
+            minus_di_1m = getattr(adx_1m.live, "minus_di", None)
+
+            if plus_di_1m is not None and minus_di_1m is not None:
+
+                adx_1m_has_strength = (
+                    value_adx_1m >= self.ADX_1M_FLOOR
+                )
+
+                adx_1m_rising = value_adx_1m > previous_adx_1m.adx
+
+                momentum_long_1m = (
+                    adx_1m_has_strength
+                    and adx_1m_rising
+                    and plus_di_1m > minus_di_1m
+                )
+
+                momentum_short_1m = (
+                    adx_1m_has_strength
+                    and adx_1m_rising
+                    and minus_di_1m > plus_di_1m
+                )
+
+        # ============================================================
         # POSITION
         # ============================================================
 
@@ -265,6 +331,7 @@ class Strategy1(Strategy):
                     and bullish_structure
                     and ema21_rising
                     and ema55_rising
+                    and momentum_long_1m
                 )
 
                 if long_entry:
@@ -284,6 +351,7 @@ class Strategy1(Strategy):
                     and bearish_structure
                     and ema21_falling
                     and ema55_falling
+                    and momentum_short_1m
                 )
 
                 if short_entry:
@@ -304,6 +372,20 @@ class Strategy1(Strategy):
             if trend_5m == "DOWN":
                 return Signal(action="EXIT")
 
+            # Pérdida de fuerza 5m: el ADX hizo pico (reversal) o el
+            # DMI se giró en contra con ADX débil. Protege las
+            # ganancias acumuladas en lugar de devolverlas.
+            adx_strength_exit = (
+                adx_reversal
+                or (
+                    minus_di >= plus_di
+                    and not adx_has_strength
+                )
+            )
+
+            if adx_strength_exit:
+                return Signal(action="EXIT")
+
             # Pérdida de estructura 1m
             if (
                 value21 < value55
@@ -321,6 +403,18 @@ class Strategy1(Strategy):
 
             # Cambio de tendencia principal
             if trend_5m == "UP":
+                return Signal(action="EXIT")
+
+            # Pérdida de fuerza 5m (espejo del LONG)
+            adx_strength_exit = (
+                adx_reversal
+                or (
+                    plus_di >= minus_di
+                    and not adx_has_strength
+                )
+            )
+
+            if adx_strength_exit:
                 return Signal(action="EXIT")
 
             # Pérdida de estructura 1m
@@ -346,6 +440,15 @@ class Strategy1(Strategy):
             return None
 
         return history[-1].value
+
+    def _last_closed(self, series):
+
+        history = getattr(series, "history", None)
+
+        if not history:
+            return None
+
+        return history[-1]
 
     def _get_series(self, tf, kind, label):
 
