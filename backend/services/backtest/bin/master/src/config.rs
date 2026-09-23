@@ -15,7 +15,7 @@ impl AppConfig {
             env::var("SYMBOL").context("Missing required environment variable: SYMBOL")?;
 
         let pulsar_url: String =
-            env::var("PULSAR_URL").unwrap_or_else(|_| "pulsar://localhost:6650".to_string());
+            env::var("PULSAR_URL").unwrap_or_else(|_| "pulsar://localhost:16650".to_string());
 
         let tick_data_path: String = env::var("TICK_DATA_PATH")
             .context("Missing required environment variable: TICK_DATA_PATH")?;

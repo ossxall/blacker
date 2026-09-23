@@ -1,7 +1,9 @@
+name: backtest
+
 services:
   pulsar-local:
     image: apachepulsar/pulsar:4.2.2
-    container_name: pulsar
+    container_name: backtest_pulsar
 
     stop_grace_period: 60s
     restart: unless-stopped
@@ -13,12 +15,21 @@ services:
         bin/apply-config-from-env.py conf/standalone.conf
         exec bin/pulsar standalone
 
+    networks:
+      - backtest-infra
+
     ports:
-      - "6650:6650"
-      - "8080:8080"
+      - "16650:16650"
+      - "16080:16080"
 
     environment:
       PULSAR_MEM: "-Xms8g -Xmx8g -XX:MaxDirectMemorySize=8g"
+
+      # Puertos de host aislados (mismos dentro del contenedor):
+      # cliente -> pulsar://localhost:16650, admin http://localhost:16080
+      PULSAR_PREFIX_advertisedAddress: "localhost"
+      PULSAR_PREFIX_brokerServicePort: "16650"
+      PULSAR_PREFIX_webServicePort: "16080"
 
       # 100 MiB
       PULSAR_PREFIX_maxMessageSize: "104857600"
@@ -27,15 +38,17 @@ services:
       PULSAR_PREFIX_nettyMaxFrameSizeBytes: "105906176"
 
     volumes:
-      - pulsar_data:/pulsar/data
+      - backtest_pulsar_data:/pulsar/data
 
   redis-local:
     image: redis:7
-    container_name: redis_local
+    container_name: backtest_redis
     stop_grace_period: 60s
     restart: unless-stopped
+    networks:
+      - backtest-infra
     ports:
-      - "6379:6379"
+      - "16379:6379"
     command: >
       redis-server
       --save ""
@@ -43,8 +56,15 @@ services:
       --maxmemory 4gb
       --maxmemory-policy allkeys-lru
     volumes:
-      - redis_data:/data
+      - backtest_redis_data:/data
+
+networks:
+  backtest-infra:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "172.28.0.0/24"
 
 volumes:
-  pulsar_data:
-  redis_data:
+  backtest_pulsar_data:
+  backtest_redis_data:

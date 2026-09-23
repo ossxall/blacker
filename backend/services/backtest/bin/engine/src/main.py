@@ -26,13 +26,13 @@ from enum import StrEnum
 #-----------------------------------------------------------------------------------------------------------------------
 
 consumer = PulsarConsumer(
-        service_url="pulsar://localhost:6650",
+        service_url="pulsar://localhost:16650",
         topic="persistent://public/default/master.tick",
         subscription="engine-sub",
 )
 
 publisher = PulsarPublisher(
-    service_url="pulsar://localhost:6650",
+    service_url="pulsar://localhost:16650",
     topic="persistent://public/default/engine.state",
 )
 

@@ -4,7 +4,7 @@ from pulsar import Client, Producer
 class PulsarPublisher:
     def __init__(
         self,
-        service_url="pulsar://localhost:6650",
+        service_url="pulsar://localhost:16650",
         topic="persistent://public/default/engine.state",
     ):
         self.client = Client(service_url)

@@ -8,7 +8,7 @@ class PulsarConsumer:
     
     def __init__(
         self,
-        service_url="pulsar://localhost:6650",
+        service_url="pulsar://localhost:16650",
         topic="persistent://public/default/master.tick",
         subscription="engine-sub",
     ):
