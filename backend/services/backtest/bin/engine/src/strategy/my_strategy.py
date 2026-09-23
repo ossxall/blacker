@@ -2,10 +2,9 @@ from core.engine_state import EngineState
 from strategy.base import Strategy
 from orders import Signal, Side
 
-
 class Strategy1(Strategy):
     """
-    Strategy V3.6
+    Strategy V3.7 - protección de perdedoras
     EMA Multi-Timeframe + ADX Directional Filter + ADX Momentum Confirmation
 
     Objetivo:
@@ -79,6 +78,11 @@ class Strategy1(Strategy):
 
     ADX_5M_THRESHOLD = 23.0
     ADX_1M_FLOOR = 12.0
+
+    # Protección de pérdidas V3.7
+    # Porcentaje máximo de pérdida desde el precio de entrada.
+    # Ajustar según el instrumento y el backtest.
+    MAX_LOSS_PCT = 0.20
 
     def evaluate(self, state: EngineState):
 
@@ -304,6 +308,16 @@ class Strategy1(Strategy):
             else None
         )
 
+        # Precio actual: se obtiene de forma tolerante porque el EngineState
+        # puede exponerlo con distintos nombres según la implementación.
+        current_price = getattr(state, "current_price", None)
+        if current_price is None:
+            current_price = getattr(state, "price", None)
+        if current_price is None:
+            current_price = getattr(tf1, "current_price", None)
+        if current_price is None:
+            current_price = getattr(tf1, "price", None)
+
         # ============================================================
         # ENTRY
         # ============================================================
@@ -368,6 +382,23 @@ class Strategy1(Strategy):
 
         if position.side == Side.BUY:
 
+            # ============================================================
+            # HARD STOP DE PÉRDIDA
+            # ============================================================
+            # Corta una operación que se mueve inmediatamente en contra,
+            # independientemente de las demás condiciones de salida.
+            entry_price = getattr(position, "entry_price", None)
+
+            if current_price is not None and entry_price is not None:
+                loss_pct = (
+                    (current_price - entry_price)
+                    / entry_price
+                    * 100.0
+                )
+
+                if loss_pct <= -self.MAX_LOSS_PCT:
+                    return Signal(action="EXIT")
+
             # Cambio de tendencia principal
             if trend_5m == "DOWN":
                 return Signal(action="EXIT")
@@ -386,11 +417,10 @@ class Strategy1(Strategy):
             if adx_strength_exit:
                 return Signal(action="EXIT")
 
-            # Pérdida de estructura 1m
-            if (
-                value21 < value55
-                and value9 < value21
-            ):
+            # Pérdida de estructura 1m.
+            # V3.7 sale en cuanto EMA21 pierde EMA55; no espera además
+            # a que EMA9 confirme la segunda condición.
+            if value21 < value55:
                 return Signal(action="EXIT")
 
             return None
@@ -400,6 +430,21 @@ class Strategy1(Strategy):
         # ============================================================
 
         if position.side == Side.SELL:
+
+            # ============================================================
+            # HARD STOP DE PÉRDIDA
+            # ============================================================
+            entry_price = getattr(position, "entry_price", None)
+
+            if current_price is not None and entry_price is not None:
+                loss_pct = (
+                    (entry_price - current_price)
+                    / entry_price
+                    * 100.0
+                )
+
+                if loss_pct <= -self.MAX_LOSS_PCT:
+                    return Signal(action="EXIT")
 
             # Cambio de tendencia principal
             if trend_5m == "UP":
@@ -417,11 +462,10 @@ class Strategy1(Strategy):
             if adx_strength_exit:
                 return Signal(action="EXIT")
 
-            # Pérdida de estructura 1m
-            if (
-                value21 > value55
-                and value9 > value21
-            ):
+            # Pérdida de estructura 1m.
+            # V3.7 sale en cuanto EMA21 supera EMA55; no espera además
+            # a que EMA9 confirme la segunda condición.
+            if value21 > value55:
                 return Signal(action="EXIT")
 
             return None
