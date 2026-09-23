@@ -5,60 +5,56 @@ from orders import Signal, Side
 
 class Strategy1(Strategy):
     """
-    Strategy V3.4
-    EMA Multi-Timeframe + ADX Regime + ADX Reversal Confirmation
+    Strategy V3.5
+    EMA Multi-Timeframe + ADX Directional Filter + Selective Entries
 
-    TIMEFRAME 5m
-    ----------------
-    Tendencia LONG:
-        EMA55 > EMA200
-        EMA55 subiendo
-        ADX > 20
+    Objetivo:
+        Reducir las entradas de baja calidad que generan muchas pérdidas
+        pequeñas y dejan la curva de equity lateral.
 
-    Tendencia SHORT:
-        EMA55 < EMA200
-        EMA55 bajando
-        ADX > 20
-
-    ADX REVERSAL
-    ----------------
-    is_reversal NO provoca salida automáticamente.
-
-    Cuando ADX está en reversal, la entrada exige confirmación
-    adicional mediante:
+    5m:
         LONG:
+            EMA55 > EMA200
+            EMA55 subiendo
+            ADX > 23
             +DI > -DI
-            EMA9 subiendo
-            EMA21 subiendo
-            EMA9 > EMA21 > EMA55
-            cruce alcista EMA9/EMA21
 
         SHORT:
+            EMA55 < EMA200
+            EMA55 bajando
+            ADX > 23
             -DI > +DI
-            EMA9 bajando
+
+    1m:
+        LONG:
+            EMA21 > EMA55
+            EMA9 > EMA21 mediante cruce
+            EMA21 subiendo
+            EMA55 subiendo
+
+        SHORT:
+            EMA21 < EMA55
+            EMA9 < EMA21 mediante cruce
             EMA21 bajando
-            EMA9 < EMA21 < EMA55
-            cruce bajista EMA9/EMA21
+            EMA55 bajando
 
-    TIMEFRAME 1m
-    ----------------
-    Entrada normal LONG:
-        EMA21 > EMA55
-        cruce EMA9 sobre EMA21
+    ADX reversal:
+        No abre nuevas operaciones mientras el ADX esté marcando
+        reversal. No se usa como salida.
 
-    Entrada normal SHORT:
-        EMA21 < EMA55
-        cruce EMA9 bajo EMA21
+    SALIDAS:
+        LONG:
+            - tendencia 5m pasa a DOWN
+            - estructura 1m pasa a bajista
 
-    SALIDAS
-    ----------------
-    LONG:
-        - tendencia 5m pasa a DOWN
-        - EMA21 < EMA55 y EMA9 < EMA21
+        SHORT:
+            - tendencia 5m pasa a UP
+            - estructura 1m pasa a alcista
 
-    SHORT:
-        - tendencia 5m pasa a UP
-        - EMA21 > EMA55 y EMA9 > EMA21
+    Nota:
+        El objetivo de V3.5 es calidad de entrada, no maximizar el
+        número de operaciones. El resultado debe validarse mediante
+        backtest con el mismo periodo y costes.
     """
 
     def evaluate(self, state: EngineState):
@@ -81,53 +77,42 @@ class Strategy1(Strategy):
         ema200_5m = self._get_series(tf5, "EMA", "EMA 200")
         adx_5m = self._get_series(tf5, "ADX", "ADX 14")
 
-        if ema55_5m is None:
+        if ema55_5m is None or ema200_5m is None or adx_5m is None:
             return None
 
-        if ema200_5m is None:
+        if (
+            ema55_5m.live is None
+            or ema200_5m.live is None
+            or adx_5m.live is None
+        ):
             return None
-
-        if adx_5m is None:
-            return None
-
-        if ema55_5m.live is None:
-            return None
-
-        if ema200_5m.live is None:
-            return None
-
-        if adx_5m.live is None:
-            return None
-
-        # ============================================================
-        # 5M VALUES
-        # ============================================================
 
         value55_5m = ema55_5m.live.value
         value200_5m = ema200_5m.live.value
 
-        # ADX usa .adx, NO .value
+        # ADX personalizado: el valor está en .adx
         adx_live = adx_5m.live
         value_adx_5m = adx_live.adx
 
-        adx_threshold = 20.0
-
-        adx_has_strength = value_adx_5m > adx_threshold
-
-        # ============================================================
-        # ADX REVERSAL
-        # ============================================================
-
-        adx_reversal = bool(
-            getattr(adx_live, "is_reversal", False)
-        )
-
-        # DI direction
         plus_di = getattr(adx_live, "plus_di", None)
         minus_di = getattr(adx_live, "minus_di", None)
 
         if plus_di is None or minus_di is None:
             return None
+
+        # ============================================================
+        # ADX FILTER
+        # ============================================================
+
+        # 23 coincide con el key_level por defecto del ADX personalizado
+        # y evita aceptar demasiadas fases de tendencia débil.
+        adx_threshold = 23.0
+
+        adx_has_strength = value_adx_5m > adx_threshold
+
+        adx_reversal = bool(
+            getattr(adx_live, "is_reversal", False)
+        )
 
         di_bullish = plus_di > minus_di
         di_bearish = minus_di > plus_di
@@ -138,10 +123,8 @@ class Strategy1(Strategy):
 
         if value55_5m > value200_5m:
             trend_5m = "UP"
-
         elif value55_5m < value200_5m:
             trend_5m = "DOWN"
-
         else:
             return None
 
@@ -158,19 +141,21 @@ class Strategy1(Strategy):
         ema55_falling = value55_5m < previous55_5m
 
         # ============================================================
-        # 5M TREND FILTER
+        # 5M TREND + DIRECTIONAL ADX
         # ============================================================
 
         long_trend = (
             trend_5m == "UP"
             and ema55_rising
             and adx_has_strength
+            and di_bullish
         )
 
         short_trend = (
             trend_5m == "DOWN"
             and ema55_falling
             and adx_has_strength
+            and di_bearish
         )
 
         # ============================================================
@@ -184,18 +169,12 @@ class Strategy1(Strategy):
         if ema9 is None or ema21 is None or ema55 is None:
             return None
 
-        if ema9.live is None:
+        if (
+            ema9.live is None
+            or ema21.live is None
+            or ema55.live is None
+        ):
             return None
-
-        if ema21.live is None:
-            return None
-
-        if ema55.live is None:
-            return None
-
-        # ============================================================
-        # 1M VALUES
-        # ============================================================
 
         value9 = ema9.live.value
         value21 = ema21.live.value
@@ -207,12 +186,17 @@ class Strategy1(Strategy):
 
         previous9 = self._previous_closed(ema9)
         previous21 = self._previous_closed(ema21)
+        previous55 = self._previous_closed(ema55)
 
-        if previous9 is None or previous21 is None:
+        if (
+            previous9 is None
+            or previous21 is None
+            or previous55 is None
+        ):
             return None
 
         # ============================================================
-        # 1M CROSSES
+        # CROSS
         # ============================================================
 
         bullish_cross = (
@@ -229,34 +213,18 @@ class Strategy1(Strategy):
         # 1M STRUCTURE
         # ============================================================
 
-        bullish_structure = (
-            value21 > value55
-        )
-
-        bearish_structure = (
-            value21 < value55
-        )
-
-        # Full structure
-        bullish_full_structure = (
-            value9 > value21
-            and value21 > value55
-        )
-
-        bearish_full_structure = (
-            value9 < value21
-            and value21 < value55
-        )
+        bullish_structure = value21 > value55
+        bearish_structure = value21 < value55
 
         # ============================================================
-        # 1M EMA SLOPES
+        # 1M SLOPES
         # ============================================================
-
-        ema9_rising = value9 > previous9
-        ema9_falling = value9 < previous9
 
         ema21_rising = value21 > previous21
         ema21_falling = value21 < previous21
+
+        ema55_rising = value55 > previous55
+        ema55_falling = value55 < previous55
 
         # ============================================================
         # POSITION
@@ -277,40 +245,33 @@ class Strategy1(Strategy):
         if position is None:
 
             # --------------------------------------------------------
+            # ADX REVERSAL FILTER
+            # --------------------------------------------------------
+            # Un reversal del ADX significa pérdida de fuerza.
+            # No lo interpretamos como cambio de tendencia, pero sí
+            # evitamos iniciar una nueva operación en ese momento.
+
+            if adx_reversal:
+                return None
+
+            # --------------------------------------------------------
             # LONG
             # --------------------------------------------------------
 
             if long_trend:
 
-                # ADX normal:
-                # Solo necesitamos fuerza ADX + estructura + cruce.
-                if not adx_reversal:
+                long_entry = (
+                    bullish_cross
+                    and bullish_structure
+                    and ema21_rising
+                    and ema55_rising
+                )
 
-                    if (
-                        bullish_structure
-                        and bullish_cross
-                    ):
-                        return Signal(
-                            action="BUY",
-                            quantity=1
-                        )
-
-                # ADX reversal:
-                # No bloqueamos automáticamente la entrada.
-                # Exigimos confirmación adicional.
-                else:
-
-                    if (
-                        bullish_cross
-                        and bullish_full_structure
-                        and di_bullish
-                        and ema9_rising
-                        and ema21_rising
-                    ):
-                        return Signal(
-                            action="BUY",
-                            quantity=1
-                        )
+                if long_entry:
+                    return Signal(
+                        action="BUY",
+                        quantity=1
+                    )
 
             # --------------------------------------------------------
             # SHORT
@@ -318,47 +279,32 @@ class Strategy1(Strategy):
 
             if short_trend:
 
-                # ADX normal
-                if not adx_reversal:
+                short_entry = (
+                    bearish_cross
+                    and bearish_structure
+                    and ema21_falling
+                    and ema55_falling
+                )
 
-                    if (
-                        bearish_structure
-                        and bearish_cross
-                    ):
-                        return Signal(
-                            action="SELL",
-                            quantity=1
-                        )
-
-                # ADX reversal:
-                # Exigimos confirmación adicional.
-                else:
-
-                    if (
-                        bearish_cross
-                        and bearish_full_structure
-                        and di_bearish
-                        and ema9_falling
-                        and ema21_falling
-                    ):
-                        return Signal(
-                            action="SELL",
-                            quantity=1
-                        )
+                if short_entry:
+                    return Signal(
+                        action="SELL",
+                        quantity=1
+                    )
 
             return None
 
         # ============================================================
-        # LONG POSITION EXIT
+        # LONG EXIT
         # ============================================================
 
         if position.side == Side.BUY:
 
-            # 5m trend reversal
+            # Cambio de tendencia principal
             if trend_5m == "DOWN":
                 return Signal(action="EXIT")
 
-            # 1m bearish structure
+            # Pérdida de estructura 1m
             if (
                 value21 < value55
                 and value9 < value21
@@ -368,16 +314,16 @@ class Strategy1(Strategy):
             return None
 
         # ============================================================
-        # SHORT POSITION EXIT
+        # SHORT EXIT
         # ============================================================
 
         if position.side == Side.SELL:
 
-            # 5m trend reversal
+            # Cambio de tendencia principal
             if trend_5m == "UP":
                 return Signal(action="EXIT")
 
-            # 1m bullish structure
+            # Pérdida de estructura 1m
             if (
                 value21 > value55
                 and value9 > value21
