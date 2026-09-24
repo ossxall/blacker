@@ -1,38 +1,56 @@
 from core.engine_state import EngineState
+
 from strategy.base import Strategy
+
 from orders import Signal, Side
 
 
 class Strategy1(Strategy):
     """
-    Multi-Timeframe Trend Pullback Strategy.
+    Multi-Timeframe EMA 20/50 + ADX Strategy.
 
     15m:
-        Regime / macro trend filter.
+        Macro trend / regime filter.
 
     5m:
-        Trend structure + ADX confirmation.
+        Trend confirmation + ADX strength.
 
     1m:
-        Fresh EMA 9/21 cross used as the actual entry trigger.
+        Actual entry trigger.
 
-    Important:
-        The 5m does NOT need to cross at the exact same moment as
-        the 1m. The 5m establishes the setup and the 1m provides
-        the trigger.
+    Indicators used:
+        - EMA 20
+        - EMA 50
+        - ADX 14
+
+    No RSI, MACD, DI or other indicators are used.
+
+    Entry philosophy:
+        Higher timeframes define the direction.
+        Lower timeframe provides the execution trigger.
+
+    Long:
+        15m EMA20 > EMA50
+        15m ADX >= strength
+        15m ADX rising
+        5m EMA20 > EMA50
+        5m ADX >= strength
+        5m ADX rising
+        1m EMA20 crosses above EMA50
+
+    Short:
+        Opposite conditions.
 
     Exits:
-        - 5m structure failure
-        - opposite EMA 9/21 structure
-        - DI reversal
-        - ADX falling below the minimum trend threshold
-        - ADX reversal flag when supplied by the engine
+        - EMA20/EMA50 structure failure
+        - ADX falls below exit threshold
+        - ADX reversal flag when supplied by engine
     """
 
     DEFAULT_PARAMS = {
-        "adx_strength": 18.0,
+        "adx_strength": 25.0,
         "adx_overextended": 55.0,
-        "adx_exit": 15.0,
+        "adx_exit": 18.0,
     }
 
     def __init__(self, kind: str, params: dict):
@@ -57,175 +75,199 @@ class Strategy1(Strategy):
         # 15M MACRO TREND
         # ============================================================
 
-        ema21_15 = self._get_series(tf15, "EMA", "EMA 21")
-        ema55_15 = self._get_series(tf15, "EMA", "EMA 55")
+        ema20_15 = self._get_series(tf15, "EMA", "EMA 20")
+        ema50_15 = self._get_series(tf15, "EMA", "EMA 50")
         adx_15 = self._get_series(tf15, "ADX", "ADX 14")
 
-        if not all([ema21_15, ema55_15, adx_15]):
+        if not all([ema20_15, ema50_15, adx_15]):
             return None
 
         if not all([
-            ema21_15.live,
-            ema55_15.live,
+            ema20_15.live,
+            ema50_15.live,
             adx_15.live,
         ]):
             return None
 
-        previous55_15 = self._previous_closed(ema55_15)
+        previous20_15 = self._previous_closed(ema20_15)
+        previous50_15 = self._previous_closed(ema50_15)
+        previous_adx_15 = self._last_closed(adx_15)
 
-        if previous55_15 is None:
+        if (
+            previous20_15 is None
+            or previous50_15 is None
+            or previous_adx_15 is None
+        ):
             return None
 
-        value21_15 = ema21_15.live.value
-        value55_15 = ema55_15.live.value
-
+        value20_15 = ema20_15.live.value
+        value50_15 = ema50_15.live.value
         adx_live_15 = adx_15.live
 
-        plus_di_15 = getattr(adx_live_15, "plus_di", None)
-        minus_di_15 = getattr(adx_live_15, "minus_di", None)
+        # ADX rising on 15m
+        adx_rising_15 = (
+            adx_live_15.adx > previous_adx_15.adx
+        )
 
-        if plus_di_15 is None or minus_di_15 is None:
-            return None
+        # ------------------------------------------------------------
+        # Macro bullish trend
+        # ------------------------------------------------------------
 
         macro_up = (
-            value21_15 > value55_15
-            and value55_15 > previous55_15
-            and plus_di_15 > minus_di_15
+            value20_15 > value50_15
+            and value20_15 >= previous20_15
+            and value50_15 >= previous50_15
             and adx_live_15.adx >= self.adx_strength
+            and adx_rising_15
         )
+
+        # ------------------------------------------------------------
+        # Macro bearish trend
+        # ------------------------------------------------------------
 
         macro_down = (
-            value21_15 < value55_15
-            and value55_15 < previous55_15
-            and minus_di_15 > plus_di_15
+            value20_15 < value50_15
+            and value20_15 <= previous20_15
+            and value50_15 <= previous50_15
             and adx_live_15.adx >= self.adx_strength
+            and adx_rising_15
         )
 
         # ============================================================
-        # 5M TREND / SETUP
+        # 5M TREND CONFIRMATION
         # ============================================================
 
-        ema9 = self._get_series(tf5, "EMA", "EMA 9")
-        ema21 = self._get_series(tf5, "EMA", "EMA 21")
-        ema55 = self._get_series(tf5, "EMA", "EMA 55")
-        adx = self._get_series(tf5, "ADX", "ADX 14")
+        ema20_5 = self._get_series(tf5, "EMA", "EMA 20")
+        ema50_5 = self._get_series(tf5, "EMA", "EMA 50")
+        adx_5 = self._get_series(tf5, "ADX", "ADX 14")
 
-        if not all([ema9, ema21, ema55, adx]):
+        if not all([ema20_5, ema50_5, adx_5]):
             return None
 
         if not all([
-            ema9.live,
-            ema21.live,
-            ema55.live,
-            adx.live,
+            ema20_5.live,
+            ema50_5.live,
+            adx_5.live,
         ]):
             return None
 
-        previous21 = self._previous_closed(ema21)
-        previous55 = self._previous_closed(ema55)
-        previous_adx = self._last_closed(adx)
+        previous20_5 = self._previous_closed(ema20_5)
+        previous50_5 = self._previous_closed(ema50_5)
+        previous_adx_5 = self._last_closed(adx_5)
 
-        if previous21 is None or previous55 is None:
+        if (
+            previous20_5 is None
+            or previous50_5 is None
+            or previous_adx_5 is None
+        ):
             return None
 
-        value9 = ema9.live.value
-        value21 = ema21.live.value
-        value55 = ema55.live.value
-
-        adx_live = adx.live
-
-        plus_di = getattr(adx_live, "plus_di", None)
-        minus_di = getattr(adx_live, "minus_di", None)
-
-        if plus_di is None or minus_di is None:
-            return None
-
-        # ADX should preferably be rising for new entries.
-        adx_rising = (
-            previous_adx is not None
-            and adx_live.adx > previous_adx.adx
-        )
-
-        # ADX > 55 is considered too extended for a NEW entry.
-        # It does NOT force an existing trade to exit.
-        adx_entry_ok = (
-            adx_live.adx >= self.adx_strength
-            and adx_live.adx < self.adx_overextended
-        )
-
-        # Existing trend remains alive while ADX stays above exit level.
-        adx_alive = adx_live.adx >= self.adx_exit
+        value20_5 = ema20_5.live.value
+        value50_5 = ema50_5.live.value
+        adx_live_5 = adx_5.live
 
         # ------------------------------------------------------------
-        # Bullish 5m structure
+        # 5m ADX conditions
         # ------------------------------------------------------------
 
-        bullish_structure = (
-            value9 > value21
-            and value21 > value55
-            and value21 >= previous21
-            and value55 >= previous55
-            and plus_di > minus_di
+        adx_rising_5 = (
+            adx_live_5.adx > previous_adx_5.adx
+        )
+
+        adx_entry_ok_5 = (
+            adx_live_5.adx >= self.adx_strength
+            and adx_live_5.adx < self.adx_overextended
         )
 
         # ------------------------------------------------------------
-        # Bearish 5m structure
+        # 5m bullish structure
         # ------------------------------------------------------------
 
-        bearish_structure = (
-            value9 < value21
-            and value21 < value55
-            and value21 <= previous21
-            and value55 <= previous55
-            and minus_di > plus_di
+        bullish_structure_5 = (
+            value20_5 > value50_5
+            and value20_5 >= previous20_5
+            and value50_5 >= previous50_5
+        )
+
+        # ------------------------------------------------------------
+        # 5m bearish structure
+        # ------------------------------------------------------------
+
+        bearish_structure_5 = (
+            value20_5 < value50_5
+            and value20_5 <= previous20_5
+            and value50_5 <= previous50_5
         )
 
         # ============================================================
         # 1M ENTRY TRIGGER
         # ============================================================
 
-        ema9_1 = self._get_series(tf1, "EMA", "EMA 9")
-        ema21_1 = self._get_series(tf1, "EMA", "EMA 21")
+        ema20_1 = self._get_series(tf1, "EMA", "EMA 20")
+        ema50_1 = self._get_series(tf1, "EMA", "EMA 50")
+        adx_1 = self._get_series(tf1, "ADX", "ADX 14")
 
-        if not all([ema9_1, ema21_1]):
+        if not all([ema20_1, ema50_1, adx_1]):
             return None
 
         if not all([
-            ema9_1.live,
-            ema21_1.live,
+            ema20_1.live,
+            ema50_1.live,
+            adx_1.live,
         ]):
             return None
 
-        previous9_1 = self._previous_closed(ema9_1)
-        previous21_1 = self._previous_closed(ema21_1)
+        previous20_1 = self._previous_closed(ema20_1)
+        previous50_1 = self._previous_closed(ema50_1)
+        previous_adx_1 = self._last_closed(adx_1)
 
-        if previous9_1 is None or previous21_1 is None:
+        if (
+            previous20_1 is None
+            or previous50_1 is None
+            or previous_adx_1 is None
+        ):
             return None
 
-        value9_1 = ema9_1.live.value
-        value21_1 = ema21_1.live.value
+        value20_1 = ema20_1.live.value
+        value50_1 = ema50_1.live.value
+        adx_live_1 = adx_1.live
 
-        # Fresh 1m bullish cross.
+        # ============================================================
+        # 1M ADX FILTER
+        # ============================================================
+
+        adx_rising_1 = (
+            adx_live_1.adx > previous_adx_1.adx
+        )
+
+        adx_entry_ok_1 = (
+            adx_live_1.adx >= self.adx_strength
+            and adx_live_1.adx < self.adx_overextended
+        )
+
+        # ============================================================
+        # 1M EMA CROSS
+        # ============================================================
+
         bullish_cross_1m = (
-            previous9_1 <= previous21_1
-            and value9_1 > value21_1
+            previous20_1 <= previous50_1
+            and value20_1 > value50_1
         )
 
-        # Fresh 1m bearish cross.
         bearish_cross_1m = (
-            previous9_1 >= previous21_1
-            and value9_1 < value21_1
+            previous20_1 >= previous50_1
+            and value20_1 < value50_1
         )
 
-        # Require the slow EMA to point in the same direction.
+        # Require EMA50 to point in the same direction.
         bullish_trigger = (
             bullish_cross_1m
-            and value21_1 >= previous21_1
+            and value50_1 >= previous50_1
         )
 
         bearish_trigger = (
             bearish_cross_1m
-            and value21_1 <= previous21_1
+            and value50_1 <= previous50_1
         )
 
         # ============================================================
@@ -233,7 +275,12 @@ class Strategy1(Strategy):
         # ============================================================
 
         portfolio = state.portfolio
-        position = portfolio.position if portfolio is not None else None
+
+        position = (
+            portfolio.position
+            if portfolio is not None
+            else None
+        )
 
         # ============================================================
         # ENTRIES
@@ -247,9 +294,11 @@ class Strategy1(Strategy):
 
             if (
                 macro_up
-                and bullish_structure
-                and adx_entry_ok
-                and adx_rising
+                and bullish_structure_5
+                and adx_entry_ok_5
+                and adx_rising_5
+                and adx_entry_ok_1
+                and adx_rising_1
                 and bullish_trigger
             ):
                 return Signal(
@@ -263,9 +312,11 @@ class Strategy1(Strategy):
 
             if (
                 macro_down
-                and bearish_structure
-                and adx_entry_ok
-                and adx_rising
+                and bearish_structure_5
+                and adx_entry_ok_5
+                and adx_rising_5
+                and adx_entry_ok_1
+                and adx_rising_1
                 and bearish_trigger
             ):
                 return Signal(
@@ -276,11 +327,15 @@ class Strategy1(Strategy):
             return None
 
         # ============================================================
-        # EXITS
+        # EXIT CONDITIONS
         # ============================================================
 
         adx_reversal = bool(
-            getattr(adx_live, "is_reversal", False)
+            getattr(adx_live_5, "is_reversal", False)
+        )
+
+        adx_alive = (
+            adx_live_5.adx >= self.adx_exit
         )
 
         # ============================================================
@@ -292,11 +347,11 @@ class Strategy1(Strategy):
             if (
                 adx_reversal
                 or not adx_alive
-                or value21 < value55
-                or value9 < value21
-                or minus_di > plus_di
+                or value20_5 < value50_5
             ):
-                return Signal(action="EXIT")
+                return Signal(
+                    action="EXIT"
+                )
 
             return None
 
@@ -309,11 +364,11 @@ class Strategy1(Strategy):
             if (
                 adx_reversal
                 or not adx_alive
-                or value21 > value55
-                or value9 > value21
-                or plus_di > minus_di
+                or value20_5 > value50_5
             ):
-                return Signal(action="EXIT")
+                return Signal(
+                    action="EXIT"
+                )
 
             return None
 
@@ -330,8 +385,10 @@ class Strategy1(Strategy):
         for key, value in (params or {}).items():
 
             if isinstance(value, dict):
+
                 if "value" in value:
                     value = value["value"]
+
                 else:
                     continue
 
@@ -361,5 +418,6 @@ class Strategy1(Strategy):
     def _get_series(tf, kind, label):
         try:
             return tf.get_series(kind, label)
+
         except KeyError:
             return None
