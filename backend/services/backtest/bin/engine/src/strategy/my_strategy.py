@@ -107,7 +107,7 @@ class Strategy1(Strategy):
         bearish_cross_5m = previous9 >= previous21 and value9 < value21
 
         # ============================================================
-        # 1M ENTRY TRIGGER
+        # 1M ENTRY CONFIRMATION (alignment, not an event)
         # ============================================================
         ema9_1 = self._get_series(tf1, "EMA", "EMA 9")
         ema21_1 = self._get_series(tf1, "EMA", "EMA 21")
@@ -117,13 +117,12 @@ class Strategy1(Strategy):
 
         value9_1 = ema9_1.live.value
         value21_1 = ema21_1.live.value
-        previous9_1 = self._previous_closed(ema9_1)
         previous21_1 = self._previous_closed(ema21_1)
-        if previous9_1 is None or previous21_1 is None:
+        if previous21_1 is None:
             return None
 
-        bullish_trigger_1m = previous9_1 <= previous21_1 and value9_1 > value21_1
-        bearish_trigger_1m = previous9_1 >= previous21_1 and value9_1 < value21_1
+        bullish_aligned_1m = value9_1 > value21_1 and value21_1 > previous21_1
+        bearish_aligned_1m = value9_1 < value21_1 and value21_1 < previous21_1
 
         # ============================================================
         # POSITION & SIGNALS
@@ -141,7 +140,7 @@ class Strategy1(Strategy):
                 and value21 > value55
                 and adx_has_strength
                 and plus_di > minus_di
-                and bullish_trigger_1m
+                and bullish_aligned_1m
             ):
                 return Signal(action="BUY", quantity=1)
 
@@ -151,7 +150,7 @@ class Strategy1(Strategy):
                 and value21 < value55
                 and adx_has_strength
                 and minus_di > plus_di
-                and bearish_trigger_1m
+                and bearish_aligned_1m
             ):
                 return Signal(action="SELL", quantity=1)
 
