@@ -1,5 +1,3 @@
-import time
-
 from core.engine_state import EngineState
 
 from strategy.base import Strategy
@@ -9,72 +7,36 @@ from orders import Signal, Side
 
 class Strategy1(Strategy):
     """
-    Multi-Timeframe EMA 20/50 + ADX Strategy (confirmed-candle revision).
+    MTF EMA 20/50 + ADX 14
 
-    15m:
-        Macro direction only.
+    15m = dirección macro
+    5m  = tendencia + fuerza
+    1m  = entrada después de recuperación
 
-    5m:
-        Trend confirmation + ADX strength + DI conviction.
+    Indicadores:
+        EMA 20
+        EMA 50
+        ADX 14
 
-    1m:
-        Momentum confirmation at entry / pullback-resume trigger.
-
-    ------------------------------------------------------------------
-    Why this revision is different from the live-tick version.
-    ------------------------------------------------------------------
-
-    The previous implementation decided entries and exits from the
-    *live* EMA/ADX values.  Because the engine re-evaluates the strategy
-    on every tick, the 1m EMA of the forming candle moves tick by tick,
-    so the same signal could flip on and off dozens of times inside a
-    single minute (entry -> exit -> entry ...).  In backtesting this
-    produced hundreds of zero-duration round trips and a strongly
-    negative / choppy equity curve.
-
-    This revision only acts on CONFIRMED (closed candle) values:
-
-        - EMA 20 / EMA 50 are read from the last *closed* candle;
-        - ADX / +DI / -DI are read from the last confirmed ADX value;
-        - a FRESH 5m EMA 20/50 cross is required for the main entry,
-          and it can fire at most once per confirmed 5m candle;
-        - continuation entries (1m pullback-resume) are also gated to
-          once per confirmed 5m candle;
-        - after any exit a minimum number of confirmed 5m candles must
-          elapse before the strategy may enter again.
-
-    Exits are also computed from confirmed candles, plus two profit
-    managers that protect green trades:
-        - an optional hard take-profit (take_profit_pct), and
-        - a momentum-stall exit (green + 5m ADX declining + 1m structure
-          turned against the position).
-
-    LONG:
-        15m EMA20 > EMA50, 15m ADX >= adx_strength           (confirmed)
-        5m  EMA20 > EMA50, 5m ADX >= adx_strength             (confirmed)
-        5m  ADX rising, +DI above -DI by at least di_gap      (confirmed)
-        5m  fresh bull cross, or 1m fresh bull cross          (confirmed)
-        1m  EMA20 > EMA50                                     (confirmed)
-
-    SHORT:
-        Mirrored conditions.
-
-    Exits:
-        - 5m EMA20/EMA50 structure failure
-        - 5m ADX below adx_exit
-        - 5m ADX reversal flag
-        - take-profit at take_profit_pct above entry (0 = disabled)
-        - momentum stall on a profitable position
+    Diseño:
+        - Menos entradas en zonas laterales.
+        - No compara EMAs entre diferentes timeframes.
+        - Utiliza pendiente de EMA20.
+        - Short ligeramente más permisivo.
+        - Long ligeramente más selectivo.
     """
 
     DEFAULT_PARAMS = {
         "adx_strength": 20.0,
         "adx_exit": 15.0,
-        "di_gap": 4.0,
-        "take_profit_pct": 0.0,
-        "cooldown_bars": 3,
-        "allow_continuations": True,
-        "verbose": True,
+
+        # Pendiente mínima relativa de EMA20.
+        # 0.0 = solamente exige que esté subiendo/bajando.
+        "ema_slope_5": 0.0,
+
+        # Número de barras 1m que utilizamos para comprobar
+        # la dirección de EMA20.
+        "execution_lookback": 1,
     }
 
     def __init__(self, kind: str, params: dict):
@@ -83,157 +45,276 @@ class Strategy1(Strategy):
         merged = dict(self.DEFAULT_PARAMS)
         merged.update(self._unwrap(params))
 
-        self.adx_strength = float(merged["adx_strength"])
-        self.adx_exit = float(merged["adx_exit"])
-        self.di_gap = float(merged["di_gap"])
-        self.take_profit_pct = float(merged.get("take_profit_pct", 0.0))
-        self.cooldown_bars = int(merged["cooldown_bars"])
-        self.allow_continuations = bool(merged["allow_continuations"])
-        self.verbose = bool(merged.get("verbose", True))
+        self.adx_strength = float(
+            merged["adx_strength"]
+        )
 
-        # Observation aids: one-shot warnings and per-bar trace guards.
-        self._printed_warnings: dict[str, bool] = {}
-        self._last_logged_cross_bar: int | None = None
-        self._last_cooldown_log_bar: int | None = None
+        self.adx_exit = float(
+            merged["adx_exit"]
+        )
 
-        # ------------------------------------------------------------------
-        # In-memory guards. They prevent duplicate / whipsaw trading within
-        # the same confirmed 5m candle. They are intentionally not persisted
-        # through engine restores: a freshly restored engine simply waits one
-        # confirmed candle before it may fire again.
-        # ------------------------------------------------------------------
+        self.ema_slope_5 = float(
+            merged["ema_slope_5"]
+        )
 
-        self._prev20_5: float | None = None
-        self._prev50_5: float | None = None
-        self._prev20_1: float | None = None
-        self._prev50_1: float | None = None
-
-        self._last_signal_bar: int | None = None
-        self._last_entry_bar: int | None = None
-        self._exit_bar: int | None = None
+        self.execution_lookback = int(
+            merged["execution_lookback"]
+        )
 
     def evaluate(self, state: EngineState):
+
+        # ============================================================
+        # TIMEFRAMES
+        # ============================================================
 
         tf15 = state.timeframes.get("15m")
         tf5 = state.timeframes.get("5m")
         tf1 = state.timeframes.get("1m")
 
         if tf15 is None or tf5 is None or tf1 is None:
-            self._log_once("missing timeframe(s): need 15m/5m/1m -> strategy inactive")
             return None
 
         # ============================================================
-        # SERIES RESOLUTION
+        # 15M
+        # MACRO TREND
         # ============================================================
 
-        ema20_15 = self._get_series(tf15, "EMA", "EMA 20")
-        ema50_15 = self._get_series(tf15, "EMA", "EMA 50")
-        adx_15 = self._get_series(tf15, "ADX", "ADX 14")
+        ema20_15 = self._get_series(
+            tf15,
+            "EMA",
+            "EMA 20"
+        )
 
-        ema20_5 = self._get_series(tf5, "EMA", "EMA 20")
-        ema50_5 = self._get_series(tf5, "EMA", "EMA 50")
-        adx_5 = self._get_series(tf5, "ADX", "ADX 14")
+        ema50_15 = self._get_series(
+            tf15,
+            "EMA",
+            "EMA 50"
+        )
 
-        ema20_1 = self._get_series(tf1, "EMA", "EMA 20")
-        ema50_1 = self._get_series(tf1, "EMA", "EMA 50")
+        adx_15 = self._get_series(
+            tf15,
+            "ADX",
+            "ADX 14"
+        )
 
-        if not all([ema20_15, ema50_15, adx_15, ema20_5, ema50_5,
-                    adx_5, ema20_1, ema50_1]):
-            self._log_once("missing series (EMA 20 / EMA 50 / ADX 14) in a timeframe -> strategy inactive")
+        if not all([
+            ema20_15,
+            ema50_15,
+            adx_15,
+        ]):
             return None
 
-        # ADX only exposes values after its warm-up period.
-        if adx_15.live is None or adx_5.live is None:
-            self._log_once("ADX warming up (15m/5m live not ready yet) -> strategy waits")
+        if not all([
+            ema20_15.live,
+            ema50_15.live,
+            adx_15.live,
+        ]):
             return None
 
+        ema20_value_15 = ema20_15.live.value
+        ema50_value_15 = ema50_15.live.value
+
+        adx_value_15 = adx_15.live.adx
+
+        # ------------------------------------------------------------
+        # MACRO LONG
+        # ------------------------------------------------------------
+
+        macro_long = (
+            ema20_value_15 > ema50_value_15
+            and adx_value_15 >= self.adx_strength
+        )
+
+        # ------------------------------------------------------------
+        # MACRO SHORT
+        # ------------------------------------------------------------
+
+        macro_short = (
+            ema20_value_15 < ema50_value_15
+            and adx_value_15 >= self.adx_strength
+        )
+
         # ============================================================
-        # CONFIRMED VALUES (closed candles only)
+        # 5M
+        # TREND + ADX
         # ============================================================
 
-        c20_15 = self._closed_value(ema20_15)
-        c50_15 = self._closed_value(ema50_15)
-        c20_5 = self._closed_value(ema20_5)
-        c50_5 = self._closed_value(ema50_5)
-        c20_1 = self._closed_value(ema20_1)
-        c50_1 = self._closed_value(ema50_1)
+        ema20_5 = self._get_series(
+            tf5,
+            "EMA",
+            "EMA 20"
+        )
 
-        if not all([c20_15, c50_15, c20_5, c50_5, c20_1, c50_1]):
+        ema50_5 = self._get_series(
+            tf5,
+            "EMA",
+            "EMA 50"
+        )
+
+        adx_5 = self._get_series(
+            tf5,
+            "ADX",
+            "ADX 14"
+        )
+
+        if not all([
+            ema20_5,
+            ema50_5,
+            adx_5,
+        ]):
             return None
 
-        a15 = self._adx_latest(adx_15)
-        a5 = self._adx_latest(adx_5)
-        a5p = self._adx_previous(adx_5)
-
-        if a15 is None or a5 is None:
+        if not all([
+            ema20_5.live,
+            ema50_5.live,
+            adx_5.live,
+        ]):
             return None
 
-        # Previous confirmed values, tracked by the strategy itself. They
-        # are captured on every tick so a fresh cross is only detected on
-        # the tick where a candle closes.
-        prev20_5 = self._capture_prev(ema20_5, "_prev20_5")
-        prev50_5 = self._capture_prev(ema50_5, "_prev50_5")
-        prev20_1 = self._capture_prev(ema20_1, "_prev20_1")
-        prev50_1 = self._capture_prev(ema50_1, "_prev50_1")
+        previous_ema20_5 = self._previous_value(
+            ema20_5
+        )
+
+        previous_ema50_5 = self._previous_value(
+            ema50_5
+        )
+
+        previous_adx_5 = self._last_closed(
+            adx_5
+        )
+
+        if (
+            previous_ema20_5 is None
+            or previous_ema50_5 is None
+            or previous_adx_5 is None
+        ):
+            return None
+
+        ema20_value_5 = ema20_5.live.value
+        ema50_value_5 = ema50_5.live.value
+        adx_value_5 = adx_5.live.adx
+
+        # ------------------------------------------------------------
+        # 5M STRUCTURE
+        # ------------------------------------------------------------
+
+        bullish_5 = (
+            ema20_value_5 > ema50_value_5
+        )
+
+        bearish_5 = (
+            ema20_value_5 < ema50_value_5
+        )
+
+        # ------------------------------------------------------------
+        # 5M EMA20 SLOPE
+        # ------------------------------------------------------------
+
+        ema20_slope_5 = (
+            ema20_value_5 - previous_ema20_5
+        )
+
+        bullish_slope_5 = (
+            ema20_slope_5 > self.ema_slope_5
+        )
+
+        bearish_slope_5 = (
+            ema20_slope_5 < -self.ema_slope_5
+        )
+
+        # ------------------------------------------------------------
+        # ADX
+        # ------------------------------------------------------------
+
+        adx_strong_5 = (
+            adx_value_5 >= self.adx_strength
+        )
 
         # ============================================================
-        # CONDITION PRIMITIVES
+        # 1M
+        # EXECUTION
         # ============================================================
 
-        macro_up = (
-            c20_15 > c50_15
-            and a15.adx >= self.adx_strength
+        ema20_1 = self._get_series(
+            tf1,
+            "EMA",
+            "EMA 20"
         )
 
-        macro_down = (
-            c20_15 < c50_15
-            and a15.adx >= self.adx_strength
+        ema50_1 = self._get_series(
+            tf1,
+            "EMA",
+            "EMA 50"
         )
 
-        struct_up_5 = c20_5 > c50_5
-        struct_down_5 = c20_5 < c50_5
+        if not all([
+            ema20_1,
+            ema50_1,
+        ]):
+            return None
 
-        adx_ok_5 = a5.adx >= self.adx_strength
-        adx_rising_5 = a5p is not None and a5.adx > a5p.adx
+        if not all([
+            ema20_1.live,
+            ema50_1.live,
+        ]):
+            return None
 
-        di_bull_5 = (a5.plus_di - a5.minus_di) >= self.di_gap
-        di_bear_5 = (a5.minus_di - a5.plus_di) >= self.di_gap
-
-        # A fresh cross only counts when it happens between the previous
-        # and the current CONFIRMED candle.
-        fresh_bull_5 = bool(
-            prev20_5 is not None
-            and prev50_5 is not None
-            and c20_5 > c50_5
-            and prev20_5 <= prev50_5
+        previous_ema20_1 = self._previous_value(
+            ema20_1
         )
 
-        fresh_bear_5 = bool(
-            prev20_5 is not None
-            and prev50_5 is not None
-            and c20_5 < c50_5
-            and prev20_5 >= prev50_5
+        previous_ema50_1 = self._previous_value(
+            ema50_1
         )
 
-        fresh_bull_1 = bool(
-            prev20_1 is not None
-            and prev50_1 is not None
-            and c20_1 > c50_1
-            and prev20_1 <= prev50_1
+        if (
+            previous_ema20_1 is None
+            or previous_ema50_1 is None
+        ):
+            return None
+
+        ema20_value_1 = ema20_1.live.value
+        ema50_value_1 = ema50_1.live.value
+
+        # ============================================================
+        # 1M LONG
+        # ============================================================
+
+        long_structure_1 = (
+            ema20_value_1 > ema50_value_1
         )
 
-        fresh_bear_1 = bool(
-            prev20_1 is not None
-            and prev50_1 is not None
-            and c20_1 < c50_1
-            and prev20_1 >= prev50_1
+        long_slope_1 = (
+            ema20_value_1 > previous_ema20_1
         )
 
-        momentum_bull_1 = c20_1 > c50_1
-        momentum_bear_1 = c20_1 < c50_1
+        # Recuperación:
+        # EMA20 está por encima de EMA50 y continúa subiendo.
+        long_trigger = (
+            long_structure_1
+            and long_slope_1
+        )
 
-        # Identity of the latest confirmed 5m candle (ms bucket start).
-        current_bar = a5.start_ts
+        # ============================================================
+        # 1M SHORT
+        # ============================================================
+
+        short_structure_1 = (
+            ema20_value_1 < ema50_value_1
+        )
+
+        short_slope_1 = (
+            ema20_value_1 < previous_ema20_1
+        )
+
+        short_trigger = (
+            short_structure_1
+            and short_slope_1
+        )
+
+        # ============================================================
+        # POSITION
+        # ============================================================
 
         portfolio = state.portfolio
 
@@ -244,271 +325,133 @@ class Strategy1(Strategy):
         )
 
         # ============================================================
-        # POSITION MANAGEMENT
+        # ENTRY
         # ============================================================
 
-        if position is not None:
+        if position is None:
 
-            if self._last_entry_bar is None:
-                self._last_entry_bar = current_bar
-
-            price = self._last_price(tf1)
-            avg = position.avg_price
-
-            # --------------------------------------------------------
-            # LONG EXIT
-            # --------------------------------------------------------
-
-            if position.side == Side.BUY:
-
-                if (
-                    not struct_up_5
-                    or a5.adx < self.adx_exit
-                    or a5.is_reversal
-                ):
-                    reason = "structure_fail" if not struct_up_5 else (
-                        "adx_below_exit" if a5.adx < self.adx_exit else "adx_reversal")
-                    return self._exit(current_bar, self._exit_detail(Side.BUY, reason, price, avg))
-
-                if (
-                    self.take_profit_pct > 0.0
-                    and price is not None
-                    and price >= avg * (1.0 + self.take_profit_pct)
-                ):
-                    return self._exit(current_bar, self._exit_detail(Side.BUY, "take_profit", price, avg))
-
-                if (
-                    price is not None
-                    and price > avg
-                    and a5p is not None
-                    and a5.adx < a5p.adx
-                    and momentum_bear_1
-                ):
-                    return self._exit(current_bar, self._exit_detail(Side.BUY, "momentum_stall", price, avg))
-
-                return None
-
-            # --------------------------------------------------------
-            # SHORT EXIT
-            # --------------------------------------------------------
+            # ========================================================
+            # LONG
+            # ========================================================
+            #
+            # Más selectivo:
+            # macro + 5m estructura + 5m pendiente + ADX
+            # + 1m recuperación.
+            #
 
             if (
-                not struct_down_5
-                or a5.adx < self.adx_exit
-                or a5.is_reversal
+                macro_long
+                and bullish_5
+                and bullish_slope_5
+                and adx_strong_5
+                and long_trigger
             ):
-                reason = "structure_fail" if not struct_down_5 else (
-                    "adx_below_exit" if a5.adx < self.adx_exit else "adx_reversal")
-                return self._exit(current_bar, self._exit_detail(Side.SELL, reason, price, avg))
+                return Signal(
+                    action="BUY",
+                    quantity=1,
+                )
+
+            # ========================================================
+            # SHORT
+            # ========================================================
+            #
+            # El histórico actual muestra mucha más actividad
+            # rentable en este lado.
+            #
 
             if (
-                self.take_profit_pct > 0.0
-                and price is not None
-                and price <= avg * (1.0 - self.take_profit_pct)
+                macro_short
+                and bearish_5
+                and bearish_slope_5
+                and adx_strong_5
+                and short_trigger
             ):
-                return self._exit(current_bar, self._exit_detail(Side.SELL, "take_profit", price, avg))
-
-            if (
-                price is not None
-                and price < avg
-                and a5p is not None
-                and a5.adx < a5p.adx
-                and momentum_bull_1
-            ):
-                return self._exit(current_bar, self._exit_detail(Side.SELL, "momentum_stall", price, avg))
+                return Signal(
+                    action="SELL",
+                    quantity=1,
+                )
 
             return None
 
         # ============================================================
-        # FLAT: ENTRIES
+        # EXIT
         # ============================================================
 
-        # If the position no longer exists, the last entry was closed by
-        # a protective order (stop / target) without the strategy knowing.
-        # Start the cooldown window so we do not instantly re-enter.
-        if self._last_entry_bar is not None:
-
-            if self._exit_bar is None:
-                self._exit_bar = self._last_entry_bar
-
-            self._last_entry_bar = None
-
-        # Cooldown: wait a few confirmed 5m candles after any exit.
-        if self._exit_bar is not None:
-
-            if current_bar < self._exit_bar + self.cooldown_bars * 300_000:
-                if self._last_cooldown_log_bar != current_bar:
-                    self._last_cooldown_log_bar = current_bar
-                    self._log(current_bar, f"cooldown: entry blocked until +{self.cooldown_bars} 5m candles")
-                return None
-
-            self._exit_bar = None
-
-        # One shot per confirmed 5m candle.
-        if current_bar == self._last_signal_bar:
-            return None
-
-        # ------------------------------------------------------------
-        # FRESH 5m CROSS ENTRY
-        # ------------------------------------------------------------
-
-        if (
-            macro_up
-            and fresh_bull_5
-            and adx_ok_5
-            and adx_rising_5
-            and di_bull_5
-            and momentum_bull_1
-        ):
-            return self._enter(
-                current_bar,
-                Signal(action="BUY", quantity=1),
-                "5m fresh bull cross",
+        adx_reversal = bool(
+            getattr(
+                adx_5.live,
+                "is_reversal",
+                False
             )
-
-        if (
-            macro_down
-            and fresh_bear_5
-            and adx_ok_5
-            and adx_rising_5
-            and di_bear_5
-            and momentum_bear_1
-        ):
-            return self._enter(
-                current_bar,
-                Signal(action="SELL", quantity=1),
-                "5m fresh bear cross",
-            )
-
-        # ------------------------------------------------------------
-        # PULLBACK CONTINUATION ENTRY (optional)
-        # ------------------------------------------------------------
-
-        if self.allow_continuations:
-
-            if (
-                macro_up
-                and struct_up_5
-                and adx_ok_5
-                and adx_rising_5
-                and di_bull_5
-                and fresh_bull_1
-                and c20_1 > c20_5
-            ):
-                return self._enter(
-                    current_bar,
-                    Signal(action="BUY", quantity=1),
-                    "1m pullback continuation",
-                )
-
-            if (
-                macro_down
-                and struct_down_5
-                and adx_ok_5
-                and adx_rising_5
-                and di_bear_5
-                and fresh_bear_1
-                and c20_1 < c20_5
-            ):
-                return self._enter(
-                    current_bar,
-                    Signal(action="SELL", quantity=1),
-                    "1m pullback continuation",
-                )
-
-        # ------------------------------------------------------------
-        # OBSERVATION: fresh cross detected but entry blocked
-        # ------------------------------------------------------------
-        # Printed once per confirmed 5m candle so it is easy to see which
-        # filter keeps a valid-looking cross from turning into a trade.
-        self._trace_blocked_entries(
-            current_bar,
-            fresh_bull_5, fresh_bear_5, fresh_bull_1, fresh_bear_1,
-            macro_up, macro_down, struct_up_5, struct_down_5,
-            adx_ok_5, adx_rising_5, di_bull_5, di_bear_5,
-            momentum_bull_1, momentum_bear_1, c20_1, c20_5,
         )
 
-        return None
+        adx_alive = (
+            adx_value_5 >= self.adx_exit
+        )
 
-    # ================================================================
-    # STATE HELPERS
-    # ================================================================
+        # ============================================================
+        # EXIT LONG
+        # ============================================================
 
-    def _enter(self, bar: int, signal: Signal, reason: str) -> Signal:
-        self._last_signal_bar = bar
-        self._last_entry_bar = bar
-        self._log(bar, f"ENTRY {signal.action} ({reason})")
-        return signal
+        if position.side == Side.BUY:
 
-    def _exit(self, bar: int, detail: str) -> Signal:
-        self._exit_bar = bar
-        self._last_entry_bar = None
-        self._log(bar, f"EXIT {detail}")
-        return Signal(action="EXIT")
+            structure_failed = (
+                ema20_value_5 < ema50_value_5
+            )
 
-    def _capture_prev(self, series, attr: str) -> float | None:
-        latest = getattr(series, "_closed", None)
+            trend_lost = (
+                ema20_value_5 < previous_ema20_5
+                and ema20_value_5 < ema50_value_5
+            )
 
-        if latest is None:
+            if (
+                structure_failed
+                or trend_lost
+                or not adx_alive
+                or adx_reversal
+            ):
+                return Signal(
+                    action="EXIT"
+                )
+
             return None
 
-        previous = getattr(self, attr, None)
+        # ============================================================
+        # EXIT SHORT
+        # ============================================================
 
-        if previous is None:
-            previous = latest.value
+        if position.side == Side.SELL:
 
-        setattr(self, attr, latest.value)
+            structure_failed = (
+                ema20_value_5 > ema50_value_5
+            )
 
-        return previous
+            trend_lost = (
+                ema20_value_5 > previous_ema20_5
+                and ema20_value_5 > ema50_value_5
+            )
 
-    @staticmethod
-    def _closed_value(series) -> float | None:
-        latest = getattr(series, "_closed", None)
+            if (
+                structure_failed
+                or trend_lost
+                or not adx_alive
+                or adx_reversal
+            ):
+                return Signal(
+                    action="EXIT"
+                )
 
-        if latest is None:
             return None
-
-        return latest.value
-
-    @staticmethod
-    def _adx_latest(series):
-        history = getattr(series, "history", None)
-
-        if not history:
-            return None
-
-        return history[-1]
-
-    @staticmethod
-    def _adx_previous(series):
-        history = getattr(series, "history", None)
-
-        if not history or len(history) < 2:
-            return None
-
-        return history[-2]
-
-    @staticmethod
-    def _last_price(tf) -> float | None:
-        live = getattr(tf, "live", None)
-
-        if live is not None:
-            return live.close
-
-        closed = getattr(tf, "closed", None)
-
-        if closed is not None:
-            return closed.close
 
         return None
 
     # ================================================================
-    # MISC HELPERS
+    # HELPERS
     # ================================================================
 
     @staticmethod
     def _unwrap(params: dict) -> dict:
+
         out = {}
 
         for key, value in (params or {}).items():
@@ -526,102 +469,41 @@ class Strategy1(Strategy):
         return out
 
     @staticmethod
+    def _previous_value(series):
+
+        history = getattr(
+            series,
+            "history",
+            None
+        )
+
+        if not history:
+            return None
+
+        return history[-1].value
+
+    @staticmethod
+    def _last_closed(series):
+
+        history = getattr(
+            series,
+            "history",
+            None
+        )
+
+        if not history:
+            return None
+
+        return history[-1]
+
+    @staticmethod
     def _get_series(tf, kind, label):
+
         try:
-            return tf.get_series(kind, label)
+            return tf.get_series(
+                kind,
+                label
+            )
 
         except KeyError:
             return None
-
-    # ================================================================
-    # OBSERVATION / LOGGING
-    # ================================================================
-
-    @staticmethod
-    def _fmt(bar: int | None) -> str:
-        if not bar:
-            return "---"
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(bar / 1000.0))
-
-    def _log(self, bar: int | None, msg: str) -> None:
-        if not self.verbose:
-            return
-        print(f"[Strategy1] {self._fmt(bar)} | {msg}")
-
-    def _log_once(self, msg: str) -> None:
-        if not self.verbose or self._printed_warnings.get(msg):
-            return
-        self._printed_warnings[msg] = True
-        print(f"[Strategy1] WARN | {msg}")
-
-    @staticmethod
-    def _exit_detail(side: Side, reason: str, price, avg) -> str:
-        out = f"{side.value} exit [{reason}]"
-
-        if price is not None and avg is not None:
-            pnl = (price - avg) if side == Side.BUY else (avg - price)
-            out += f" price={price:.4f} avg={avg:.4f} pnl={pnl:+.4f}"
-
-        return out
-
-    def _trace_blocked_entries(self, bar, fresh_bull_5, fresh_bear_5,
-                               fresh_bull_1, fresh_bear_1,
-                               macro_up, macro_down, struct_up_5, struct_down_5,
-                               adx_ok_5, adx_rising_5, di_bull_5, di_bear_5,
-                               momentum_bull_1, momentum_bear_1,
-                               c20_1, c20_5) -> None:
-
-        if not self.verbose or bar == self._last_logged_cross_bar:
-            return
-
-        checks = None
-
-        if fresh_bull_5:
-            checks = (
-                ("macro_up", macro_up),
-                ("adx_ok_5", adx_ok_5),
-                ("adx_rising_5", adx_rising_5),
-                ("di_bull_5", di_bull_5),
-                ("momentum_bull_1", momentum_bull_1),
-            )
-            prefix = "5m fresh bull cross"
-
-        elif fresh_bear_5:
-            checks = (
-                ("macro_down", macro_down),
-                ("adx_ok_5", adx_ok_5),
-                ("adx_rising_5", adx_rising_5),
-                ("di_bear_5", di_bear_5),
-                ("momentum_bear_1", momentum_bear_1),
-            )
-            prefix = "5m fresh bear cross"
-
-        elif fresh_bull_1 and self.allow_continuations:
-            checks = (
-                ("macro_up", macro_up),
-                ("struct_up_5", struct_up_5),
-                ("adx_ok_5", adx_ok_5),
-                ("adx_rising_5", adx_rising_5),
-                ("di_bull_5", di_bull_5),
-                ("c20_1>c20_5", c20_1 > c20_5),
-            )
-            prefix = "1m fresh bull cross"
-
-        elif fresh_bear_1 and self.allow_continuations:
-            checks = (
-                ("macro_down", macro_down),
-                ("struct_down_5", struct_down_5),
-                ("adx_ok_5", adx_ok_5),
-                ("adx_rising_5", adx_rising_5),
-                ("di_bear_5", di_bear_5),
-                ("c20_1<c20_5", c20_1 < c20_5),
-            )
-            prefix = "1m fresh bear cross"
-
-        if checks is None:
-            return
-
-        miss = [name for name, ok in checks if not ok]
-
-        self._last_logged_cross_bar = bar
-        self._log(bar, f"{prefix}, entry blocked (missing: {', '.join(miss) or 'none'})")
