@@ -1,3 +1,5 @@
+import time
+
 from core.engine_state import EngineState
 
 from strategy.base import Strategy
@@ -72,6 +74,7 @@ class Strategy1(Strategy):
         "take_profit_pct": 0.0,
         "cooldown_bars": 3,
         "allow_continuations": True,
+        "verbose": True,
     }
 
     def __init__(self, kind: str, params: dict):
@@ -86,6 +89,12 @@ class Strategy1(Strategy):
         self.take_profit_pct = float(merged.get("take_profit_pct", 0.0))
         self.cooldown_bars = int(merged["cooldown_bars"])
         self.allow_continuations = bool(merged["allow_continuations"])
+        self.verbose = bool(merged.get("verbose", True))
+
+        # Observation aids: one-shot warnings and per-bar trace guards.
+        self._printed_warnings: dict[str, bool] = {}
+        self._last_logged_cross_bar: int | None = None
+        self._last_cooldown_log_bar: int | None = None
 
         # ------------------------------------------------------------------
         # In-memory guards. They prevent duplicate / whipsaw trading within
@@ -110,6 +119,7 @@ class Strategy1(Strategy):
         tf1 = state.timeframes.get("1m")
 
         if tf15 is None or tf5 is None or tf1 is None:
+            self._log_once("missing timeframe(s): need 15m/5m/1m -> strategy inactive")
             return None
 
         # ============================================================
@@ -129,10 +139,12 @@ class Strategy1(Strategy):
 
         if not all([ema20_15, ema50_15, adx_15, ema20_5, ema50_5,
                     adx_5, ema20_1, ema50_1]):
+            self._log_once("missing series (EMA 20 / EMA 50 / ADX 14) in a timeframe -> strategy inactive")
             return None
 
         # ADX only exposes values after its warm-up period.
         if adx_15.live is None or adx_5.live is None:
+            self._log_once("ADX warming up (15m/5m live not ready yet) -> strategy waits")
             return None
 
         # ============================================================
@@ -254,14 +266,16 @@ class Strategy1(Strategy):
                     or a5.adx < self.adx_exit
                     or a5.is_reversal
                 ):
-                    return self._exit(current_bar)
+                    reason = "structure_fail" if not struct_up_5 else (
+                        "adx_below_exit" if a5.adx < self.adx_exit else "adx_reversal")
+                    return self._exit(current_bar, self._exit_detail(Side.BUY, reason, price, avg))
 
                 if (
                     self.take_profit_pct > 0.0
                     and price is not None
                     and price >= avg * (1.0 + self.take_profit_pct)
                 ):
-                    return self._exit(current_bar)
+                    return self._exit(current_bar, self._exit_detail(Side.BUY, "take_profit", price, avg))
 
                 if (
                     price is not None
@@ -270,7 +284,7 @@ class Strategy1(Strategy):
                     and a5.adx < a5p.adx
                     and momentum_bear_1
                 ):
-                    return self._exit(current_bar)
+                    return self._exit(current_bar, self._exit_detail(Side.BUY, "momentum_stall", price, avg))
 
                 return None
 
@@ -283,14 +297,16 @@ class Strategy1(Strategy):
                 or a5.adx < self.adx_exit
                 or a5.is_reversal
             ):
-                return self._exit(current_bar)
+                reason = "structure_fail" if not struct_down_5 else (
+                    "adx_below_exit" if a5.adx < self.adx_exit else "adx_reversal")
+                return self._exit(current_bar, self._exit_detail(Side.SHORT, reason, price, avg))
 
             if (
                 self.take_profit_pct > 0.0
                 and price is not None
                 and price <= avg * (1.0 - self.take_profit_pct)
             ):
-                return self._exit(current_bar)
+                return self._exit(current_bar, self._exit_detail(Side.SHORT, "take_profit", price, avg))
 
             if (
                 price is not None
@@ -299,7 +315,7 @@ class Strategy1(Strategy):
                 and a5.adx < a5p.adx
                 and momentum_bull_1
             ):
-                return self._exit(current_bar)
+                return self._exit(current_bar, self._exit_detail(Side.SHORT, "momentum_stall", price, avg))
 
             return None
 
@@ -321,6 +337,9 @@ class Strategy1(Strategy):
         if self._exit_bar is not None:
 
             if current_bar < self._exit_bar + self.cooldown_bars * 300_000:
+                if self._last_cooldown_log_bar != current_bar:
+                    self._last_cooldown_log_bar = current_bar
+                    self._log(current_bar, f"cooldown: entry blocked until +{self.cooldown_bars} 5m candles")
                 return None
 
             self._exit_bar = None
@@ -344,6 +363,7 @@ class Strategy1(Strategy):
             return self._enter(
                 current_bar,
                 Signal(action="BUY", quantity=1),
+                "5m fresh bull cross",
             )
 
         if (
@@ -357,6 +377,7 @@ class Strategy1(Strategy):
             return self._enter(
                 current_bar,
                 Signal(action="SELL", quantity=1),
+                "5m fresh bear cross",
             )
 
         # ------------------------------------------------------------
@@ -377,6 +398,7 @@ class Strategy1(Strategy):
                 return self._enter(
                     current_bar,
                     Signal(action="BUY", quantity=1),
+                    "1m pullback continuation",
                 )
 
             if (
@@ -391,7 +413,21 @@ class Strategy1(Strategy):
                 return self._enter(
                     current_bar,
                     Signal(action="SELL", quantity=1),
+                    "1m pullback continuation",
                 )
+
+        # ------------------------------------------------------------
+        # OBSERVATION: fresh cross detected but entry blocked
+        # ------------------------------------------------------------
+        # Printed once per confirmed 5m candle so it is easy to see which
+        # filter keeps a valid-looking cross from turning into a trade.
+        self._trace_blocked_entries(
+            current_bar,
+            fresh_bull_5, fresh_bear_5, fresh_bull_1, fresh_bear_1,
+            macro_up, macro_down, struct_up_5, struct_down_5,
+            adx_ok_5, adx_rising_5, di_bull_5, di_bear_5,
+            momentum_bull_1, momentum_bear_1, c20_1, c20_5,
+        )
 
         return None
 
@@ -399,14 +435,16 @@ class Strategy1(Strategy):
     # STATE HELPERS
     # ================================================================
 
-    def _enter(self, bar: int, signal: Signal) -> Signal:
+    def _enter(self, bar: int, signal: Signal, reason: str) -> Signal:
         self._last_signal_bar = bar
         self._last_entry_bar = bar
+        self._log(bar, f"ENTRY {signal.action} ({reason})")
         return signal
 
-    def _exit(self, bar: int) -> Signal:
+    def _exit(self, bar: int, detail: str) -> Signal:
         self._exit_bar = bar
         self._last_entry_bar = None
+        self._log(bar, f"EXIT {detail}")
         return Signal(action="EXIT")
 
     def _capture_prev(self, series, attr: str) -> float | None:
@@ -494,3 +532,96 @@ class Strategy1(Strategy):
 
         except KeyError:
             return None
+
+    # ================================================================
+    # OBSERVATION / LOGGING
+    # ================================================================
+
+    @staticmethod
+    def _fmt(bar: int | None) -> str:
+        if not bar:
+            return "---"
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(bar / 1000.0))
+
+    def _log(self, bar: int | None, msg: str) -> None:
+        if not self.verbose:
+            return
+        print(f"[Strategy1] {self._fmt(bar)} | {msg}")
+
+    def _log_once(self, msg: str) -> None:
+        if not self.verbose or self._printed_warnings.get(msg):
+            return
+        self._printed_warnings[msg] = True
+        print(f"[Strategy1] WARN | {msg}")
+
+    @staticmethod
+    def _exit_detail(side: Side, reason: str, price, avg) -> str:
+        out = f"{side.value} exit [{reason}]"
+
+        if price is not None and avg is not None:
+            pnl = (price - avg) if side == Side.BUY else (avg - price)
+            out += f" price={price:.4f} avg={avg:.4f} pnl={pnl:+.4f}"
+
+        return out
+
+    def _trace_blocked_entries(self, bar, fresh_bull_5, fresh_bear_5,
+                               fresh_bull_1, fresh_bear_1,
+                               macro_up, macro_down, struct_up_5, struct_down_5,
+                               adx_ok_5, adx_rising_5, di_bull_5, di_bear_5,
+                               momentum_bull_1, momentum_bear_1,
+                               c20_1, c20_5) -> None:
+
+        if not self.verbose or bar == self._last_logged_cross_bar:
+            return
+
+        checks = None
+
+        if fresh_bull_5:
+            checks = (
+                ("macro_up", macro_up),
+                ("adx_ok_5", adx_ok_5),
+                ("adx_rising_5", adx_rising_5),
+                ("di_bull_5", di_bull_5),
+                ("momentum_bull_1", momentum_bull_1),
+            )
+            prefix = "5m fresh bull cross"
+
+        elif fresh_bear_5:
+            checks = (
+                ("macro_down", macro_down),
+                ("adx_ok_5", adx_ok_5),
+                ("adx_rising_5", adx_rising_5),
+                ("di_bear_5", di_bear_5),
+                ("momentum_bear_1", momentum_bear_1),
+            )
+            prefix = "5m fresh bear cross"
+
+        elif fresh_bull_1 and self.allow_continuations:
+            checks = (
+                ("macro_up", macro_up),
+                ("struct_up_5", struct_up_5),
+                ("adx_ok_5", adx_ok_5),
+                ("adx_rising_5", adx_rising_5),
+                ("di_bull_5", di_bull_5),
+                ("c20_1>c20_5", c20_1 > c20_5),
+            )
+            prefix = "1m fresh bull cross"
+
+        elif fresh_bear_1 and self.allow_continuations:
+            checks = (
+                ("macro_down", macro_down),
+                ("struct_down_5", struct_down_5),
+                ("adx_ok_5", adx_ok_5),
+                ("adx_rising_5", adx_rising_5),
+                ("di_bear_5", di_bear_5),
+                ("c20_1<c20_5", c20_1 < c20_5),
+            )
+            prefix = "1m fresh bear cross"
+
+        if checks is None:
+            return
+
+        miss = [name for name, ok in checks if not ok]
+
+        self._last_logged_cross_bar = bar
+        self._log(bar, f"{prefix}, entry blocked (missing: {', '.join(miss) or 'none'})")
