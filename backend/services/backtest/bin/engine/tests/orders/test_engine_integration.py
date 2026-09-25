@@ -87,36 +87,44 @@ def tf_state(tf_id, ms, e20, e50, adx_hist, adx_live):
     }
 
 
-def build_engine_state(risk=None):
+def build_engine_state(risk=None, direction="long", params=None):
     """
     Synthetic engine_state for set_state():
 
         - 15m / 5m / 1m timeframes with EMA 20, EMA 50 and ADX 14
-        - EMA/ADX values are seeded so that:
-            15m: EMA20 > EMA50, ADX 26 (macro uptrend, already valid)
-            5m : EMA20 < EMA50 but rising (a fresh bull cross appears as
-                 the price climbs), ADX 28 with a wide +DI / -DI gap
-            1m : EMA20 > EMA50 (momentum already aligned)
+        - EMA/ADX values are seeded so a fresh EMA 20/50 cross appears as
+          the price moves (direction="long": rise, direction="short": fall)
+        - 15m macro is already aligned with the direction (EMA20>EMA50 for
+          long, EMA20<EMA50 for short), ADX live with a wide +DI/-DI gap
 
-    A steady rise (100 + 0.4/min) then triggers the fresh 5m EMA cross,
-    which makes the strategy emit a BUY once 15m, ADX and DI filters align.
+    A steady move then triggers the fresh cross, which makes the strategy
+    emit a BUY/SELL once 15m, ADX and DI filters align.
     """
-    adx5_hist = [adx_state(1 - i, BASE_TS - i * 300_000, 25.0 + i * 0.1, 30.0, 6.0) for i in range(28)]
+    if direction == "long":
+        plus, minus, e20_15, e20_5, e20_1 = 30.0, 6.0, 110.0, 90.0, 102.0
+    elif direction == "short":
+        plus, minus, e20_15, e20_5, e20_1 = 6.0, 35.0, 90.0, 110.0, 98.0
+    else:
+        raise ValueError(direction)
+
+    e50 = 100.0
+
+    adx5_hist = [adx_state(1 - i, BASE_TS - i * 300_000, 25.0 + i * 0.1, plus, minus) for i in range(28)]
     adx5_live = dict(adx5_hist[-1])
     adx5_live["adx"] = 28.0
 
-    adx15_hist = [adx_state(1 - i, BASE_TS - i * 900_000, 26.0, 32.0, 6.0) for i in range(28)]
+    adx15_hist = [adx_state(1 - i, BASE_TS - i * 900_000, 26.0, plus + 2.0, minus) for i in range(28)]
     adx15_live = dict(adx15_hist[-1])
 
     return {
         "tick_index": 0,
         "time": 0,
         "timeframes": {
-            "1m": tf_state("1m", 60_000, [{"time": 1, "value": 102.0}], [{"time": 1, "value": 100.0}], [], None),
-            "5m": tf_state("5m", 300_000, [{"time": 1, "value": 90.0}], [{"time": 1, "value": 100.0}], adx5_hist, adx5_live),
-            "15m": tf_state("15m", 900_000, [{"time": 1, "value": 110.0}], [{"time": 1, "value": 100.0}], adx15_hist, adx15_live),
+            "1m": tf_state("1m", 60_000, [{"time": 1, "value": e20_1}], [{"time": 1, "value": e50}], [], None),
+            "5m": tf_state("5m", 300_000, [{"time": 1, "value": e20_5}], [{"time": 1, "value": e50}], adx5_hist, adx5_live),
+            "15m": tf_state("15m", 900_000, [{"time": 1, "value": e20_15}], [{"time": 1, "value": e50}], adx15_hist, adx15_live),
         },
-        "strategy": {"kind": "Strategy1", "params": {}},
+        "strategy": {"kind": "Strategy1", "params": params or {}},
         "risk": risk or None,
         "portfolio": None,
         "orders": None,
@@ -129,33 +137,31 @@ RISK = {
 }
 
 
-def price_at(minute: int) -> float:
+def price_at(minute: int, direction: str = "long") -> float:
+    if direction == "short":
+        return 100.0 - 0.4 * minute
     return 100.0 + 0.4 * minute
 
 
-def run_until_buy(engine: TradingEngine):
+def run_until_signal(engine: TradingEngine, direction: str, expected: str):
     """
-    Feeds one tick per minute. No signal must appear until the fresh
-    5m cross; when it lands it must be a BUY.
+    Feeds one tick per minute until the strategy emits its first signal.
+    For the long scenario it also asserts nothing is emitted until the
+    fresh 5m cross has actually formed.
     """
     signal = None
+    signal_minute = None
 
-    for i in range(0, 49):
-        _, sig = engine.on_tick(make_tick(i, BASE_TS + i * 60_000, price_at(i)))
-        assert sig is None, f"unexpected early signal at minute {i}: {sig}"
-
-    buy_minute = None
-
-    for i in range(49, 80):
-        _, sig = engine.on_tick(make_tick(i, BASE_TS + i * 60_000, price_at(i)))
+    for i in range(0, 120):
+        _, sig = engine.on_tick(make_tick(i, BASE_TS + i * 60_000, price_at(i, direction)))
         if sig is not None:
             signal = sig
-            buy_minute = i
+            signal_minute = i
             break
 
-    assert signal is not None, "strategy never emitted a BUY"
-    assert signal.action == "BUY"
-    return buy_minute
+    assert signal is not None, "strategy never emitted a signal"
+    assert signal.action == expected
+    return signal_minute
 
 
 def test_engine_full_order_cycle():
@@ -164,7 +170,7 @@ def test_engine_full_order_cycle():
 
     assert engine.risk == RISK
 
-    buy_minute = run_until_buy(engine)
+    buy_minute = run_until_signal(engine, "long", "BUY")
     assert buy_minute is not None
 
     # --- entry order fills on the next tick -> bracket placed ---
@@ -196,7 +202,7 @@ def test_engine_state_restore_preserves_open_position():
     engine = TradingEngine()
     engine.set_state("boot", "config", build_engine_state(risk=RISK))
 
-    buy_minute = run_until_buy(engine)
+    buy_minute = run_until_signal(engine, "long", "BUY")
     engine.on_tick(make_tick(buy_minute + 1, BASE_TS + (buy_minute + 1) * 60_000, price_at(buy_minute + 1)))
 
     assert engine.portfolio.position is not None
@@ -236,6 +242,71 @@ def test_engine_state_restore_preserves_open_position():
     assert len(fills) == 1
     assert fills[0].role == OrderRole.STOP
     assert restored.portfolio.position is None
+
+
+def test_engine_short_entry_bracket_geometry():
+    engine = TradingEngine()
+    engine.set_state("boot", "config", build_engine_state(risk=RISK, direction="short"))
+
+    sell_minute = run_until_signal(engine, "short", "SELL")
+    assert sell_minute is not None
+
+    engine.on_tick(make_tick(sell_minute + 1, BASE_TS + (sell_minute + 1) * 60_000, price_at(sell_minute + 1, "short")))
+
+    position = engine.portfolio.position
+    assert position is not None
+    assert position.side == Side.SELL
+    assert position.quantity == 1.0
+
+    working = engine.order_manager.working_orders()
+    assert len(working) == 2
+    assert {o.role for o in working} == {OrderRole.STOP, OrderRole.TARGET}
+
+    # Short bracket geometry: stop above, target below the entry.
+    stop = [o for o in working if o.role == OrderRole.STOP][0]
+    target = [o for o in working if o.role == OrderRole.TARGET][0]
+    assert stop.price == pytest.approx(position.avg_price * 1.01, rel=1e-9)
+    assert target.price == pytest.approx(position.avg_price * 0.98, rel=1e-9)
+
+
+def test_engine_short_internal_exit_path():
+    # Regression: the SHORT exit path referenced Side.SHORT, which does
+    # not exist on the Side enum -> AttributeError on every short exit,
+    # breaking the engine loop and desynchronizing the tick_index.
+    #
+    # adx_exit is forced very high so the strategy itself exits the short
+    # on the first tick after entry (a5.adx < adx_exit), exercising the
+    # short exit branch and its logging without relying on bracket fills.
+    engine = TradingEngine()
+    engine.set_state(
+        "boot",
+        "config",
+        build_engine_state(risk=RISK, direction="short", params={"adx_exit": 999.0}),
+    )
+
+    sell_minute = run_until_signal(engine, "short", "SELL")
+    assert sell_minute is not None
+
+    # --- entry fills and the strategy exits on the same tick ---
+    _, sig = engine.on_tick(make_tick(sell_minute + 1, BASE_TS + (sell_minute + 1) * 60_000, price_at(sell_minute + 1, "short")))
+
+    position = engine.portfolio.position
+    assert position is not None
+    assert position.side == Side.SELL
+
+    working = engine.order_manager.working_orders()
+    assert len(working) == 1
+    assert working[0].role == OrderRole.EXIT
+
+    assert sig is not None and sig.action == "EXIT"
+
+    # --- the market exit order fills on the next tick ---
+    engine.on_tick(make_tick(sell_minute + 2, BASE_TS + (sell_minute + 2) * 60_000, price_at(sell_minute + 2, "short")))
+
+    assert engine.portfolio.position is None
+    assert engine.order_manager.working_orders() == []
+    assert len(engine.portfolio.trades) == 1
+    assert engine.portfolio.trades[0].side == Side.SELL
 
 
 def test_restored_order_manager_matches_serialized_book():

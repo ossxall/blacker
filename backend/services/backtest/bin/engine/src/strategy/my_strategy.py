@@ -299,14 +299,14 @@ class Strategy1(Strategy):
             ):
                 reason = "structure_fail" if not struct_down_5 else (
                     "adx_below_exit" if a5.adx < self.adx_exit else "adx_reversal")
-                return self._exit(current_bar, self._exit_detail(Side.SHORT, reason, price, avg))
+                return self._exit(current_bar, self._exit_detail(Side.SELL, reason, price, avg))
 
             if (
                 self.take_profit_pct > 0.0
                 and price is not None
                 and price <= avg * (1.0 - self.take_profit_pct)
             ):
-                return self._exit(current_bar, self._exit_detail(Side.SHORT, "take_profit", price, avg))
+                return self._exit(current_bar, self._exit_detail(Side.SELL, "take_profit", price, avg))
 
             if (
                 price is not None
@@ -315,7 +315,7 @@ class Strategy1(Strategy):
                 and a5.adx < a5p.adx
                 and momentum_bull_1
             ):
-                return self._exit(current_bar, self._exit_detail(Side.SHORT, "momentum_stall", price, avg))
+                return self._exit(current_bar, self._exit_detail(Side.SELL, "momentum_stall", price, avg))
 
             return None
 
