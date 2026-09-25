@@ -1,42 +1,14 @@
 from core.engine_state import EngineState
-
 from strategy.base import Strategy
-
 from orders import Signal, Side
 
 
 class Strategy1(Strategy):
-    """
-    MTF EMA 20/50 + ADX 14
-
-    15m = dirección macro
-    5m  = tendencia + fuerza
-    1m  = entrada después de recuperación
-
-    Indicadores:
-        EMA 20
-        EMA 50
-        ADX 14
-
-    Diseño:
-        - Menos entradas en zonas laterales.
-        - No compara EMAs entre diferentes timeframes.
-        - Utiliza pendiente de EMA20.
-        - Short ligeramente más permisivo.
-        - Long ligeramente más selectivo.
-    """
-
     DEFAULT_PARAMS = {
         "adx_strength": 20.0,
         "adx_exit": 15.0,
-
-        # Pendiente mínima relativa de EMA20.
-        # 0.0 = solamente exige que esté subiendo/bajando.
         "ema_slope_5": 0.0,
-
-        # Número de barras 1m que utilizamos para comprobar
-        # la dirección de EMA20.
-        "execution_lookback": 1,
+        "cooldown_bars": 3,
     }
 
     def __init__(self, kind: str, params: dict):
@@ -45,28 +17,22 @@ class Strategy1(Strategy):
         merged = dict(self.DEFAULT_PARAMS)
         merged.update(self._unwrap(params))
 
-        self.adx_strength = float(
-            merged["adx_strength"]
-        )
+        self.adx_strength = float(merged["adx_strength"])
+        self.adx_exit = float(merged["adx_exit"])
+        self.ema_slope_5 = float(merged["ema_slope_5"])
+        self.cooldown_bars = int(merged["cooldown_bars"])
 
-        self.adx_exit = float(
-            merged["adx_exit"]
-        )
+        # Estado interno
+        self.cooldown = 0
 
-        self.ema_slope_5 = float(
-            merged["ema_slope_5"]
-        )
-
-        self.execution_lookback = int(
-            merged["execution_lookback"]
-        )
+        # Evita volver a entrar en el mismo impulso
+        self.long_trigger_used = False
+        self.short_trigger_used = False
 
     def evaluate(self, state: EngineState):
-
-        # ============================================================
+        # ---------------------------------------------------------
         # TIMEFRAMES
-        # ============================================================
-
+        # ---------------------------------------------------------
         tf15 = state.timeframes.get("15m")
         tf5 = state.timeframes.get("5m")
         tf1 = state.timeframes.get("1m")
@@ -74,114 +40,57 @@ class Strategy1(Strategy):
         if tf15 is None or tf5 is None or tf1 is None:
             return None
 
-        # ============================================================
-        # 15M
-        # MACRO TREND
-        # ============================================================
+        # ---------------------------------------------------------
+        # 15m - MACRO
+        # ---------------------------------------------------------
+        ema20_15 = self._get_series(tf15, "EMA", "EMA 20")
+        ema50_15 = self._get_series(tf15, "EMA", "EMA 50")
+        adx_15 = self._get_series(tf15, "ADX", "ADX 14")
 
-        ema20_15 = self._get_series(
-            tf15,
-            "EMA",
-            "EMA 20"
-        )
-
-        ema50_15 = self._get_series(
-            tf15,
-            "EMA",
-            "EMA 50"
-        )
-
-        adx_15 = self._get_series(
-            tf15,
-            "ADX",
-            "ADX 14"
-        )
-
-        if not all([
-            ema20_15,
-            ema50_15,
-            adx_15,
-        ]):
+        if not all([ema20_15, ema50_15, adx_15]):
             return None
 
         if not all([
             ema20_15.live,
             ema50_15.live,
-            adx_15.live,
+            adx_15.live
         ]):
             return None
 
         ema20_value_15 = ema20_15.live.value
         ema50_value_15 = ema50_15.live.value
-
         adx_value_15 = adx_15.live.adx
-
-        # ------------------------------------------------------------
-        # MACRO LONG
-        # ------------------------------------------------------------
 
         macro_long = (
             ema20_value_15 > ema50_value_15
             and adx_value_15 >= self.adx_strength
         )
 
-        # ------------------------------------------------------------
-        # MACRO SHORT
-        # ------------------------------------------------------------
-
         macro_short = (
             ema20_value_15 < ema50_value_15
             and adx_value_15 >= self.adx_strength
         )
 
-        # ============================================================
-        # 5M
-        # TREND + ADX
-        # ============================================================
+        # ---------------------------------------------------------
+        # 5m - CONFIRMACION
+        # ---------------------------------------------------------
+        ema20_5 = self._get_series(tf5, "EMA", "EMA 20")
+        ema50_5 = self._get_series(tf5, "EMA", "EMA 50")
+        adx_5 = self._get_series(tf5, "ADX", "ADX 14")
 
-        ema20_5 = self._get_series(
-            tf5,
-            "EMA",
-            "EMA 20"
-        )
-
-        ema50_5 = self._get_series(
-            tf5,
-            "EMA",
-            "EMA 50"
-        )
-
-        adx_5 = self._get_series(
-            tf5,
-            "ADX",
-            "ADX 14"
-        )
-
-        if not all([
-            ema20_5,
-            ema50_5,
-            adx_5,
-        ]):
+        if not all([ema20_5, ema50_5, adx_5]):
             return None
 
         if not all([
             ema20_5.live,
             ema50_5.live,
-            adx_5.live,
+            adx_5.live
         ]):
             return None
 
-        previous_ema20_5 = self._previous_value(
-            ema20_5
-        )
-
-        previous_ema50_5 = self._previous_value(
-            ema50_5
-        )
-
-        previous_adx_5 = self._last_closed(
-            adx_5
-        )
+        previous_ema20_5 = self._previous_value(ema20_5)
+        previous_ema50_5 = self._previous_value(ema50_5)
+        previous_adx_5 = self._last_closed(adx_5)
 
         if (
             previous_ema20_5 is None
@@ -194,21 +103,8 @@ class Strategy1(Strategy):
         ema50_value_5 = ema50_5.live.value
         adx_value_5 = adx_5.live.adx
 
-        # ------------------------------------------------------------
-        # 5M STRUCTURE
-        # ------------------------------------------------------------
-
-        bullish_5 = (
-            ema20_value_5 > ema50_value_5
-        )
-
-        bearish_5 = (
-            ema20_value_5 < ema50_value_5
-        )
-
-        # ------------------------------------------------------------
-        # 5M EMA20 SLOPE
-        # ------------------------------------------------------------
+        bullish_5 = ema20_value_5 > ema50_value_5
+        bearish_5 = ema20_value_5 < ema50_value_5
 
         ema20_slope_5 = (
             ema20_value_5 - previous_ema20_5
@@ -222,50 +118,27 @@ class Strategy1(Strategy):
             ema20_slope_5 < -self.ema_slope_5
         )
 
-        # ------------------------------------------------------------
-        # ADX
-        # ------------------------------------------------------------
-
         adx_strong_5 = (
             adx_value_5 >= self.adx_strength
         )
 
-        # ============================================================
-        # 1M
-        # EXECUTION
-        # ============================================================
+        # ---------------------------------------------------------
+        # 1m - TRIGGER
+        # ---------------------------------------------------------
+        ema20_1 = self._get_series(tf1, "EMA", "EMA 20")
+        ema50_1 = self._get_series(tf1, "EMA", "EMA 50")
 
-        ema20_1 = self._get_series(
-            tf1,
-            "EMA",
-            "EMA 20"
-        )
-
-        ema50_1 = self._get_series(
-            tf1,
-            "EMA",
-            "EMA 50"
-        )
-
-        if not all([
-            ema20_1,
-            ema50_1,
-        ]):
+        if not all([ema20_1, ema50_1]):
             return None
 
         if not all([
             ema20_1.live,
-            ema50_1.live,
+            ema50_1.live
         ]):
             return None
 
-        previous_ema20_1 = self._previous_value(
-            ema20_1
-        )
-
-        previous_ema50_1 = self._previous_value(
-            ema50_1
-        )
+        previous_ema20_1 = self._previous_value(ema20_1)
+        previous_ema50_1 = self._previous_value(ema50_1)
 
         if (
             previous_ema20_1 is None
@@ -276,107 +149,154 @@ class Strategy1(Strategy):
         ema20_value_1 = ema20_1.live.value
         ema50_value_1 = ema50_1.live.value
 
-        # ============================================================
-        # 1M LONG
-        # ============================================================
+        # ---------------------------------------------------------
+        # NUEVO IMPULSO 1m
+        #
+        # No basta con que EMA20 > EMA50.
+        # Exigimos que EMA20 esté acelerando y que la estructura
+        # haya cambiado respecto a la vela anterior.
+        # ---------------------------------------------------------
 
-        long_structure_1 = (
+        bullish_structure_now = (
             ema20_value_1 > ema50_value_1
         )
 
-        long_slope_1 = (
-            ema20_value_1 > previous_ema20_1
+        bullish_structure_previous = (
+            previous_ema20_1 > previous_ema50_1
         )
 
-        # Recuperación:
-        # EMA20 está por encima de EMA50 y continúa subiendo.
-        long_trigger = (
-            long_structure_1
-            and long_slope_1
-        )
-
-        # ============================================================
-        # 1M SHORT
-        # ============================================================
-
-        short_structure_1 = (
+        bearish_structure_now = (
             ema20_value_1 < ema50_value_1
         )
 
-        short_slope_1 = (
+        bearish_structure_previous = (
+            previous_ema20_1 < previous_ema50_1
+        )
+
+        ema20_rising_1 = (
+            ema20_value_1 > previous_ema20_1
+        )
+
+        ema20_falling_1 = (
             ema20_value_1 < previous_ema20_1
         )
 
-        short_trigger = (
-            short_structure_1
-            and short_slope_1
+        # Trigger por NUEVO cambio de estructura
+        long_cross = (
+            bullish_structure_now
+            and not bullish_structure_previous
         )
 
-        # ============================================================
-        # POSITION
-        # ============================================================
+        short_cross = (
+            bearish_structure_now
+            and not bearish_structure_previous
+        )
 
+        # Trigger alternativo:
+        # si la estructura ya estaba establecida, permitimos
+        # un nuevo impulso después de que EMA20 pierda pendiente.
+        long_impulse = (
+            bullish_structure_now
+            and ema20_rising_1
+        )
+
+        short_impulse = (
+            bearish_structure_now
+            and ema20_falling_1
+        )
+
+        # ---------------------------------------------------------
+        # PORTFOLIO
+        # ---------------------------------------------------------
         portfolio = state.portfolio
-
         position = (
             portfolio.position
             if portfolio is not None
             else None
         )
 
-        # ============================================================
-        # ENTRY
-        # ============================================================
+        # ---------------------------------------------------------
+        # COOLDOWN
+        # ---------------------------------------------------------
+        if self.cooldown > 0:
+            self.cooldown -= 1
 
+        # ---------------------------------------------------------
+        # SIN POSICION -> BUSCAR ENTRADA
+        # ---------------------------------------------------------
         if position is None:
 
-            # ========================================================
-            # LONG
-            # ========================================================
-            #
-            # Más selectivo:
-            # macro + 5m estructura + 5m pendiente + ADX
-            # + 1m recuperación.
-            #
+            # Si estamos en cooldown no hacemos nada.
+            if self.cooldown > 0:
+                return None
 
-            if (
+            # -----------------------------------------------------
+            # LONG
+            # -----------------------------------------------------
+            long_setup = (
                 macro_long
                 and bullish_5
                 and bullish_slope_5
                 and adx_strong_5
-                and long_trigger
-            ):
-                return Signal(
-                    action="BUY",
-                    quantity=1,
-                )
+            )
 
-            # ========================================================
-            # SHORT
-            # ========================================================
-            #
-            # El histórico actual muestra mucha más actividad
-            # rentable en este lado.
-            #
+            long_trigger = (
+                long_cross
+                or (
+                    long_impulse
+                    and not self.long_trigger_used
+                )
+            )
 
             if (
+                long_setup
+                and long_trigger
+                and not self.long_trigger_used
+            ):
+                self.long_trigger_used = True
+                self.short_trigger_used = False
+
+                return Signal(
+                    action="BUY",
+                    quantity=1
+                )
+
+            # -----------------------------------------------------
+            # SHORT
+            # -----------------------------------------------------
+            short_setup = (
                 macro_short
                 and bearish_5
                 and bearish_slope_5
                 and adx_strong_5
+            )
+
+            short_trigger = (
+                short_cross
+                or (
+                    short_impulse
+                    and not self.short_trigger_used
+                )
+            )
+
+            if (
+                short_setup
                 and short_trigger
+                and not self.short_trigger_used
             ):
+                self.short_trigger_used = True
+                self.long_trigger_used = False
+
                 return Signal(
                     action="SELL",
-                    quantity=1,
+                    quantity=1
                 )
 
             return None
 
-        # ============================================================
-        # EXIT
-        # ============================================================
-
+        # ---------------------------------------------------------
+        # GESTION DE POSICION
+        # ---------------------------------------------------------
         adx_reversal = bool(
             getattr(
                 adx_5.live,
@@ -389,10 +309,9 @@ class Strategy1(Strategy):
             adx_value_5 >= self.adx_exit
         )
 
-        # ============================================================
-        # EXIT LONG
-        # ============================================================
-
+        # ---------------------------------------------------------
+        # LONG
+        # ---------------------------------------------------------
         if position.side == Side.BUY:
 
             structure_failed = (
@@ -410,16 +329,19 @@ class Strategy1(Strategy):
                 or not adx_alive
                 or adx_reversal
             ):
-                return Signal(
-                    action="EXIT"
-                )
+                self.cooldown = self.cooldown_bars
+
+                # Permitimos buscar un nuevo impulso
+                # después de que aparezca una nueva condición.
+                self.long_trigger_used = True
+
+                return Signal(action="EXIT")
 
             return None
 
-        # ============================================================
-        # EXIT SHORT
-        # ============================================================
-
+        # ---------------------------------------------------------
+        # SHORT
+        # ---------------------------------------------------------
         if position.side == Side.SELL:
 
             structure_failed = (
@@ -437,30 +359,29 @@ class Strategy1(Strategy):
                 or not adx_alive
                 or adx_reversal
             ):
-                return Signal(
-                    action="EXIT"
-                )
+                self.cooldown = self.cooldown_bars
+
+                self.short_trigger_used = True
+
+                return Signal(action="EXIT")
 
             return None
 
         return None
 
-    # ================================================================
+    # =============================================================
     # HELPERS
-    # ================================================================
+    # =============================================================
 
     @staticmethod
     def _unwrap(params: dict) -> dict:
-
         out = {}
 
         for key, value in (params or {}).items():
 
             if isinstance(value, dict):
-
                 if "value" in value:
                     value = value["value"]
-
                 else:
                     continue
 
@@ -470,7 +391,6 @@ class Strategy1(Strategy):
 
     @staticmethod
     def _previous_value(series):
-
         history = getattr(
             series,
             "history",
@@ -484,7 +404,6 @@ class Strategy1(Strategy):
 
     @staticmethod
     def _last_closed(series):
-
         history = getattr(
             series,
             "history",
@@ -498,12 +417,11 @@ class Strategy1(Strategy):
 
     @staticmethod
     def _get_series(tf, kind, label):
-
         try:
             return tf.get_series(
                 kind,
                 label
             )
-
         except KeyError:
             return None
+
