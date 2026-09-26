@@ -1,0 +1,29 @@
+info:
+  name: set-strategy
+  type: http
+  seq: 10
+
+http:
+  method: POST
+  url: http://localhost:3002/api/backtest/master/set-strategy
+  body:
+    type: json
+    data: |-
+      {
+        "kind": "MTFPullback",
+        "params": {
+          "stretch": 3.25,
+          "exit_dev": -0.5,
+          "max_bars": 34,
+          "cooldown_bars": 2,
+          "allow_short": false,
+          "use_trigger": false
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
