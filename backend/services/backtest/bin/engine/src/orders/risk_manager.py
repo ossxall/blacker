@@ -15,6 +15,7 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
+import warnings
 
 from orders.models import Side
 
@@ -64,11 +65,19 @@ class RiskManager:
     Every order is protected by a stop-loss. If the configuration does
     not provide a ``stop`` key, a default of 1% below/above the entry
     price is used (``DEFAULT_STOP_CONFIG``).
+
+    An ``"atr"`` stop needs an ATR reading, which is only available when a
+    ``context`` carrying ``{"atr": <value>}`` is supplied. The engine does
+    not build one, so rather than silently resolving the offset to 0.0 --
+    which would park the stop exactly on the entry price and take out every
+    position on its first tick -- the default percent stop is used instead
+    and a warning is raised.
     """
 
     def __init__(self, config: Optional[dict] = None, context: Optional[dict] = None):
         self.config = config or {}
         self.context = context or {}
+        self._warned_atr = False
 
     def apply(self, side: Side, entry_price: float) -> RiskLevels:
         stop_spec = self.config.get("stop") or DEFAULT_STOP_CONFIG
@@ -78,6 +87,11 @@ class RiskManager:
         levels = RiskLevels()
 
         stop_offset = self._offset(stop_spec, entry_price)
+        if stop_offset is None:
+            stop_offset = self._offset(
+                DEFAULT_STOP_CONFIG,
+                entry_price,
+            )
         if stop_offset is not None:
             levels.stop_price = self._below(stop_offset, entry_price, side)
 
@@ -95,6 +109,9 @@ class RiskManager:
 
         return levels
 
+    def _atr_value(self) -> float:
+        return abs(float(self.context.get("atr", 0.0) or 0.0))
+
     def _offset(self, spec: dict, entry_price: float) -> Optional[float]:
         if not spec:
             return None
@@ -108,8 +125,24 @@ class RiskManager:
             return abs(float(spec.get("value", 0.0)))
 
         if kind == "atr":
+            atr = self._atr_value()
+
+            if atr <= 0.0:
+                if not self._warned_atr:
+                    warnings.warn(
+                        "Risk configuration asks for an 'atr' stop or target "
+                        "but no ATR context was provided, so the offset would "
+                        "be 0.0. Falling back to the default percent level. "
+                        "Pass context={'atr': <value>} to RiskManager to use "
+                        "ATR-based levels.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    self._warned_atr = True
+                return None
+
             multiplier = abs(float(spec.get("multiplier", 1.0)))
-            return multiplier * abs(float(self.context.get("atr", 0.0) or 0.0))
+            return multiplier * atr
 
         return None
 

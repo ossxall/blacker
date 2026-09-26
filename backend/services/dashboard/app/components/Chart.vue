@@ -376,6 +376,28 @@ function _createRuntimeSeries(seriesId: SeriesId, seriesValue: Series) {
 
 /**
  * -------------------------------------------------------------------------
+ * Creates a runtime series without letting one bad definition abort the
+ * whole layout.
+ *
+ * An unregistered `kind` (a series added in the UI with no implementation
+ * in `seriesRegistry`) used to throw out of `applyLayout`, which silently
+ * left the chart empty: no series, no legend, no error. It is reported and
+ * skipped so the remaining series still render.
+ * -------------------------------------------------------------------------
+ */
+function _createRuntimeSeriesSafe(seriesId: SeriesId, seriesValue: Series) {
+  try {
+    _createRuntimeSeries(seriesId, seriesValue);
+  } catch (err) {
+    console.error(
+      `[Chart] Skipped series "${seriesId}" (kind "${seriesValue.kind}"):`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * -------------------------------------------------------------------------
  * Resolves the creation order.
  *
  * Required order:
@@ -660,7 +682,7 @@ function applyLayout(timeframe: ChartTimeframe) {
     const existing = allSeries.get(seriesId);
 
     if (!existing) {
-      _createRuntimeSeries(seriesId, seriesValue);
+      _createRuntimeSeriesSafe(seriesId, seriesValue);
 
       continue;
     }
@@ -673,7 +695,7 @@ function applyLayout(timeframe: ChartTimeframe) {
     if (requiresRecreation(existing, seriesValue)) {
       _destroySeries(seriesId, true);
 
-      _createRuntimeSeries(seriesId, seriesValue);
+      _createRuntimeSeriesSafe(seriesId, seriesValue);
 
       continue;
     }

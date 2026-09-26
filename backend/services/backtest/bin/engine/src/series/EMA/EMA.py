@@ -151,6 +151,15 @@ class EMA(Series):
                 asdict(value)
                 for value in self.history
             ],
+
+            # `history` lags one bar behind `_closed`, so the newest
+            # closed value has to be persisted explicitly or a restored
+            # engine would resume from a one-bar-stale EMA.
+            "closed": (
+                asdict(self._closed)
+                if self._closed is not None
+                else None
+            ),
         }
 
     def set_state(self, state: dict) -> None:
@@ -175,8 +184,16 @@ class EMA(Series):
             maxlen=MAX_HISTORY,
         )
 
+        # `closed` supersedes the `history[-1]` fallback kept for states
+        # serialized before this field existed.
+        closed_state = state.get("closed")
+
         self._closed = (
-            history[-1]
-            if history
-            else None
+            EMAValue(**closed_state)
+            if closed_state is not None
+            else (
+                history[-1]
+                if history
+                else None
+            )
         )

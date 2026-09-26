@@ -90,8 +90,14 @@ class TradingEngine:
         #
         # Build engine strategy
         #
-        strategy = STRATEGY_REGISTRY[engine_state["strategy"]["kind"]](
-            engine_state["strategy"]["kind"],
+        strategy_kind = engine_state["strategy"]["kind"]
+        if strategy_kind not in STRATEGY_REGISTRY:
+            raise KeyError(
+                f"Unknown strategy {strategy_kind!r}. "
+                f"Available: {sorted(STRATEGY_REGISTRY)}"
+            )
+        strategy = STRATEGY_REGISTRY[strategy_kind](
+            strategy_kind,
             engine_state["strategy"]["params"]        
         )
         strategy.set_state(engine_state["strategy"])
