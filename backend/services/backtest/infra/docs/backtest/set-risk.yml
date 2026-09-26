@@ -13,7 +13,7 @@ http:
         "config": {
           "stop": {
             "type": "percent",
-            "value": 0.01
+            "value": 0.02
           },
           "targets": [
             {
