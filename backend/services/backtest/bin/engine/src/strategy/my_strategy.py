@@ -513,7 +513,14 @@ class MTFPullback(Strategy):
         self._entry_time: int | None = None
 
         # Barras de calma tras salir.
-        self._cooldown = 0
+        #
+        # Se mide en tiempo de barra, no en ticks: `evaluate` se llama en
+        # cada tick (~200k/hora en este feed), asi que un contador
+        # decrementado por tick.blockaba 2 ticks ~= 2 segundos en vez de
+        # 2 barras de 15m, y permitia reentrar en el mismo minuto del
+        # stop. Guardamos el instante de la barra en la que se puede
+        # volver a entrar y comparamos con la barra actual.
+        self._cooldown_until: float | None = None
 
     def evaluate(self, state: EngineState):
 
@@ -637,15 +644,22 @@ class MTFPullback(Strategy):
             else None
         )
 
-        if self._cooldown > 0:
-            self._cooldown -= 1
-
         # ---------------------------------------------------------
         # FLAT -> ENTRADA
         # ---------------------------------------------------------
         if position is None:
 
-            if self._cooldown > 0:
+            # Un bracket (stop / target) puede cerrar la posicion dentro
+            # de `execution.update`, antes de que la estrategia la vea.
+            # En ese caso `_entry_time` sigue puesto porque la
+            # estrategia no emitio el EXIT: si no armatureamos la calma
+            # aqui, el siguiente tick podria reentrar en el mismo
+            # minuto del stop.
+            if self._entry_time is not None:
+                self._start_cooldown(tf15, atr)
+                self._entry_time = None
+
+            if not self._cooldown_elapsed(tf15, atr):
                 return None
 
             # No se compra un dip en un regimen bajista de 1h.
@@ -689,7 +703,7 @@ class MTFPullback(Strategy):
             expired = bars_held >= self.max_bars
 
             if reverted or regime_lost or expired:
-                self._cooldown = self.cooldown_bars
+                self._start_cooldown(tf15, atr)
                 self._entry_time = None
 
                 return Signal(action="EXIT")
@@ -703,7 +717,7 @@ class MTFPullback(Strategy):
             expired = bars_held >= self.max_bars
 
             if reverted or regime_lost or expired:
-                self._cooldown = self.cooldown_bars
+                self._start_cooldown(tf15, atr)
                 self._entry_time = None
 
                 return Signal(action="EXIT")
@@ -711,6 +725,37 @@ class MTFPullback(Strategy):
             return None
 
         return None
+
+    def _start_cooldown(
+        self,
+        tf15,
+        atr,
+    ) -> None:
+        # La siguiente entrada solo se permite en la barra que cierra
+        # `cooldown_bars` despues de la barra de salida.
+        now = getattr(atr.live, "time", None)
+        span = getattr(tf15, "timeframe_ms", None)
+
+        if now is None or not span:
+            self._cooldown_until = None
+            return
+
+        self._cooldown_until = now + self.cooldown_bars * (span / 1000.0)
+
+    def _cooldown_elapsed(
+        self,
+        tf15,
+        atr,
+    ) -> bool:
+        if self._cooldown_until is None:
+            return True
+
+        now = getattr(atr.live, "time", None)
+
+        if now is None:
+            return False
+
+        return now >= self._cooldown_until
 
     def _bars_held(
         self,
