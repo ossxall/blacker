@@ -4,639 +4,365 @@ from orders import Signal, Side
 
 
 class Strategy1(Strategy):
-    """
-    Estrategia MTF de continuación de tendencia.
-
-    ================================================================
-    1H - REGIMEN
-    ================================================================
-
-        EMA rápida > EMA lenta
-        ADX >= threshold
-        +DI > -DI
-
-            => Tendencia alcista
-
-        EMA rápida < EMA lenta
-        ADX >= threshold
-        -DI > +DI
-
-            => Tendencia bajista
-
-    ================================================================
-    30M - CONFIRMACION
-    ================================================================
-
-        LONG  -> EMA20 > EMA50
-        SHORT -> EMA20 < EMA50
-
-    ================================================================
-    15M - PULLBACK
-    ================================================================
-
-        LONG  -> precio <= EMA20
-        SHORT -> precio >= EMA20
-
-    ================================================================
-    5M - SETUP
-    ================================================================
-
-        LONG  -> EMA20 > EMA50
-        SHORT -> EMA20 < EMA50
-
-    ================================================================
-    1M - TRIGGER
-    ================================================================
-
-        LONG  -> EMA20 > EMA50
-        SHORT -> EMA20 < EMA50
-
-    ================================================================
-    FILOSOFIA
-    ================================================================
-
-    1H manda.
-
-    Los timeframes inferiores NO pueden cambiar el régimen.
-
-    Si 1H es alcista:
-        solamente se buscan LONG.
-
-    Si 1H es bajista:
-        solamente se buscan SHORT.
-
-    Si ADX está por debajo del threshold:
-        no se abren nuevas posiciones.
-
-    El RiskManager continúa gestionando SL / TP / trailing.
-    """
-
     DEFAULT_PARAMS = {
+        # Timeframes
+        "tf_trend": "1h",
+        "tf_confirm": "30m",
+        "tf_pullback": "15m",
+        "tf_setup": "5m",
+        "tf_trigger": "1m",
 
-        # =========================================================
-        # 1H
-        # =========================================================
+        # EMA
+        "label_fast": "EMA 20",
+        "label_slow": "EMA 50",
 
-        "trend_timeframe": "1h",
-
-        "label_fast_1h": "EMA 20",
-        "label_slow_1h": "EMA 50",
-
-        "label_adx_1h": "ADX 14",
-
+        # ADX
+        "adx_label": "ADX 14",
         "adx_threshold": 25.0,
 
-        # =========================================================
-        # 30M
-        # =========================================================
-
-        "confirm_timeframe": "30m",
-
-        "label_fast_30m": "EMA 20",
-        "label_slow_30m": "EMA 50",
-
-        # =========================================================
-        # 15M
-        # =========================================================
-
-        "pullback_timeframe": "15m",
-
-        "label_fast_15m": "EMA 20",
-
-        # =========================================================
-        # 5M
-        # =========================================================
-
-        "setup_timeframe": "5m",
-
-        "label_fast_5m": "EMA 20",
-        "label_slow_5m": "EMA 50",
-
-        # =========================================================
-        # 1M
-        # =========================================================
-
-        "trigger_timeframe": "1m",
-
-        "label_fast_1m": "EMA 20",
-        "label_slow_1m": "EMA 50",
-
-        # =========================================================
-        # ORDER
-        # =========================================================
-
+        # Position
         "quantity": 1,
     }
 
     def __init__(self, kind: str, params: dict):
-
         super().__init__(kind, params)
 
         merged = dict(self.DEFAULT_PARAMS)
         merged.update(self._unwrap(params))
 
-        # ---------------------------------------------------------
-        # Timeframes
-        # ---------------------------------------------------------
+        self.tf_trend = str(merged["tf_trend"])
+        self.tf_confirm = str(merged["tf_confirm"])
+        self.tf_pullback = str(merged["tf_pullback"])
+        self.tf_setup = str(merged["tf_setup"])
+        self.tf_trigger = str(merged["tf_trigger"])
 
-        self.trend_timeframe = str(
-            merged["trend_timeframe"]
-        )
-
-        self.confirm_timeframe = str(
-            merged["confirm_timeframe"]
-        )
-
-        self.pullback_timeframe = str(
-            merged["pullback_timeframe"]
-        )
-
-        self.setup_timeframe = str(
-            merged["setup_timeframe"]
-        )
-
-        self.trigger_timeframe = str(
-            merged["trigger_timeframe"]
-        )
-
-        # ---------------------------------------------------------
-        # 1H
-        # ---------------------------------------------------------
-
-        self.label_fast_1h = str(
-            merged["label_fast_1h"]
-        )
-
-        self.label_slow_1h = str(
-            merged["label_slow_1h"]
-        )
-
-        self.label_adx_1h = str(
-            merged["label_adx_1h"]
-        )
+        self.label_fast = str(merged["label_fast"])
+        self.label_slow = str(merged["label_slow"])
+        self.adx_label = str(merged["adx_label"])
 
         try:
-            self.adx_threshold = float(
-                merged["adx_threshold"]
-            )
+            self.adx_threshold = float(merged["adx_threshold"])
         except (TypeError, ValueError):
             self.adx_threshold = 25.0
 
-        # ---------------------------------------------------------
-        # 30M
-        # ---------------------------------------------------------
-
-        self.label_fast_30m = str(
-            merged["label_fast_30m"]
-        )
-
-        self.label_slow_30m = str(
-            merged["label_slow_30m"]
-        )
-
-        # ---------------------------------------------------------
-        # 15M
-        # ---------------------------------------------------------
-
-        self.label_fast_15m = str(
-            merged["label_fast_15m"]
-        )
-
-        # ---------------------------------------------------------
-        # 5M
-        # ---------------------------------------------------------
-
-        self.label_fast_5m = str(
-            merged["label_fast_5m"]
-        )
-
-        self.label_slow_5m = str(
-            merged["label_slow_5m"]
-        )
-
-        # ---------------------------------------------------------
-        # 1M
-        # ---------------------------------------------------------
-
-        self.label_fast_1m = str(
-            merged["label_fast_1m"]
-        )
-
-        self.label_slow_1m = str(
-            merged["label_slow_1m"]
-        )
-
-        # ---------------------------------------------------------
-        # Quantity
-        # ---------------------------------------------------------
-
         try:
-            quantity = float(
-                merged["quantity"]
-            )
+            quantity = float(merged["quantity"])
         except (TypeError, ValueError):
             quantity = 1.0
 
-        self.quantity = (
-            quantity
-            if quantity > 0.0
-            else 1.0
-        )
-
-    # =============================================================
-    # EVALUATE
-    # =============================================================
+        self.quantity = quantity if quantity > 0.0 else 1.0
 
     def evaluate(self, state: EngineState):
+        # ---------------------------------------------------------
+        # Obtener timeframes
+        # ---------------------------------------------------------
 
-        # =========================================================
-        # 1H - TENDENCIA
-        # =========================================================
+        tf_1h = state.timeframes.get(self.tf_trend)
+        tf_30m = state.timeframes.get(self.tf_confirm)
+        tf_15m = state.timeframes.get(self.tf_pullback)
+        tf_5m = state.timeframes.get(self.tf_setup)
+        tf_1m = state.timeframes.get(self.tf_trigger)
 
-        trend_tf = state.timeframes.get(
-            self.trend_timeframe
-        )
-
-        if trend_tf is None:
+        if (
+            tf_1h is None
+            or tf_30m is None
+            or tf_15m is None
+            or tf_5m is None
+            or tf_1m is None
+        ):
             return None
 
-        ema_fast_1h = self._get_series(
-            trend_tf,
+        # ---------------------------------------------------------
+        # 1H - TENDENCIA PRINCIPAL
+        #
+        # LONG:
+        # EMA20 > EMA50
+        # ADX >= threshold
+        # +DI > -DI
+        #
+        # SHORT:
+        # EMA20 < EMA50
+        # ADX >= threshold
+        # -DI > +DI
+        # ---------------------------------------------------------
+
+        ema20_1h = self._get_series(
+            tf_1h,
             "EMA",
-            self.label_fast_1h,
+            self.label_fast,
         )
 
-        ema_slow_1h = self._get_series(
-            trend_tf,
+        ema50_1h = self._get_series(
+            tf_1h,
             "EMA",
-            self.label_slow_1h,
+            self.label_slow,
         )
 
         adx_1h = self._get_series(
-            trend_tf,
+            tf_1h,
             "ADX",
-            self.label_adx_1h,
+            self.adx_label,
         )
 
-        if (
-            ema_fast_1h is None
-            or ema_slow_1h is None
-            or adx_1h is None
-        ):
+        if ema20_1h is None or ema50_1h is None or adx_1h is None:
             return None
 
-        # =========================================================
-        # Usamos valores CONFIRMADOS.
-        #
-        # EMA:
-        #     _closed
-        #
-        # ADX:
-        #     history[-1]
-        #
-        # No usamos el valor live para determinar la tendencia.
-        # =========================================================
+        ema20_1h_value = self._ema_closed_value(ema20_1h)
+        ema50_1h_value = self._ema_closed_value(ema50_1h)
 
-        fast_1h = self._ema_closed_value(
-            ema_fast_1h
-        )
-
-        slow_1h = self._ema_closed_value(
-            ema_slow_1h
-        )
-
-        adx_value = self._adx_closed_value(
+        adx_value = self._adx_confirmed_value(
             adx_1h,
+            tf_1h,
             "adx",
         )
 
-        plus_di = self._adx_closed_value(
+        plus_di = self._adx_confirmed_value(
             adx_1h,
+            tf_1h,
             "plus_di",
         )
 
-        minus_di = self._adx_closed_value(
+        minus_di = self._adx_confirmed_value(
             adx_1h,
+            tf_1h,
             "minus_di",
         )
 
-        if any(
-            value is None
-            for value in (
-                fast_1h,
-                slow_1h,
-                adx_value,
-                plus_di,
-                minus_di,
-            )
+        if (
+            ema20_1h_value is None
+            or ema50_1h_value is None
+            or adx_value is None
+            or plus_di is None
+            or minus_di is None
         ):
             return None
 
-        # =========================================================
-        # REGIMEN
-        # =========================================================
-
-        trend_bullish = (
-            fast_1h > slow_1h
+        bullish_1h = (
+            ema20_1h_value > ema50_1h_value
             and adx_value >= self.adx_threshold
             and plus_di > minus_di
         )
 
-        trend_bearish = (
-            fast_1h < slow_1h
+        bearish_1h = (
+            ema20_1h_value < ema50_1h_value
             and adx_value >= self.adx_threshold
             and minus_di > plus_di
         )
 
-        # =========================================================
-        # POSITION
-        # =========================================================
+        # ---------------------------------------------------------
+        # Portfolio
+        # ---------------------------------------------------------
 
         portfolio = state.portfolio
+        position = portfolio.position if portfolio is not None else None
 
-        position = (
-            portfolio.position
-            if portfolio is not None
-            else None
-        )
-
-        # =========================================================
-        # EXIT
+        # ---------------------------------------------------------
+        # Si existe posición:
         #
-        # Unicamente cambiamos de posicion cuando 1H confirma
-        # el regimen contrario.
-        # =========================================================
+        # Solo cerramos cuando la tendencia 1H se vuelve contraria.
+        # ---------------------------------------------------------
 
         if position is not None:
 
-            if (
-                position.side == Side.BUY
-                and trend_bearish
-            ):
-                return Signal(
-                    action="EXIT"
-                )
+            if position.side == Side.BUY and bearish_1h:
+                return Signal(action="EXIT")
 
-            if (
-                position.side == Side.SELL
-                and trend_bullish
-            ):
-                return Signal(
-                    action="EXIT"
-                )
+            if position.side == Side.SELL and bullish_1h:
+                return Signal(action="EXIT")
 
-            # Nunca abrimos una segunda posicion.
             return None
 
-        # =========================================================
-        # SIN TENDENCIA
-        # =========================================================
+        # ---------------------------------------------------------
+        # Si 1H está neutral:
+        # NO abrir operaciones.
+        # ---------------------------------------------------------
 
-        if not trend_bullish and not trend_bearish:
+        if not bullish_1h and not bearish_1h:
             return None
 
-        # =========================================================
-        # 30M - CONFIRMACION
-        # =========================================================
+        # ---------------------------------------------------------
+        # 30m - CONFIRMACIÓN
+        #
+        # LONG:
+        # EMA20 > EMA50
+        #
+        # SHORT:
+        # EMA20 < EMA50
+        # ---------------------------------------------------------
 
-        confirm_tf = state.timeframes.get(
-            self.confirm_timeframe
-        )
-
-        if confirm_tf is None:
-            return None
-
-        ema_fast_30m = self._get_series(
-            confirm_tf,
+        ema20_30m = self._get_series(
+            tf_30m,
             "EMA",
-            self.label_fast_30m,
+            self.label_fast,
         )
 
-        ema_slow_30m = self._get_series(
-            confirm_tf,
+        ema50_30m = self._get_series(
+            tf_30m,
             "EMA",
-            self.label_slow_30m,
+            self.label_slow,
         )
 
-        fast_30m = self._ema_closed_value(
-            ema_fast_30m
-        )
-
-        slow_30m = self._ema_closed_value(
-            ema_slow_30m
-        )
-
-        if (
-            fast_30m is None
-            or slow_30m is None
-        ):
+        if ema20_30m is None or ema50_30m is None:
             return None
 
-        confirm_bullish = (
-            fast_30m > slow_30m
-        )
+        ema20_30m_value = self._ema_closed_value(ema20_30m)
+        ema50_30m_value = self._ema_closed_value(ema50_30m)
 
-        confirm_bearish = (
-            fast_30m < slow_30m
-        )
-
-        # La tendencia del 30m debe coincidir
-        # con la tendencia del 1H.
-
-        if (
-            trend_bullish
-            and not confirm_bullish
-        ):
+        if ema20_30m_value is None or ema50_30m_value is None:
             return None
 
-        if (
-            trend_bearish
-            and not confirm_bearish
-        ):
-            return None
+        bullish_30m = ema20_30m_value > ema50_30m_value
+        bearish_30m = ema20_30m_value < ema50_30m_value
 
-        # =========================================================
-        # 15M - PULLBACK
-        # =========================================================
+        # ---------------------------------------------------------
+        # 15m - PULLBACK + TENDENCIA
+        #
+        # IMPORTANTE:
+        # Aquí SI usamos EMA20 Y EMA50.
+        #
+        # LONG:
+        # EMA20 > EMA50
+        # Precio cerrado <= EMA20
+        #
+        # SHORT:
+        # EMA20 < EMA50
+        # Precio cerrado >= EMA20
+        # ---------------------------------------------------------
 
-        pullback_tf = state.timeframes.get(
-            self.pullback_timeframe
-        )
-
-        if pullback_tf is None:
-            return None
-
-        ema_15m = self._get_series(
-            pullback_tf,
+        ema20_15m = self._get_series(
+            tf_15m,
             "EMA",
-            self.label_fast_15m,
+            self.label_fast,
         )
 
-        ema_15m_value = self._ema_closed_value(
-            ema_15m
+        ema50_15m = self._get_series(
+            tf_15m,
+            "EMA",
+            self.label_slow,
         )
 
-        close_15m = self._closed_close(
-            pullback_tf
-        )
+        if ema20_15m is None or ema50_15m is None:
+            return None
+
+        ema20_15m_value = self._ema_closed_value(ema20_15m)
+        ema50_15m_value = self._ema_closed_value(ema50_15m)
+
+        close_15m = self._closed_close(tf_15m)
 
         if (
-            ema_15m_value is None
+            ema20_15m_value is None
+            or ema50_15m_value is None
             or close_15m is None
         ):
             return None
 
+        bullish_15m = ema20_15m_value > ema50_15m_value
+        bearish_15m = ema20_15m_value < ema50_15m_value
+
+        long_pullback = (
+            bullish_15m
+            and close_15m <= ema20_15m_value
+        )
+
+        short_pullback = (
+            bearish_15m
+            and close_15m >= ema20_15m_value
+        )
+
         # ---------------------------------------------------------
-        # LONG
+        # 5m - SETUP
+        #
+        # LONG:
+        # EMA20 > EMA50
+        #
+        # SHORT:
+        # EMA20 < EMA50
         # ---------------------------------------------------------
 
-        if trend_bullish:
+        ema20_5m = self._get_series(
+            tf_5m,
+            "EMA",
+            self.label_fast,
+        )
 
-            pullback_valid = (
-                close_15m <= ema_15m_value
-            )
+        ema50_5m = self._get_series(
+            tf_5m,
+            "EMA",
+            self.label_slow,
+        )
+
+        if ema20_5m is None or ema50_5m is None:
+            return None
+
+        ema20_5m_value = self._ema_closed_value(ema20_5m)
+        ema50_5m_value = self._ema_closed_value(ema50_5m)
+
+        if ema20_5m_value is None or ema50_5m_value is None:
+            return None
+
+        bullish_5m = ema20_5m_value > ema50_5m_value
+        bearish_5m = ema20_5m_value < ema50_5m_value
 
         # ---------------------------------------------------------
-        # SHORT
+        # 1m - TRIGGER
+        #
+        # LONG:
+        # EMA20 > EMA50
+        #
+        # SHORT:
+        # EMA20 < EMA50
         # ---------------------------------------------------------
 
-        else:
-
-            pullback_valid = (
-                close_15m >= ema_15m_value
-            )
-
-        if not pullback_valid:
-            return None
-
-        # =========================================================
-        # 5M - SETUP
-        # =========================================================
-
-        setup_tf = state.timeframes.get(
-            self.setup_timeframe
-        )
-
-        if setup_tf is None:
-            return None
-
-        ema_fast_5m = self._get_series(
-            setup_tf,
+        ema20_1m = self._get_series(
+            tf_1m,
             "EMA",
-            self.label_fast_5m,
+            self.label_fast,
         )
 
-        ema_slow_5m = self._get_series(
-            setup_tf,
+        ema50_1m = self._get_series(
+            tf_1m,
             "EMA",
-            self.label_slow_5m,
+            self.label_slow,
         )
 
-        fast_5m = self._ema_closed_value(
-            ema_fast_5m
-        )
-
-        slow_5m = self._ema_closed_value(
-            ema_slow_5m
-        )
-
-        if (
-            fast_5m is None
-            or slow_5m is None
-        ):
+        if ema20_1m is None or ema50_1m is None:
             return None
 
-        setup_bullish = (
-            fast_5m > slow_5m
-        )
+        ema20_1m_value = self._ema_closed_value(ema20_1m)
+        ema50_1m_value = self._ema_closed_value(ema50_1m)
 
-        setup_bearish = (
-            fast_5m < slow_5m
-        )
-
-        if (
-            trend_bullish
-            and not setup_bullish
-        ):
+        if ema20_1m_value is None or ema50_1m_value is None:
             return None
 
-        if (
-            trend_bearish
-            and not setup_bearish
-        ):
-            return None
+        bullish_1m = ema20_1m_value > ema50_1m_value
+        bearish_1m = ema20_1m_value < ema50_1m_value
 
-        # =========================================================
-        # 1M - TRIGGER
-        # =========================================================
-
-        trigger_tf = state.timeframes.get(
-            self.trigger_timeframe
-        )
-
-        if trigger_tf is None:
-            return None
-
-        ema_fast_1m = self._get_series(
-            trigger_tf,
-            "EMA",
-            self.label_fast_1m,
-        )
-
-        ema_slow_1m = self._get_series(
-            trigger_tf,
-            "EMA",
-            self.label_slow_1m,
-        )
-
-        fast_1m = self._ema_closed_value(
-            ema_fast_1m
-        )
-
-        slow_1m = self._ema_closed_value(
-            ema_slow_1m
-        )
+        # ---------------------------------------------------------
+        # ENTRADA LONG
+        # ---------------------------------------------------------
 
         if (
-            fast_1m is None
-            or slow_1m is None
-        ):
-            return None
-
-        trigger_bullish = (
-            fast_1m > slow_1m
-        )
-
-        trigger_bearish = (
-            fast_1m < slow_1m
-        )
-
-        # =========================================================
-        # LONG
-        # =========================================================
-
-        if (
-            trend_bullish
-            and confirm_bullish
-            and pullback_valid
-            and setup_bullish
-            and trigger_bullish
+            bullish_1h
+            and bullish_30m
+            and long_pullback
+            and bullish_5m
+            and bullish_1m
         ):
             return Signal(
                 action="BUY",
                 quantity=self.quantity,
             )
 
-        # =========================================================
-        # SHORT
-        # =========================================================
+        # ---------------------------------------------------------
+        # ENTRADA SHORT
+        # ---------------------------------------------------------
 
         if (
-            trend_bearish
-            and confirm_bearish
-            and pullback_valid
-            and setup_bearish
-            and trigger_bearish
+            bearish_1h
+            and bearish_30m
+            and short_pullback
+            and bearish_5m
+            and bearish_1m
         ):
             return Signal(
                 action="SELL",
@@ -646,71 +372,110 @@ class Strategy1(Strategy):
         return None
 
     # =============================================================
-    # EMA HELPERS
+    # HELPERS
     # =============================================================
 
     @staticmethod
+    def _unwrap(params: dict) -> dict:
+        out = {}
+
+        for key, value in (params or {}).items():
+            if isinstance(value, dict):
+                if "value" in value:
+                    value = value["value"]
+                else:
+                    continue
+
+            out[key] = value
+
+        return out
+
+    @staticmethod
+    def _get_series(timeframe, kind: str, label: str):
+        if timeframe is None:
+            return None
+
+        try:
+            return timeframe.get_series(kind, label)
+        except KeyError:
+            return None
+
+    @staticmethod
     def _ema_closed_value(series):
+        """
+        EMA:
+        _closed = último valor confirmado.
+        """
 
         if series is None:
             return None
 
-        # Tu EMA guarda la ultima vela confirmada
-        # en _closed.
-
-        closed = getattr(
-            series,
-            "_closed",
-            None,
-        )
+        closed = getattr(series, "_closed", None)
 
         if closed is None:
             return None
 
         return closed.value
 
-    # =============================================================
-    # ADX HELPERS
-    # =============================================================
-
     @staticmethod
-    def _adx_closed_value(
-        series,
-        field,
-    ):
+    def _adx_confirmed_value(series, timeframe, field: str):
+        """
+        ADX no tiene _closed como EMA.
+
+        Si ADX.live corresponde a la última vela cerrada,
+        usamos live.
+
+        Si live corresponde a la vela actualmente abierta,
+        usamos history[-1].
+        """
 
         if series is None:
             return None
 
-        # ADX no tiene .closed.
-        #
-        # Su ultimo valor confirmado esta en:
-        #
-        #     history[-1]
-        #
-        # El objeto Adx contiene:
-        #
-        #     adx
-        #     plus_di
-        #     minus_di
+        closed_bar = getattr(timeframe, "closed", None)
+        live = getattr(series, "live", None)
 
-        if not series.history:
+        if closed_bar is not None and live is not None:
+
+            live_start_ts = getattr(
+                live,
+                "start_ts",
+                None,
+            )
+
+            closed_start_ts = getattr(
+                closed_bar,
+                "start_ts",
+                None,
+            )
+
+            if (
+                live_start_ts is not None
+                and closed_start_ts is not None
+                and live_start_ts == closed_start_ts
+            ):
+                return getattr(
+                    live,
+                    field,
+                    None,
+                )
+
+        history = getattr(series, "history", None)
+
+        if not history:
             return None
 
-        value = series.history[-1]
-
         return getattr(
-            value,
+            history[-1],
             field,
             None,
         )
 
-    # =============================================================
-    # BAR
-    # =============================================================
-
     @staticmethod
     def _closed_close(timeframe):
+        """
+        Devuelve el cierre de la última vela cerrada.
+        """
 
         if timeframe is None:
             return None
@@ -729,47 +494,3 @@ class Strategy1(Strategy):
             "close",
             None,
         )
-
-    # =============================================================
-    # SERIES
-    # =============================================================
-
-    @staticmethod
-    def _get_series(
-        timeframe,
-        kind: str,
-        label: str,
-    ):
-
-        if timeframe is None:
-            return None
-
-        try:
-            return timeframe.get_series(
-                kind,
-                label,
-            )
-        except KeyError:
-            return None
-
-    # =============================================================
-    # PARAMS
-    # =============================================================
-
-    @staticmethod
-    def _unwrap(params: dict) -> dict:
-
-        out = {}
-
-        for key, value in (params or {}).items():
-
-            if isinstance(value, dict):
-
-                if "value" in value:
-                    value = value["value"]
-                else:
-                    continue
-
-            out[key] = value
-
-        return out
