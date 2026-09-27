@@ -1,18 +1,3 @@
-# BLACKER
-# Copyright (C) 2026 Juan José Caballero Rey
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation version 3 of the License.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 from core.engine_state import EngineState
 from strategy.base import Strategy
 from orders import Signal, Side
@@ -20,123 +5,766 @@ from orders import Signal, Side
 
 class Strategy1(Strategy):
     """
-    Cruce de EMAs: la estrategia mas simple que se puede escribir sobre
-    este motor. No busca alfa, sirve de ejemplo y de banco de pruebas del
-    ciclo de ordenes.
+    Estrategia MTF de continuación de tendencia.
 
-    La regla entera es una sola linea: la media rapida por encima de la
-    lenta es alcista, por debajo es bajista, y la posicion se abre o se
-    cierra en consecuencia.
+    ================================================================
+    1H - REGIMEN
+    ================================================================
 
-        - Plana y la rapida encima de la lenta  -> BUY
-        - Plana y la rapida debajo de la lenta   -> SELL
-        - Long y la estructura pasa a bajista   -> EXIT
-        - Short y la estructura pasa a alcista  -> EXIT
+        EMA rápida > EMA lenta
+        ADX >= threshold
+        +DI > -DI
 
-    Lo unico que lee es ``state``: no lleva contador de barras, ni
-    cooldown, ni banderas por lado. Por eso no necesita ``set_state`` ni
-    ``to_dict`` propios -- el estado que el motor restaura es exactamente
-    el que hay en ``EngineState``, y dos backtests sobre el mismo feed
-    dan el mismo resultado.
+            => Tendencia alcista
 
-    El stop-loss y los objetivos no se tocan aqui: los coloca el
-    RiskManager a partir de la configuracion de riesgo cuando la entrada
-    llena. Esta clase solo emite intenciones.
+        EMA rápida < EMA lenta
+        ADX >= threshold
+        -DI > +DI
+
+            => Tendencia bajista
+
+    ================================================================
+    30M - CONFIRMACION
+    ================================================================
+
+        LONG  -> EMA20 > EMA50
+        SHORT -> EMA20 < EMA50
+
+    ================================================================
+    15M - PULLBACK
+    ================================================================
+
+        LONG  -> precio <= EMA20
+        SHORT -> precio >= EMA20
+
+    ================================================================
+    5M - SETUP
+    ================================================================
+
+        LONG  -> EMA20 > EMA50
+        SHORT -> EMA20 < EMA50
+
+    ================================================================
+    1M - TRIGGER
+    ================================================================
+
+        LONG  -> EMA20 > EMA50
+        SHORT -> EMA20 < EMA50
+
+    ================================================================
+    FILOSOFIA
+    ================================================================
+
+    1H manda.
+
+    Los timeframes inferiores NO pueden cambiar el régimen.
+
+    Si 1H es alcista:
+        solamente se buscan LONG.
+
+    Si 1H es bajista:
+        solamente se buscan SHORT.
+
+    Si ADX está por debajo del threshold:
+        no se abren nuevas posiciones.
+
+    El RiskManager continúa gestionando SL / TP / trailing.
     """
 
     DEFAULT_PARAMS = {
-        # Timeframe del que se leen las medias.
-        "timeframe": "5m",
-        # Las etiquetas deben coincidir con las de la configuracion.
-        "label_fast": "EMA 20",
-        "label_slow": "EMA 50",
+
+        # =========================================================
+        # 1H
+        # =========================================================
+
+        "trend_timeframe": "1h",
+
+        "label_fast_1h": "EMA 20",
+        "label_slow_1h": "EMA 50",
+
+        "label_adx_1h": "ADX 14",
+
+        "adx_threshold": 25.0,
+
+        # =========================================================
+        # 30M
+        # =========================================================
+
+        "confirm_timeframe": "30m",
+
+        "label_fast_30m": "EMA 20",
+        "label_slow_30m": "EMA 50",
+
+        # =========================================================
+        # 15M
+        # =========================================================
+
+        "pullback_timeframe": "15m",
+
+        "label_fast_15m": "EMA 20",
+
+        # =========================================================
+        # 5M
+        # =========================================================
+
+        "setup_timeframe": "5m",
+
+        "label_fast_5m": "EMA 20",
+        "label_slow_5m": "EMA 50",
+
+        # =========================================================
+        # 1M
+        # =========================================================
+
+        "trigger_timeframe": "1m",
+
+        "label_fast_1m": "EMA 20",
+        "label_slow_1m": "EMA 50",
+
+        # =========================================================
+        # ORDER
+        # =========================================================
+
         "quantity": 1,
     }
 
     def __init__(self, kind: str, params: dict):
+
         super().__init__(kind, params)
 
         merged = dict(self.DEFAULT_PARAMS)
         merged.update(self._unwrap(params))
 
-        self.timeframe = str(merged["timeframe"])
-        self.label_fast = str(merged["label_fast"])
-        self.label_slow = str(merged["label_slow"])
+        # ---------------------------------------------------------
+        # Timeframes
+        # ---------------------------------------------------------
 
-        # El OrderManager rechaza una cantidad no positiva, asi que una
-        # configuracion equivocada cae a 1 en vez de tumbar el motor.
+        self.trend_timeframe = str(
+            merged["trend_timeframe"]
+        )
+
+        self.confirm_timeframe = str(
+            merged["confirm_timeframe"]
+        )
+
+        self.pullback_timeframe = str(
+            merged["pullback_timeframe"]
+        )
+
+        self.setup_timeframe = str(
+            merged["setup_timeframe"]
+        )
+
+        self.trigger_timeframe = str(
+            merged["trigger_timeframe"]
+        )
+
+        # ---------------------------------------------------------
+        # 1H
+        # ---------------------------------------------------------
+
+        self.label_fast_1h = str(
+            merged["label_fast_1h"]
+        )
+
+        self.label_slow_1h = str(
+            merged["label_slow_1h"]
+        )
+
+        self.label_adx_1h = str(
+            merged["label_adx_1h"]
+        )
+
         try:
-            quantity = float(merged["quantity"])
+            self.adx_threshold = float(
+                merged["adx_threshold"]
+            )
+        except (TypeError, ValueError):
+            self.adx_threshold = 25.0
+
+        # ---------------------------------------------------------
+        # 30M
+        # ---------------------------------------------------------
+
+        self.label_fast_30m = str(
+            merged["label_fast_30m"]
+        )
+
+        self.label_slow_30m = str(
+            merged["label_slow_30m"]
+        )
+
+        # ---------------------------------------------------------
+        # 15M
+        # ---------------------------------------------------------
+
+        self.label_fast_15m = str(
+            merged["label_fast_15m"]
+        )
+
+        # ---------------------------------------------------------
+        # 5M
+        # ---------------------------------------------------------
+
+        self.label_fast_5m = str(
+            merged["label_fast_5m"]
+        )
+
+        self.label_slow_5m = str(
+            merged["label_slow_5m"]
+        )
+
+        # ---------------------------------------------------------
+        # 1M
+        # ---------------------------------------------------------
+
+        self.label_fast_1m = str(
+            merged["label_fast_1m"]
+        )
+
+        self.label_slow_1m = str(
+            merged["label_slow_1m"]
+        )
+
+        # ---------------------------------------------------------
+        # Quantity
+        # ---------------------------------------------------------
+
+        try:
+            quantity = float(
+                merged["quantity"]
+            )
         except (TypeError, ValueError):
             quantity = 1.0
 
-        self.quantity = quantity if quantity > 0.0 else 1.0
+        self.quantity = (
+            quantity
+            if quantity > 0.0
+            else 1.0
+        )
+
+    # =============================================================
+    # EVALUATE
+    # =============================================================
 
     def evaluate(self, state: EngineState):
-        # ---------------------------------------------------------
-        # SERIES
-        # ---------------------------------------------------------
-        timeframe = state.timeframes.get(self.timeframe)
 
-        if timeframe is None:
+        # =========================================================
+        # 1H - TENDENCIA
+        # =========================================================
+
+        trend_tf = state.timeframes.get(
+            self.trend_timeframe
+        )
+
+        if trend_tf is None:
             return None
 
-        fast = self._get_series(timeframe, "EMA", self.label_fast)
-        slow = self._get_series(timeframe, "EMA", self.label_slow)
+        ema_fast_1h = self._get_series(
+            trend_tf,
+            "EMA",
+            self.label_fast_1h,
+        )
 
-        if fast is None or slow is None:
+        ema_slow_1h = self._get_series(
+            trend_tf,
+            "EMA",
+            self.label_slow_1h,
+        )
+
+        adx_1h = self._get_series(
+            trend_tf,
+            "ADX",
+            self.label_adx_1h,
+        )
+
+        if (
+            ema_fast_1h is None
+            or ema_slow_1h is None
+            or adx_1h is None
+        ):
             return None
 
-        if fast.live is None or slow.live is None:
-            return None
-
-        fast_value = fast.live.value
-        slow_value = slow.live.value
-
-        if fast_value is None or slow_value is None:
-            return None
-
-        bullish = fast_value > slow_value
-        bearish = fast_value < slow_value
-
-        # ---------------------------------------------------------
-        # POSICION
+        # =========================================================
+        # Usamos valores CONFIRMADOS.
         #
-        # El portfolio es la unica fuente de verdad: si una entrada esta
-        # pendiente todavia no hay posicion, y aqui no se lleva ninguna
-        # cuenta propia que pueda desincronizarse de el.
-        # ---------------------------------------------------------
-        portfolio = state.portfolio
-        position = portfolio.position if portfolio is not None else None
+        # EMA:
+        #     _closed
+        #
+        # ADX:
+        #     history[-1]
+        #
+        # No usamos el valor live para determinar la tendencia.
+        # =========================================================
 
-        if position is None:
-            if bullish:
-                return Signal(action="BUY", quantity=self.quantity)
+        fast_1h = self._ema_closed_value(
+            ema_fast_1h
+        )
 
-            if bearish:
-                return Signal(action="SELL", quantity=self.quantity)
+        slow_1h = self._ema_closed_value(
+            ema_slow_1h
+        )
 
+        adx_value = self._adx_closed_value(
+            adx_1h,
+            "adx",
+        )
+
+        plus_di = self._adx_closed_value(
+            adx_1h,
+            "plus_di",
+        )
+
+        minus_di = self._adx_closed_value(
+            adx_1h,
+            "minus_di",
+        )
+
+        if any(
+            value is None
+            for value in (
+                fast_1h,
+                slow_1h,
+                adx_value,
+                plus_di,
+                minus_di,
+            )
+        ):
             return None
 
-        if position.side == Side.BUY and bearish:
-            return Signal(action="EXIT")
+        # =========================================================
+        # REGIMEN
+        # =========================================================
 
-        if position.side == Side.SELL and bullish:
-            return Signal(action="EXIT")
+        trend_bullish = (
+            fast_1h > slow_1h
+            and adx_value >= self.adx_threshold
+            and plus_di > minus_di
+        )
+
+        trend_bearish = (
+            fast_1h < slow_1h
+            and adx_value >= self.adx_threshold
+            and minus_di > plus_di
+        )
+
+        # =========================================================
+        # POSITION
+        # =========================================================
+
+        portfolio = state.portfolio
+
+        position = (
+            portfolio.position
+            if portfolio is not None
+            else None
+        )
+
+        # =========================================================
+        # EXIT
+        #
+        # Unicamente cambiamos de posicion cuando 1H confirma
+        # el regimen contrario.
+        # =========================================================
+
+        if position is not None:
+
+            if (
+                position.side == Side.BUY
+                and trend_bearish
+            ):
+                return Signal(
+                    action="EXIT"
+                )
+
+            if (
+                position.side == Side.SELL
+                and trend_bullish
+            ):
+                return Signal(
+                    action="EXIT"
+                )
+
+            # Nunca abrimos una segunda posicion.
+            return None
+
+        # =========================================================
+        # SIN TENDENCIA
+        # =========================================================
+
+        if not trend_bullish and not trend_bearish:
+            return None
+
+        # =========================================================
+        # 30M - CONFIRMACION
+        # =========================================================
+
+        confirm_tf = state.timeframes.get(
+            self.confirm_timeframe
+        )
+
+        if confirm_tf is None:
+            return None
+
+        ema_fast_30m = self._get_series(
+            confirm_tf,
+            "EMA",
+            self.label_fast_30m,
+        )
+
+        ema_slow_30m = self._get_series(
+            confirm_tf,
+            "EMA",
+            self.label_slow_30m,
+        )
+
+        fast_30m = self._ema_closed_value(
+            ema_fast_30m
+        )
+
+        slow_30m = self._ema_closed_value(
+            ema_slow_30m
+        )
+
+        if (
+            fast_30m is None
+            or slow_30m is None
+        ):
+            return None
+
+        confirm_bullish = (
+            fast_30m > slow_30m
+        )
+
+        confirm_bearish = (
+            fast_30m < slow_30m
+        )
+
+        # La tendencia del 30m debe coincidir
+        # con la tendencia del 1H.
+
+        if (
+            trend_bullish
+            and not confirm_bullish
+        ):
+            return None
+
+        if (
+            trend_bearish
+            and not confirm_bearish
+        ):
+            return None
+
+        # =========================================================
+        # 15M - PULLBACK
+        # =========================================================
+
+        pullback_tf = state.timeframes.get(
+            self.pullback_timeframe
+        )
+
+        if pullback_tf is None:
+            return None
+
+        ema_15m = self._get_series(
+            pullback_tf,
+            "EMA",
+            self.label_fast_15m,
+        )
+
+        ema_15m_value = self._ema_closed_value(
+            ema_15m
+        )
+
+        close_15m = self._closed_close(
+            pullback_tf
+        )
+
+        if (
+            ema_15m_value is None
+            or close_15m is None
+        ):
+            return None
+
+        # ---------------------------------------------------------
+        # LONG
+        # ---------------------------------------------------------
+
+        if trend_bullish:
+
+            pullback_valid = (
+                close_15m <= ema_15m_value
+            )
+
+        # ---------------------------------------------------------
+        # SHORT
+        # ---------------------------------------------------------
+
+        else:
+
+            pullback_valid = (
+                close_15m >= ema_15m_value
+            )
+
+        if not pullback_valid:
+            return None
+
+        # =========================================================
+        # 5M - SETUP
+        # =========================================================
+
+        setup_tf = state.timeframes.get(
+            self.setup_timeframe
+        )
+
+        if setup_tf is None:
+            return None
+
+        ema_fast_5m = self._get_series(
+            setup_tf,
+            "EMA",
+            self.label_fast_5m,
+        )
+
+        ema_slow_5m = self._get_series(
+            setup_tf,
+            "EMA",
+            self.label_slow_5m,
+        )
+
+        fast_5m = self._ema_closed_value(
+            ema_fast_5m
+        )
+
+        slow_5m = self._ema_closed_value(
+            ema_slow_5m
+        )
+
+        if (
+            fast_5m is None
+            or slow_5m is None
+        ):
+            return None
+
+        setup_bullish = (
+            fast_5m > slow_5m
+        )
+
+        setup_bearish = (
+            fast_5m < slow_5m
+        )
+
+        if (
+            trend_bullish
+            and not setup_bullish
+        ):
+            return None
+
+        if (
+            trend_bearish
+            and not setup_bearish
+        ):
+            return None
+
+        # =========================================================
+        # 1M - TRIGGER
+        # =========================================================
+
+        trigger_tf = state.timeframes.get(
+            self.trigger_timeframe
+        )
+
+        if trigger_tf is None:
+            return None
+
+        ema_fast_1m = self._get_series(
+            trigger_tf,
+            "EMA",
+            self.label_fast_1m,
+        )
+
+        ema_slow_1m = self._get_series(
+            trigger_tf,
+            "EMA",
+            self.label_slow_1m,
+        )
+
+        fast_1m = self._ema_closed_value(
+            ema_fast_1m
+        )
+
+        slow_1m = self._ema_closed_value(
+            ema_slow_1m
+        )
+
+        if (
+            fast_1m is None
+            or slow_1m is None
+        ):
+            return None
+
+        trigger_bullish = (
+            fast_1m > slow_1m
+        )
+
+        trigger_bearish = (
+            fast_1m < slow_1m
+        )
+
+        # =========================================================
+        # LONG
+        # =========================================================
+
+        if (
+            trend_bullish
+            and confirm_bullish
+            and pullback_valid
+            and setup_bullish
+            and trigger_bullish
+        ):
+            return Signal(
+                action="BUY",
+                quantity=self.quantity,
+            )
+
+        # =========================================================
+        # SHORT
+        # =========================================================
+
+        if (
+            trend_bearish
+            and confirm_bearish
+            and pullback_valid
+            and setup_bearish
+            and trigger_bearish
+        ):
+            return Signal(
+                action="SELL",
+                quantity=self.quantity,
+            )
 
         return None
 
     # =============================================================
-    # HELPERS
+    # EMA HELPERS
+    # =============================================================
+
+    @staticmethod
+    def _ema_closed_value(series):
+
+        if series is None:
+            return None
+
+        # Tu EMA guarda la ultima vela confirmada
+        # en _closed.
+
+        closed = getattr(
+            series,
+            "_closed",
+            None,
+        )
+
+        if closed is None:
+            return None
+
+        return closed.value
+
+    # =============================================================
+    # ADX HELPERS
+    # =============================================================
+
+    @staticmethod
+    def _adx_closed_value(
+        series,
+        field,
+    ):
+
+        if series is None:
+            return None
+
+        # ADX no tiene .closed.
+        #
+        # Su ultimo valor confirmado esta en:
+        #
+        #     history[-1]
+        #
+        # El objeto Adx contiene:
+        #
+        #     adx
+        #     plus_di
+        #     minus_di
+
+        if not series.history:
+            return None
+
+        value = series.history[-1]
+
+        return getattr(
+            value,
+            field,
+            None,
+        )
+
+    # =============================================================
+    # BAR
+    # =============================================================
+
+    @staticmethod
+    def _closed_close(timeframe):
+
+        if timeframe is None:
+            return None
+
+        candle = getattr(
+            timeframe,
+            "closed",
+            None,
+        )
+
+        if candle is None:
+            return None
+
+        return getattr(
+            candle,
+            "close",
+            None,
+        )
+
+    # =============================================================
+    # SERIES
+    # =============================================================
+
+    @staticmethod
+    def _get_series(
+        timeframe,
+        kind: str,
+        label: str,
+    ):
+
+        if timeframe is None:
+            return None
+
+        try:
+            return timeframe.get_series(
+                kind,
+                label,
+            )
+        except KeyError:
+            return None
+
+    # =============================================================
+    # PARAMS
     # =============================================================
 
     @staticmethod
     def _unwrap(params: dict) -> dict:
+
         out = {}
 
         for key, value in (params or {}).items():
 
             if isinstance(value, dict):
+
                 if "value" in value:
                     value = value["value"]
                 else:
@@ -145,13 +773,3 @@ class Strategy1(Strategy):
             out[key] = value
 
         return out
-
-    @staticmethod
-    def _get_series(timeframe, kind: str, label: str):
-        if timeframe is None:
-            return None
-
-        try:
-            return timeframe.get_series(kind, label)
-        except KeyError:
-            return None
