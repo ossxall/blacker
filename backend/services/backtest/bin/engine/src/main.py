@@ -14,6 +14,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import time
+import logging
 import requests
 from ingestion.tick import Tick
 from core.engine import TradingEngine
@@ -24,6 +25,8 @@ from enum import StrEnum
 #-----------------------------------------------------------------------------------------------------------------------
 # IMPLEMENTATION
 #-----------------------------------------------------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 consumer = PulsarConsumer(
         service_url="pulsar://localhost:16650",
@@ -73,11 +76,20 @@ def handle_tick(cstate: dict, tick: Tick):
             print("Master endpoint error.")
             return False
 
-        engine.set_state(
-            boot_id=res["boot_id"],
-            config_id=res["master"]["config_id"],
-            engine_state=res["master"]["engine_state"],
-        )
+        try:
+            engine.set_state(
+                boot_id=res["boot_id"],
+                config_id=res["master"]["config_id"],
+                engine_state=res["master"]["engine_state"],
+            )
+        except Exception:
+            # The engine is unusable until the master sends a state it can
+            # actually build, so nothing half built may be left behind for
+            # the next tick to pick up.
+            logger.exception("master state rejected by set_state, resetting the engine")
+            engine.reset()
+            raise
+
         engine.status = "ready"
         return True
 
@@ -133,8 +145,28 @@ def handle_tick(cstate: dict, tick: Tick):
     # ----------------------------------------------------------
     # PROCESS
     # ----------------------------------------------------------
+    # A failing tick leaves the engine half applied: the bars, the
+    # indicators and any fill it already booked are permanent, and the
+    # signal it was about to produce is lost. None of that can be rolled
+    # back, so the only sound recovery is to drop every bit of engine
+    # state and resync from the master checkpoint.
+    #
+    # NACKing redelivers the whole batch. The master publishes the engine
+    # state only on the last tick of a batch, so its checkpoint always
+    # sits on a message boundary and the redelivered batch lines up with
+    # the state we resync to. Without this reset the sequence guard below
+    # would reject that redelivery forever, because a stale tick_index no
+    # longer matches the start of the batch.
 
-    new_state, signal = engine.on_tick(tick)
+    try:
+        new_state, signal = engine.on_tick(tick)
+    except Exception:
+        logger.exception(
+            "tick %s failed, resetting the engine and nacking the batch",
+            tick.tick_index,
+        )
+        engine.reset()
+        return TickResponse.NACK
 
     if signal:
         print("SIGNAL:", signal)
