@@ -29,11 +29,7 @@ use tracing::info;
 ///         "targets": [
 ///             { "type": "percent", "value": 0.02 },
 ///             { "type": "percent", "value": 0.03 }
-///         ],
-///         "trailing": {
-///             "enabled": true,
-///             "distance": { "type": "percent", "value": 0.005 }
-///         }
+///         ]
 ///     }
 ///
 #[derive(Debug, Deserialize)]

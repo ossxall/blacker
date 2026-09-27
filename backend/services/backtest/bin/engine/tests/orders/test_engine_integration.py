@@ -1,6 +1,7 @@
 from src.core.engine import TradingEngine
 from src.ingestion.tick import Tick
 from src.orders import OrderManager, OrderRole, Side
+from src.strategy.my_strategy import Strategy1
 import pytest
 
 BASE_TS = 1700 * 60_000
@@ -344,3 +345,71 @@ def test_engine_short_internal_exit_path():
 def test_restored_order_manager_matches_serialized_book():
     manager = OrderManager()
     assert manager.to_dict() == OrderManager.from_dict(manager.to_dict()).to_dict()
+
+
+def test_strategy_sees_the_book_as_it_is_after_this_tick():
+    # Regression: the state handed to evaluate() used to be built before the
+    # trigger pass, so on the tick an entry filled the strategy still saw the
+    # entry as WORKING and the freshly created bracket as missing. A
+    # strategy guarding on "is my order still pending?" would have read it
+    # backwards for one tick.
+    observed = []
+
+    engine = TradingEngine()
+    state = build_engine_state(risk=RISK, direction="short")
+    engine.set_state("boot", "config", state)
+
+    class Spy(Strategy1):
+        def evaluate(self, state):
+            observed.append(
+                {
+                    order["id"]: order["status"]
+                    for order in state.orders["orders"]
+                    if order["status"] == "WORKING"
+                }
+            )
+            return super().evaluate(state)
+
+    engine.strategy = Spy("Strategy1", state["strategy"]["params"])
+
+    sell_minute = run_until_signal(engine, "short", "SELL")
+
+    for minute in range(sell_minute + 1, sell_minute + 6):
+        published, _ = engine.on_tick(
+            make_tick(minute, BASE_TS + minute * 60_000, price_at(minute, "short"))
+        )
+
+        assert observed[-1] == {
+            order["id"]: order["status"]
+            for order in published.orders["orders"]
+            if order["status"] == "WORKING"
+        }
+
+
+def test_engine_book_stays_bounded_over_a_long_run():
+    # Regression: settled orders were never dropped, and the whole book was
+    # reserialized twice per tick, so both the payload and the per-tick cost
+    # grew with the length of the replay instead of with live exposure.
+    engine = TradingEngine()
+    engine.set_state("boot", "config", build_engine_state(risk=RISK))
+
+    sizes = []
+
+    for index in range(1200):
+        # Zigzag: enough crossings to trade repeatedly in both directions.
+        price = 100.0 + 0.4 * index if (index // 25) % 2 == 0 else 100.0 - 0.4 * (index % 50)
+        state, _ = engine.on_tick(
+            make_tick(index, BASE_TS + index * 60_000, price)
+        )
+
+        if (index + 1) % 400 == 0:
+            sizes.append(len(state.orders["orders"]))
+
+    # The book is capped, so the last two samples are identical no matter how
+    # many trades happened in between.
+    assert sizes[-1] == sizes[-2]
+    assert len(engine.order_manager.working_orders()) <= 3
+    assert len(engine.order_manager._orders) <= 202
+
+    # The trade history itself is the backtest output and is untouched.
+    assert len(engine.portfolio.trades) > 10

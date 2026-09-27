@@ -24,14 +24,7 @@ http:
               "type": "percent",
               "value": 0.03
             }
-          ],
-          "trailing": {
-            "enabled": false,
-            "distance": {
-              "type": "percent",
-              "value": 0.005
-            }
-          }
+          ]
         }
       }
   auth: inherit

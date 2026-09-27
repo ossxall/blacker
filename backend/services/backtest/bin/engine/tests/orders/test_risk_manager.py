@@ -149,82 +149,37 @@ def test_warnings_are_emitted_once_per_spec():
     assert caught == []
 
 
-def test_trailing_keeps_a_relative_spec():
-    risk = RiskManager(
-        {
-            "trailing": {
-                "enabled": True,
-                "distance": {"type": "percent", "value": 0.01},
+def test_a_trailing_key_is_reported_and_ignored():
+    # Trailing is gone. A configuration that still carries one must say so
+    # instead of silently behaving as a static stop, because the persisted
+    # risk config is the only place the mismatch would otherwise show up.
+    with pytest.warns(RuntimeWarning, match="no longer supported"):
+        risk = RiskManager(
+            {
+                "stop": {"type": "percent", "value": 0.02},
+                "trailing": {
+                    "enabled": True,
+                    "distance": {"type": "percent", "value": 0.01},
+                },
             }
-        }
-    )
+        )
 
     levels = risk.apply(Side.BUY, 100.0)
 
-    assert levels.trailing is not None
-    assert levels.trailing.kind == "percent"
-    assert risk.trailing_distance(levels.trailing, 100.0) == 1.0
-    assert risk.trailing_distance(levels.trailing, 250.0) == 2.5
+    assert levels.stop_price == 98.0
+    assert not hasattr(levels, "trailing")
 
 
-def test_trailing_spec_round_trips_through_a_dict():
-    risk = RiskManager(
-        {
-            "trailing": {
-                "enabled": "true",
-                "distance": {"type": "atr", "multiplier": 3.0},
-            }
-        },
-        context={"atr": 2.0},
-    )
+def test_a_static_stop_does_not_move_with_price():
+    risk = RiskManager({"stop": {"type": "percent", "value": 0.02}})
 
-    levels = risk.apply(Side.BUY, 100.0)
+    first = risk.apply(Side.BUY, 100.0)
 
-    spec = levels.trailing.to_dict()
-
-    assert spec == {"kind": "atr", "value": 0.0, "multiplier": 3.0}
-    assert risk.trailing_distance(spec, 100.0) == 6.0
-
-
-def test_trailing_is_disabled_when_enabled_is_false():
-    risk = RiskManager(
-        {
-            "trailing": {
-                "enabled": False,
-                "distance": {"type": "percent", "value": 0.01},
-            }
-        }
-    )
-
-    assert risk.apply(Side.BUY, 100.0).trailing is None
-
-
-def test_trailing_without_a_distance_is_reported():
-    risk = RiskManager({"trailing": {"enabled": True}})
-
-    with pytest.warns(RuntimeWarning, match="no distance"):
-        assert risk.apply(Side.BUY, 100.0).trailing is None
-
-
-def test_trailing_with_an_unknown_distance_type_is_reported():
-    risk = RiskManager(
-        {
-            "trailing": {
-                "enabled": True,
-                "distance": {"type": "pct", "value": 0.01},
-            }
-        }
-    )
-
-    with pytest.warns(RuntimeWarning, match="Unknown trailing distance type"):
-        assert risk.apply(Side.BUY, 100.0).trailing is None
-
-
-def test_trailing_distance_is_zero_without_a_spec():
-    risk = RiskManager()
-
-    assert risk.trailing_distance(None, 100.0) == 0.0
-    assert risk.trailing_distance({"kind": "percent", "value": 0.01}, 0.0) == 0.0
+    # A different price produces different levels: the bracket is derived
+    # from the entry, never re-derived from where the market went.
+    assert risk.apply(Side.BUY, 200.0).stop_price == 196.0
+    assert first.stop_price == 98.0
+    assert not hasattr(first, "trailing")
 
 
 def test_entry_price_must_be_a_positive_number():

@@ -145,12 +145,31 @@ class TradingEngine:
         for timeframe in self.timeframes.values():
             timeframe.update()
 
+        # --------------------------------------------------
+        # 1. Resolve protective orders first.
+        #    Stops and targets are matched before the strategy
+        #    sees any state, so it never acts on a position
+        #    that was already closed by a bracket.
+        # --------------------------------------------------
+
+        fills = self.execution.update(None, tick)
+
+        # --------------------------------------------------
+        # 2. Settle the book, then build the state.
+        #    Pruning first keeps both the state handed to the
+        #    strategy and the state shipped to the client
+        #    proportional to live exposure instead of to the
+        #    length of the replay.
+        # --------------------------------------------------
+
+        self.order_manager.prune()
+
         self.state = EngineState(
             boot_id=self.boot_id,
             config_id=self.config_id,
             tick_index=tick.tick_index,
             time=tick.time,
-            timeframes=self.timeframes, 
+            timeframes=self.timeframes,
             strategy=self.strategy,
             portfolio=self.portfolio,
             risk=self.risk,
@@ -158,22 +177,16 @@ class TradingEngine:
         )
 
         # --------------------------------------------------
-        # 1. Resolve protective orders first.
-        #    Stops and targets are matched before the strategy
-        #    sees the updated state, so it never acts on a
-        #    position that was already closed by a bracket.
-        # --------------------------------------------------
-
-        fills = self.execution.update(self.state, tick)
-
-        # --------------------------------------------------
-        # 2. Evaluate the strategy on the consistent state.
+        # 3. Evaluate the strategy on the consistent state:
+        #    the portfolio *and* the order book both reflect
+        #    the fills that just happened, not the previous
+        #    tick's view of them.
         # --------------------------------------------------
 
         signal = self.strategy.evaluate(self.state)
 
         # --------------------------------------------------
-        # 3. Translate the alpha intent into orders and queue
+        # 4. Translate the alpha intent into orders and queue
         #    them for the next tick.
         # --------------------------------------------------
 
@@ -182,7 +195,7 @@ class TradingEngine:
         self.execution.submit(orders)
 
         # --------------------------------------------------
-        # 4. The published state must reflect everything this
+        # 5. The published state must reflect everything this
         #    tick has done (fills, position, order book).
         # --------------------------------------------------
 

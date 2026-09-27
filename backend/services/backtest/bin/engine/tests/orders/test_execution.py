@@ -105,14 +105,8 @@ def test_stop_triggers_when_price_drops_below_stop():
     assert manager.portfolio.realized_pnl == -1.0
 
 
-def test_trailing_stop_ratchets_then_triggers():
-    config = {
-        "stop": {"type": "percent", "value": 0.01},
-        "trailing": {
-            "enabled": True,
-            "distance": {"type": "percent", "value": 0.005},
-        },
-    }
+def test_a_static_stop_holds_its_level_and_triggers_there():
+    config = {"stop": {"type": "percent", "value": 0.01}}
     manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
     execution = Execution(manager)
 
@@ -126,12 +120,13 @@ def test_trailing_stop_ratchets_then_triggers():
     stop = [o for o in manager.working_orders() if o.role == OrderRole.STOP][0]
     assert stop.price == 99.0
 
-    # Price rises: the stop ratchets to 0.5% below the new price.
+    # Price rises. The stop is static, so it does not follow: a trade that
+    # runs in favour is still protected at the level the entry priced.
     execution.update(state=None, tick=make_tick(2, 101.0))
-    assert stop.price == pytest.approx(101.0 * 0.995)
+    assert stop.price == 99.0
 
-    # A pullback below the trailing level closes the position.
-    fills = execution.update(state=None, tick=make_tick(3, 100.0))
+    # The pullback to the entry level is enough to take it out.
+    fills = execution.update(state=None, tick=make_tick(3, 99.0))
 
     assert len(fills) == 1
     assert fills[0].role == OrderRole.STOP

@@ -43,8 +43,17 @@ class Execution:
     def submit(self, orders: list[Order]) -> None:
         self._order_manager.submit(orders)
 
-    def update(self, state, tick) -> list[Fill]:
-        self._order_manager.update_trailing_stops(tick.price)
+    def update(self, state=None, tick=None) -> list[Fill]:
+        """
+        Matches every working order against ``tick`` and returns real fills.
+
+        Matching reads the OrderManager, not the engine state: the book is
+        the authority on what is live, so this pass is deliberately
+        independent of what the strategy is about to be shown. ``state`` is
+        kept only for call compatibility and is not used.
+        """
+        if tick is None:
+            return []
 
         fills: list[Fill] = []
 

@@ -40,6 +40,15 @@ def find_role(orders, role):
     return [o for o in orders if o.role == role]
 
 
+# An explicit stop + single target, so a filled entry always produces exactly
+# two working orders. Relying on the default RiskManager would make these
+# tests depend on whether it invents a stop for an empty config.
+BRACKET = {
+    "stop": {"type": "percent", "value": 0.01},
+    "targets": [{"type": "percent", "value": 0.02}],
+}
+
+
 def test_buy_signal_creates_market_entry_order():
     manager = OrderManager(portfolio=Portfolio())
 
@@ -220,99 +229,29 @@ def test_exit_signal_cancels_bracket_and_submits_exit_order():
     assert manager.working_orders() == orders
 
 
-def test_trailing_stop_ratchets_up_for_long():
-    config = {
-        "stop": {"type": "percent", "value": 0.01},
-        "trailing": {
-            "enabled": True,
-            "distance": {"type": "percent", "value": 0.005},
-        },
-    }
-    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+def test_the_bracket_stop_never_moves_after_the_entry_fill():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
 
     entry = manager.handle(Signal(action="BUY", quantity=1))[0]
     fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
 
     stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
+
+    # Priced once, against the entry fill.
     assert stop.price == 99.0
-    assert stop.trailing is True
-    assert stop.trailing_distance == 0.5
 
-    # The distance is relative: 0.5% of the price that is moving, not the
-    # 0.5 absolute units it was worth at entry. Freezing it at entry left
-    # the stop a thousandth of the price away after a large move.
-    manager.update_trailing_stops(101.0)
-    assert stop.price == pytest.approx(101.0 * 0.995)
-
-    # A pullback does not loosen the ratchet.
-    manager.update_trailing_stops(100.0)
-    assert stop.price == pytest.approx(101.0 * 0.995)
-
-
-def test_trailing_stop_keeps_its_distance_after_a_large_move():
-    config = {
-        "stop": {"type": "percent", "value": 0.01},
-        "trailing": {
-            "enabled": True,
-            "distance": {"type": "percent", "value": 0.01},
-        },
-    }
-    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
-
-    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
-    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
-
-    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
-
-    manager.update_trailing_stops(200.0)
-
-    assert stop.price == pytest.approx(198.0)
-
-
-def test_absolute_trailing_distance_stays_absolute():
-    config = {
-        "stop": {"type": "percent", "value": 0.01},
-        "trailing": {
-            "enabled": True,
-            "distance": {"type": "absolute", "value": 2.0},
-        },
-    }
-    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
-
-    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
-    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
-
-    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
-
-    manager.update_trailing_stops(500.0)
-
-    assert stop.price == 498.0
-
-
-def test_trailing_stop_is_not_ratcheted_once_the_bracket_is_closed():
-    config = {
-        "stop": {"type": "percent", "value": 0.01},
-        "targets": [{"type": "percent", "value": 0.02}],
-        "trailing": {
-            "enabled": True,
-            "distance": {"type": "percent", "value": 0.005},
-        },
-    }
-    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
-
-    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
-    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
-
-    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
-    target = find_role(manager.working_orders(), OrderRole.TARGET)[0]
-
-    fill_order(manager, target, 102.0, make_tick(1, 102.0))
-
-    assert stop.status == OrderStatus.CANCELLED
-
-    manager.update_trailing_stops(500.0)
-
+    # Nothing in the book carries a ratchet and there is no per-tick hook
+    # left that could move the stop, so it stays at its entry level.
+    assert not hasattr(stop, "trailing")
+    assert not hasattr(manager, "update_trailing_stops")
+    assert not hasattr(RiskManager(BRACKET), "trailing_distance")
     assert stop.price == 99.0
+
+    # It still triggers on that level.
+    fill_order(manager, stop, 99.0, make_tick(1, 99.0))
+
+    assert stop.status == OrderStatus.FILLED
+    assert manager.portfolio.position is None
 
 
 def test_stop_takes_matching_priority_over_the_targets():
@@ -422,3 +361,106 @@ def test_serialization_roundtrip():
 
     assert len(restored.working_orders()) == len(manager.working_orders())
     assert restored.to_dict() == manager.to_dict()
+
+
+def churn(manager, cycles):
+    """Runs ``cycles`` complete round trips: entry fills, stop takes it out."""
+    for index in range(cycles):
+        entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+        fill_entry(manager, entry, 100.0, make_tick(index * 2, 100.0))
+
+        stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
+        fill_order(manager, stop, stop.price, make_tick(index * 2 + 1, stop.price))
+
+
+def test_prune_never_drops_a_working_order():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    churn(manager, 5)
+
+    # A live entry with no bracket yet: it is the engine's current truth.
+    manager.handle(Signal(action="BUY", quantity=1))
+
+    manager.prune(keep=0)
+
+    working = manager.working_orders()
+
+    assert len(working) == 1
+    assert working[0].role == OrderRole.ENTRY
+    assert all(o.status == OrderStatus.WORKING for o in working)
+
+
+def test_prune_keeps_the_most_recent_settled_orders():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    churn(manager, 12)
+
+    before = len(manager.to_dict()["orders"])
+
+    removed, _ = manager.prune(keep=5)
+
+    after = manager.to_dict()["orders"]
+
+    assert removed == before - len(after)
+    assert len(after) == 5
+
+    # What survives is the tail, in creation order, so the client can still
+    # render the most recent activity.
+    assert [o["id"] for o in after] == sorted(o["id"] for o in after)
+    assert all(o["status"] != OrderStatus.WORKING for o in after)
+
+
+def test_prune_bounds_the_book_over_a_long_run():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    churn(manager, 200)
+
+    manager.prune(keep=10)
+
+    assert len(manager.to_dict()["orders"]) == 10
+    assert len(manager.to_dict()["groups"]) == 10
+
+
+def test_prune_keeps_a_group_that_still_backs_quantity():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager({"stop": None}))
+
+    churn(manager, 8)
+
+    # A group whose orders are all settled but that still carries quantity is
+    # an exposed position with no protection. Its record is the only evidence
+    # of that, so pruning must not hide it.
+    live_group = manager.groups()[0]
+    live_group.remaining_quantity = 5.0
+
+    manager.prune(keep=0)
+
+    assert live_group.id in [group.id for group in manager.groups()]
+
+
+def test_prune_keeps_working_orders_of_a_flat_group():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    group = manager.groups()[0]
+
+    # Force the group flat while its bracket is still working: the orders
+    # are the thing that decides, not the group's bookkeeping.
+    group.remaining_quantity = 0.0
+
+    manager.prune(keep=0)
+
+    assert group.id in [candidate.id for candidate in manager.groups()]
+    assert len(manager.working_orders()) == 2
+
+
+def test_prune_with_a_negative_window_is_a_noop():
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    churn(manager, 3)
+
+    before = manager.to_dict()
+
+    assert manager.prune(keep=-1) == (0, 0)
+    assert manager.to_dict() == before

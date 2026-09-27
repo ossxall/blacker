@@ -39,9 +39,9 @@ class Strategy1(Strategy):
     el que hay en ``EngineState``, y dos backtests sobre el mismo feed
     dan el mismo resultado.
 
-    El stop-loss, los objetivos y el trailing no se tocan aqui: los
-    coloca el RiskManager a partir de la configuracion de riesgo cuando
-    la entrada llena. Esta clase solo emite intenciones.
+    El stop-loss y los objetivos no se tocan aqui: los coloca el
+    RiskManager a partir de la configuracion de riesgo cuando la entrada
+    llena. Esta clase solo emite intenciones.
     """
 
     DEFAULT_PARAMS = {

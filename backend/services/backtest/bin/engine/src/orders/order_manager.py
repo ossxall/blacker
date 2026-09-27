@@ -27,7 +27,7 @@ from orders.models import (
     Side,
     Signal,
 )
-from orders.risk_manager import RiskManager, TrailingSpec
+from orders.risk_manager import RiskManager
 
 
 class OrderManager:
@@ -39,7 +39,6 @@ class OrderManager:
         1. ``handle(signal)``        -> translate strategy intent into orders.
         2. ``make_fill`` / ``on_fill`` -> execute fills, open positions and
            place the stop-loss + take-profit bracket on entry.
-        3. ``update_trailing_stops`` -> ratchet trailing stops with price.
 
     Invariants the rest of the engine relies on:
 
@@ -49,6 +48,9 @@ class OrderManager:
           cancelled. Orders are never left working with nothing to fill.
         * The bracket of a group is created on the entry fill and its
           siblings are OCO: the first exit fill cancels the rest.
+        * The bracket is static. A stop is priced once against the entry
+          fill and is never moved again, so no order in the book depends
+          on where price travelled afterwards.
     """
 
     def __init__(
@@ -126,10 +128,6 @@ class OrderManager:
         quantity: float,
         price: Optional[float],
         group_id: int = 0,
-        *,
-        trailing: bool = False,
-        trailing_distance: float = 0.0,
-        trailing_spec: Optional[TrailingSpec] = None,
     ) -> Order:
         self._next_order_id += 1
 
@@ -141,9 +139,6 @@ class OrderManager:
             quantity=quantity,
             price=price,
             group_id=group_id,
-            trailing=trailing,
-            trailing_distance=trailing_distance,
-            trailing_spec=trailing_spec.to_dict() if trailing_spec is not None else None,
         )
 
         self._orders[order.id] = order
@@ -350,8 +345,6 @@ class OrderManager:
         # The stop is created first so that it takes matching priority over
         # the targets within a tick: on a tie the conservative order wins.
         if levels.stop_price is not None:
-            distance = self._risk_manager.trailing_distance(levels.trailing, fill.price)
-
             stop = self._new_order(
                 side=exit_side,
                 order_type=OrderType.STOP,
@@ -359,9 +352,6 @@ class OrderManager:
                 quantity=entry_quantity,
                 price=levels.stop_price,
                 group_id=group.id,
-                trailing=levels.trailing is not None,
-                trailing_distance=distance,
-                trailing_spec=levels.trailing,
             )
 
             group.stop_order_id = stop.id
@@ -424,46 +414,6 @@ class OrderManager:
         return []
 
     # ======================================================
-    # TRAILING STOPS
-    # ======================================================
-
-    def update_trailing_stops(self, price: float) -> None:
-        if price is None or not math.isfinite(price) or price <= 0.0:
-            return
-
-        group = self._open_group()
-
-        if group is None or group.stop_order_id is None:
-            return
-
-        stop = self._orders.get(group.stop_order_id)
-
-        if stop is None or stop.status != OrderStatus.WORKING or not stop.trailing:
-            return
-
-        # The distance is re-resolved against the price that is moving, so a
-        # percent or ATR trailing keeps its meaning as the market travels.
-        # States restored before relative specs existed fall back to the
-        # absolute distance resolved at entry.
-        spec = TrailingSpec.from_dict(stop.trailing_spec)
-        distance = self._risk_manager.trailing_distance(spec, price)
-
-        if distance <= 0.0:
-            distance = stop.trailing_distance
-
-        if distance <= 0.0 or stop.price is None:
-            return
-
-        if group.side == Side.BUY:
-            candidate = price - distance
-            if candidate > stop.price:
-                stop.price = candidate
-        else:
-            candidate = price + distance
-            if candidate < stop.price:
-                stop.price = candidate
-
-    # ======================================================
     # UTILITIES
     # ======================================================
 
@@ -480,6 +430,78 @@ class OrderManager:
 
     def groups(self) -> list[OrderGroup]:
         return list(self._groups.values())
+
+    # ======================================================
+    # BOOK MAINTENANCE
+    # ======================================================
+
+    def prune(self, keep: int = 200) -> tuple[int, int]:
+        """
+        Drops settled history so the book stays proportional to live exposure.
+
+        The engine rebuilds and republishes the whole book on every tick, so
+        a book that only ever grows makes a linear engine quadratic: each
+        terminal order is reserialized for the rest of the run and the
+        payload grows with the length of the replay instead of with the
+        position being managed.
+
+        Two things are never dropped:
+
+            * a WORKING order, because that is the engine's live truth;
+            * a group that still backs quantity, even if nothing of it is
+              working -- an exposed position with no protective order is an
+              anomaly, and hiding its record would hide the anomaly.
+
+        The last ``keep`` settled orders and groups are retained so the
+        client can still render the trades that just happened. Returns the
+        number of orders and groups removed.
+        """
+        if keep < 0:
+            return 0, 0
+
+        removed_orders = 0
+
+        settled = [
+            order_id
+            for order_id, order in self._orders.items()
+            if order.status is not OrderStatus.WORKING
+        ]
+
+        for order_id in settled[: max(0, len(settled) - keep)]:
+            del self._orders[order_id]
+            self._working.pop(order_id, None)
+            removed_orders += 1
+
+        closed = [
+            group_id
+            for group_id, group in self._groups.items()
+            if group.remaining_quantity <= 0.0 and not self._group_is_working(group)
+        ]
+
+        removed_groups = 0
+
+        for group_id in closed[: max(0, len(closed) - keep)]:
+            del self._groups[group_id]
+            removed_groups += 1
+
+        return removed_orders, removed_groups
+
+    def _group_is_working(self, group: OrderGroup) -> bool:
+        order_ids = list(group.target_order_ids)
+
+        if group.entry_order_id is not None:
+            order_ids.append(group.entry_order_id)
+
+        if group.stop_order_id is not None:
+            order_ids.append(group.stop_order_id)
+
+        for order_id in order_ids:
+            order = self._orders.get(order_id)
+
+            if order is not None and order.status is OrderStatus.WORKING:
+                return True
+
+        return False
 
     def _reduce_stop_quantity(self, group: Optional[OrderGroup], amount: float) -> None:
         if group is None or group.stop_order_id is None:

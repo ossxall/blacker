@@ -21,43 +21,8 @@ import warnings
 from orders.models import Side
 
 
-#: Offset kinds understood by ``_offset`` and ``TrailingSpec``.
+#: Offset kinds understood by ``_offset``.
 OFFSET_KINDS = ("percent", "absolute", "atr")
-
-
-@dataclass(frozen=True)
-class TrailingSpec:
-    """
-    A trailing-stop distance kept in *relative* form.
-
-    The distance is re-resolved against the price that is moving, not
-    against the entry price. Freezing it at entry turns a ``percent``
-    trailing into a fixed absolute offset: after a 10x move the stop
-    ends up a thousandth of the price away from the market and is
-    triggered by noise instead of protecting the trade.
-    """
-
-    kind: str
-    value: float = 0.0
-    multiplier: float = 1.0
-
-    def to_dict(self) -> dict:
-        return {
-            "kind": self.kind,
-            "value": self.value,
-            "multiplier": self.multiplier,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Optional[dict]) -> Optional["TrailingSpec"]:
-        if not data:
-            return None
-
-        return cls(
-            kind=str(data.get("kind", "")),
-            value=abs(float(data.get("value", 0.0) or 0.0)),
-            multiplier=abs(float(data.get("multiplier", 1.0) or 1.0)),
-        )
 
 
 @dataclass
@@ -74,9 +39,6 @@ class RiskLevels:
     #: Profit targets, ordered so the nearest one comes first.
     target_prices: list[float] = field(default_factory=list)
 
-    #: Trailing distance, or ``None`` when trailing is disabled.
-    trailing: Optional[TrailingSpec] = None
-
 
 DEFAULT_STOP_CONFIG = {"type": "percent", "value": 0.01}
 
@@ -89,6 +51,11 @@ class RiskManager:
     plain entry/exit intents, this object decides how to protect the
     trade, and the OrderManager builds the resulting bracket.
 
+    The bracket is static: a stop-loss plus any number of take-profit
+    targets, all priced once against the entry and never moved
+    afterwards. There is no trailing stop, so no level here depends on
+    where price travels after the fill.
+
     Configuration schema (all keys optional)::
 
         {
@@ -98,11 +65,7 @@ class RiskManager:
             "targets": [
                 {"type": "percent",  "value": 0.02},
                 {"type": "absolute", "value": 3.0},
-            ],
-            "trailing": {
-                "enabled": True,
-                "distance": {"type": "percent", "value": 0.005},
-            }
+            ]
         }
 
     Every order is protected by a stop-loss. If the configuration does
@@ -147,6 +110,14 @@ class RiskManager:
 
         if not isinstance(self.context, dict):
             self.context = {}
+
+        if "trailing" in self.config:
+            self._warn(
+                "trailing",
+                "The risk configuration sets 'trailing', which is no longer "
+                "supported and is ignored. Brackets are static: the stop is "
+                "priced once against the entry and never moved afterwards.",
+            )
 
     # ======================================================
     # LEVELS
@@ -212,8 +183,6 @@ class RiskManager:
         # listed first in the configuration.
         levels.target_prices.sort(reverse=(side == Side.SELL))
 
-        levels.trailing = self._trailing_spec(entry_price)
-
         return levels
 
     def _targets(self) -> list:
@@ -231,81 +200,6 @@ class RiskManager:
             return []
 
         return list(targets)
-
-    def _trailing_spec(self, price: float) -> Optional[TrailingSpec]:
-        trailing = self.config.get("trailing")
-
-        if trailing is None:
-            return None
-
-        if not isinstance(trailing, dict):
-            self._warn(
-                "trailing",
-                "'trailing' must be an object, got "
-                f"{type(trailing).__name__}. Trailing is disabled.",
-            )
-            return None
-
-        if not _is_enabled(trailing.get("enabled")):
-            return None
-
-        spec = trailing.get("distance")
-
-        if not isinstance(spec, dict) or not spec:
-            self._warn(
-                "trailing.distance",
-                "Trailing stop is enabled but no distance was configured. "
-                "Trailing is disabled for this bracket.",
-            )
-            return None
-
-        kind = spec.get("type")
-
-        if kind not in OFFSET_KINDS:
-            self._warn(
-                "trailing.type",
-                f"Unknown trailing distance type {kind!r}. Expected one of "
-                f"{list(OFFSET_KINDS)}. Trailing is disabled for this bracket.",
-            )
-            return None
-
-        if not self._usable(self._offset(spec, price, "trailing.distance")):
-            return None
-
-        return TrailingSpec(
-            kind=kind,
-            value=abs(float(spec.get("value", 0.0) or 0.0)),
-            multiplier=abs(float(spec.get("multiplier", 1.0) or 1.0)),
-        )
-
-    def trailing_distance(
-        self,
-        spec: Optional[TrailingSpec | dict],
-        price: float,
-    ) -> float:
-        """
-        Resolves a trailing distance against ``price``.
-
-        Returns 0.0 when the spec is missing or unusable, which disables
-        the ratchet for that tick instead of moving the stop to the
-        market price.
-        """
-        if isinstance(spec, dict):
-            spec = TrailingSpec.from_dict(spec)
-
-        if spec is None or not _is_price(price):
-            return 0.0
-
-        if spec.kind == "percent":
-            return spec.value * price
-
-        if spec.kind == "absolute":
-            return spec.value
-
-        if spec.kind == "atr":
-            return spec.multiplier * self._atr_value()
-
-        return 0.0
 
     # ======================================================
     # OFFSETS
@@ -418,10 +312,3 @@ def _number(value, default: float = 0.0) -> float:
 
 def _is_price(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0.0
-
-
-def _is_enabled(value) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-
-    return bool(value)
