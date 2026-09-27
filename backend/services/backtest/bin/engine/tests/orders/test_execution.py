@@ -4,10 +4,12 @@ from src.execution.execution import Execution
 from src.orders import (
     OrderManager,
     OrderRole,
+    OrderStatus,
     RiskManager,
     Side,
     Signal,
 )
+import pytest
 
 
 def make_tick(index, price, time=0):
@@ -124,9 +126,9 @@ def test_trailing_stop_ratchets_then_triggers():
     stop = [o for o in manager.working_orders() if o.role == OrderRole.STOP][0]
     assert stop.price == 99.0
 
-    # Price rises: stop ratchets up to 100.5.
+    # Price rises: the stop ratchets to 0.5% below the new price.
     execution.update(state=None, tick=make_tick(2, 101.0))
-    assert stop.price == 100.5
+    assert stop.price == pytest.approx(101.0 * 0.995)
 
     # A pullback below the trailing level closes the position.
     fills = execution.update(state=None, tick=make_tick(3, 100.0))
@@ -134,6 +136,137 @@ def test_trailing_stop_ratchets_then_triggers():
     assert len(fills) == 1
     assert fills[0].role == OrderRole.STOP
     assert manager.portfolio.position is None
+
+
+def test_limit_target_fills_at_its_limit_not_at_the_print():
+    # Regression: a crossed take-profit used to book the whole gap as profit.
+    # A sell limit at 103 filled at whatever the tick printed, so a tick at
+    # 150 realized +50 instead of +3 and every backtest looked better than it
+    # was.
+    config = {"targets": [{"type": "percent", "value": 0.03}]}
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+    execution = Execution(manager)
+
+    run_ticks(execution, [make_tick(0, 100.0)])
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    execution.submit([entry])
+    execution.update(state=None, tick=make_tick(1, 100.0))
+
+    target = [o for o in manager.working_orders() if o.role == OrderRole.TARGET][0]
+    assert target.price == 103.0
+
+    fills = execution.update(state=None, tick=make_tick(2, 150.0))
+
+    assert len(fills) == 1
+    assert fills[0].price == 103.0
+    assert manager.portfolio.realized_pnl == 3.0
+
+
+def test_buy_limit_fills_at_the_price_when_it_improves():
+    config = {"targets": [{"type": "absolute", "value": 3.0}]}
+    manager = OrderManager(
+        portfolio=Portfolio(),
+        risk_manager=RiskManager(config),
+    )
+    execution = Execution(manager)
+
+    run_ticks(execution, [make_tick(0, 100.0)])
+
+    # A short entry gets a buy limit target at 97.
+    entry = manager.handle(Signal(action="SELL", quantity=1))[0]
+    execution.submit([entry])
+    execution.update(state=None, tick=make_tick(1, 100.0))
+
+    target = [o for o in manager.working_orders() if o.role == OrderRole.TARGET][0]
+    assert target.price == 97.0
+
+    # The market gaps through the limit: the fill happens at the print.
+    fills = execution.update(state=None, tick=make_tick(2, 90.0))
+
+    assert len(fills) == 1
+    assert fills[0].price == 90.0
+    assert manager.portfolio.realized_pnl == 10.0
+
+
+def test_stop_fills_at_the_print_even_when_it_gaps():
+    config = {"stop": {"type": "percent", "value": 0.01}}
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+    execution = Execution(manager)
+
+    run_ticks(execution, [make_tick(0, 100.0)])
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    execution.submit([entry])
+    execution.update(state=None, tick=make_tick(1, 100.0))
+
+    # A stop is not a limit: once triggered it is a market order, so the
+    # downside of a gap is not clipped at the stop price.
+    fills = execution.update(state=None, tick=make_tick(2, 80.0))
+
+    assert len(fills) == 1
+    assert fills[0].price == 80.0
+    assert manager.portfolio.realized_pnl == -20.0
+
+
+def test_order_with_nothing_left_to_fill_is_retired():
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "targets": [{"type": "percent", "value": 0.02}],
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+    execution = Execution(manager)
+
+    run_ticks(execution, [make_tick(0, 100.0)])
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    execution.submit([entry])
+    execution.update(state=None, tick=make_tick(1, 100.0))
+
+    target = [o for o in manager.working_orders() if o.role == OrderRole.TARGET][0]
+
+    # The group is flat while the order is still working. It must be retired,
+    # not left in the published book with a fill quantity of zero.
+    manager.groups()[0].remaining_quantity = 0.0
+
+    fills = execution.update(state=None, tick=make_tick(2, 103.0))
+
+    assert fills == []
+    assert target.status == OrderStatus.CANCELLED
+    assert target not in manager.working_orders()
+    assert manager.portfolio.position is not None
+
+
+def test_no_fill_is_reported_for_an_order_retired_mid_pass():
+    # Regression: working_orders() is a snapshot, so an order cancelled by an
+    # earlier fill of the same pass was still triggered. It produced a fill
+    # that never touched the portfolio, and the fill id counter skipped.
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "targets": [
+            {"type": "percent", "value": 0.02},
+            {"type": "percent", "value": 0.04},
+        ],
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+    execution = Execution(manager)
+
+    run_ticks(execution, [make_tick(0, 100.0)])
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    execution.submit([entry])
+    execution.update(state=None, tick=make_tick(1, 100.0))
+
+    fills = execution.update(state=None, tick=make_tick(2, 150.0))
+
+    # Both targets are genuinely triggerable, so both fill, each at its own
+    # limit, and the stop is cancelled without being triggered.
+    assert [f.role for f in fills] == [OrderRole.TARGET, OrderRole.TARGET]
+    assert [f.price for f in fills] == [102.0, 104.0]
+    assert [f.id for f in fills] == [2, 3]
+    assert manager.portfolio.position is None
+    assert manager.portfolio.realized_pnl == 3.0
+    assert manager.working_orders() == []
 
 
 def test_position_is_single_source_of_truth_after_stop():

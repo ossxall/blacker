@@ -26,8 +26,8 @@ use tracing::info;
 /// Strategy selection schema (forwarded unchanged to the engine):
 ///
 ///     {
-///         "kind":   "MTFPullback",
-///         "params": { "stretch": 3.25, "exit_dev": -0.5, ... }
+///         "kind":   "Strategy1",
+///         "params": { "timeframe": "5m", "label_fast": "EMA 20", ... }
 ///     }
 ///
 #[derive(Debug, Deserialize)]
@@ -47,9 +47,9 @@ pub struct Response {
 /// Selects the strategy the engine evaluates on every tick.
 ///
 /// The engine registers strategies by name, so `kind` must match a key in
-/// the Python `STRATEGY_REGISTRY` (e.g. `MTFPullback`, `Strategy1`).
-/// Required series differ per strategy: `MTFPullback` needs 1h `EMA 20` +
-/// `EMA 50` and 15m `EMA 34` + `ATR 14`.
+/// the Python `STRATEGY_REGISTRY`. Required series differ per strategy:
+/// `Strategy1` needs the fast/slow EMA pair on the timeframe named by its
+/// `timeframe` param.
 ///
 pub async fn set_strategy_handler(
     State(state): State<AppState>,

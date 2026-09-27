@@ -14,6 +14,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from typing import Optional
+import math
 
 from core.portfolio import Portfolio
 from orders.models import (
@@ -26,7 +27,7 @@ from orders.models import (
     Side,
     Signal,
 )
-from orders.risk_manager import RiskManager
+from orders.risk_manager import RiskManager, TrailingSpec
 
 
 class OrderManager:
@@ -39,6 +40,15 @@ class OrderManager:
         2. ``make_fill`` / ``on_fill`` -> execute fills, open positions and
            place the stop-loss + take-profit bracket on entry.
         3. ``update_trailing_stops`` -> ratchet trailing stops with price.
+
+    Invariants the rest of the engine relies on:
+
+        * At most one entry order is working at a time, and at most one
+          position is open.
+        * A working order always has a positive fill quantity, or it is
+          cancelled. Orders are never left working with nothing to fill.
+        * The bracket of a group is created on the entry fill and its
+          siblings are OCO: the first exit fill cancels the rest.
     """
 
     def __init__(
@@ -119,6 +129,7 @@ class OrderManager:
         *,
         trailing: bool = False,
         trailing_distance: float = 0.0,
+        trailing_spec: Optional[TrailingSpec] = None,
     ) -> Order:
         self._next_order_id += 1
 
@@ -132,6 +143,7 @@ class OrderManager:
             group_id=group_id,
             trailing=trailing,
             trailing_distance=trailing_distance,
+            trailing_spec=trailing_spec.to_dict() if trailing_spec is not None else None,
         )
 
         self._orders[order.id] = order
@@ -177,16 +189,34 @@ class OrderManager:
         if self._portfolio.position is not None:
             return []
 
+        # A market entry is filled by the next tick, so until then there is
+        # no position to block a second entry. Without this guard two
+        # entries could be accepted on consecutive ticks and both would
+        # fill, doubling the exposure the strategy asked for once.
+        if self._pending_entry() is not None:
+            return []
+
         if signal.quantity is None:
             raise ValueError(f"{signal.action} signal requires quantity")
 
-        group = self._new_group(side, signal.quantity)
+        quantity = float(signal.quantity)
+
+        # A non-positive or non-finite quantity can never fill, and the
+        # order would sit in the book as WORKING forever while the
+        # strategy keeps seeing a flat portfolio.
+        if not math.isfinite(quantity) or quantity <= 0.0:
+            raise ValueError(
+                f"{signal.action} signal requires a positive quantity, "
+                f"got {signal.quantity!r}"
+            )
+
+        group = self._new_group(side, quantity)
 
         order = self._new_order(
             side=side,
             order_type=OrderType.MARKET,
             role=OrderRole.ENTRY,
-            quantity=signal.quantity,
+            quantity=quantity,
             price=None,
             group_id=group.id,
         )
@@ -195,25 +225,39 @@ class OrderManager:
 
         return [order]
 
+    def _pending_entry(self) -> Optional[Order]:
+        for order in self._working.values():
+            if order.role == OrderRole.ENTRY:
+                return order
+
+        return None
+
+    def _open_group(self) -> Optional[OrderGroup]:
+        """
+        The single group whose remaining quantity still backs a position.
+
+        Cancellation and order creation must agree on which group is
+        live, otherwise an exit order can be attached to a group that was
+        already closed and its fills would be accounted against the wrong
+        remaining quantity.
+        """
+        for group in self._groups.values():
+            if group.remaining_quantity > 0.0 and group.entry_order_id is not None:
+                return group
+
+        return None
+
     def _exit_position(self) -> list[Order]:
         position = self._portfolio.position
 
         if position is None:
             return []
 
-        # An explicit exit invalidates all protective brackets.
-        for group in self._groups.values():
-            if group.remaining_quantity > 0 and group.entry_order_id is not None:
-                self._cancel_children(group)
+        group = self._open_group()
 
-        group_id = next(
-            (
-                group.id
-                for group in self._groups.values()
-                if group.remaining_quantity > 0
-            ),
-            0,
-        )
+        # An explicit exit invalidates the whole bracket.
+        if group is not None:
+            self._cancel_children(group)
 
         side = Side.SELL if position.side == Side.BUY else Side.BUY
 
@@ -224,13 +268,28 @@ class OrderManager:
                 role=OrderRole.EXIT,
                 quantity=position.quantity,
                 price=None,
-                group_id=group_id,
+                group_id=group.id if group is not None else 0,
             )
         ]
 
     # ======================================================
     # FILLS
     # ======================================================
+
+    def fill_quantity(self, order: Order) -> float:
+        """
+        Quantity ``order`` would actually fill right now.
+
+        Protective orders are capped by what is left of the group, so an
+        order can be working while nothing is left to fill it. Callers
+        must retire those orders instead of leaving them in the book.
+        """
+        group = self._groups.get(order.group_id)
+
+        if group is not None and order.role != OrderRole.ENTRY:
+            return min(order.quantity, max(group.remaining_quantity, 0.0))
+
+        return order.quantity
 
     def make_fill(
         self,
@@ -239,10 +298,7 @@ class OrderManager:
         quantity: float,
         tick,
     ) -> Fill:
-        group = self._groups.get(order.group_id)
-
-        if group is not None and order.role != OrderRole.ENTRY:
-            quantity = min(quantity, max(group.remaining_quantity, 0.0))
+        quantity = min(quantity, self.fill_quantity(order))
 
         self._next_fill_id += 1
 
@@ -291,15 +347,43 @@ class OrderManager:
 
         entry_quantity = group.entry_quantity
 
-        if levels.target_prices:
+        # The stop is created first so that it takes matching priority over
+        # the targets within a tick: on a tie the conservative order wins.
+        if levels.stop_price is not None:
+            distance = self._risk_manager.trailing_distance(levels.trailing, fill.price)
+
+            stop = self._new_order(
+                side=exit_side,
+                order_type=OrderType.STOP,
+                role=OrderRole.STOP,
+                quantity=entry_quantity,
+                price=levels.stop_price,
+                group_id=group.id,
+                trailing=levels.trailing is not None,
+                trailing_distance=distance,
+                trailing_spec=levels.trailing,
+            )
+
+            group.stop_order_id = stop.id
+            orders.append(stop)
+
+        total = len(levels.target_prices)
+
+        if total:
             used = 0.0
+
             for index, price in enumerate(levels.target_prices):
-                if index == len(levels.target_prices) - 1:
+                if index == total - 1:
                     target_quantity = entry_quantity - used
                 else:
-                    target_quantity = entry_quantity / len(levels.target_prices)
+                    target_quantity = entry_quantity / total
 
                 used += target_quantity
+
+                # A target that rounds down to nothing would sit in the
+                # book working forever without ever being fillable.
+                if target_quantity <= 0.0:
+                    continue
 
                 order = self._new_order(
                     side=exit_side,
@@ -312,21 +396,6 @@ class OrderManager:
 
                 group.target_order_ids.append(order.id)
                 orders.append(order)
-
-        if levels.stop_price is not None:
-            stop = self._new_order(
-                side=exit_side,
-                order_type=OrderType.STOP,
-                role=OrderRole.STOP,
-                quantity=entry_quantity,
-                price=levels.stop_price,
-                group_id=group.id,
-                trailing=levels.trailing_distance > 0.0,
-                trailing_distance=levels.trailing_distance,
-            )
-
-            group.stop_order_id = stop.id
-            orders.append(stop)
 
         return orders
 
@@ -359,28 +428,40 @@ class OrderManager:
     # ======================================================
 
     def update_trailing_stops(self, price: float) -> None:
-        for group in self._groups.values():
-            stop_id = group.stop_order_id
+        if price is None or not math.isfinite(price) or price <= 0.0:
+            return
 
-            if stop_id is None:
-                continue
+        group = self._open_group()
 
-            stop = self._orders.get(stop_id)
+        if group is None or group.stop_order_id is None:
+            return
 
-            if stop is None or stop.status != OrderStatus.WORKING:
-                continue
+        stop = self._orders.get(group.stop_order_id)
 
-            if not stop.trailing or stop.trailing_distance <= 0.0:
-                continue
+        if stop is None or stop.status != OrderStatus.WORKING or not stop.trailing:
+            return
 
-            if group.side == Side.BUY:
-                candidate = price - stop.trailing_distance
-                if candidate > stop.price:
-                    stop.price = candidate
-            else:
-                candidate = price + stop.trailing_distance
-                if candidate < stop.price:
-                    stop.price = candidate
+        # The distance is re-resolved against the price that is moving, so a
+        # percent or ATR trailing keeps its meaning as the market travels.
+        # States restored before relative specs existed fall back to the
+        # absolute distance resolved at entry.
+        spec = TrailingSpec.from_dict(stop.trailing_spec)
+        distance = self._risk_manager.trailing_distance(spec, price)
+
+        if distance <= 0.0:
+            distance = stop.trailing_distance
+
+        if distance <= 0.0 or stop.price is None:
+            return
+
+        if group.side == Side.BUY:
+            candidate = price - distance
+            if candidate > stop.price:
+                stop.price = candidate
+        else:
+            candidate = price + distance
+            if candidate < stop.price:
+                stop.price = candidate
 
     # ======================================================
     # UTILITIES
@@ -412,7 +493,7 @@ class OrderManager:
         stop.quantity = max(0.0, stop.quantity - amount)
 
         if stop.quantity <= 0.0:
-            self._cancel_order(stop.id)
+            self.cancel(stop.id)
 
     def _cancel_children(self, group: Optional[OrderGroup], exclude: Optional[int] = None) -> None:
         if group is None:
@@ -425,9 +506,9 @@ class OrderManager:
         for order_id in order_ids:
             if order_id == exclude:
                 continue
-            self._cancel_order(order_id)
+            self.cancel(order_id)
 
-    def _cancel_order(self, order_id: int) -> None:
+    def cancel(self, order_id: int) -> None:
         order = self._orders.get(order_id)
 
         if order is None or order.status != OrderStatus.WORKING:

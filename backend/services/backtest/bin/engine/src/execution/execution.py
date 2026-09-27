@@ -15,7 +15,7 @@
 
 from typing import Optional
 
-from orders.models import Fill, Order, OrderType, Side
+from orders.models import Fill, Order, OrderStatus, OrderType, Side
 from orders.order_manager import OrderManager
 
 
@@ -29,6 +29,12 @@ class Execution:
 
     Orders submitted by the strategy on tick *t* start working and
     are matched starting on tick *t + 1*.
+
+    ``working_orders()`` is a snapshot, so an order can be retired by an
+    earlier fill of the same pass (OCO) and still be present in the list
+    being iterated. Every order is therefore re-checked against its live
+    status before it is triggered, and a fill is only reported once the
+    OrderManager has actually applied it.
     """
 
     def __init__(self, order_manager: OrderManager):
@@ -43,24 +49,40 @@ class Execution:
         fills: list[Fill] = []
 
         for order in self._order_manager.working_orders():
+            # Cancelled by a sibling fill earlier in this same pass.
+            if order.status is not OrderStatus.WORKING:
+                continue
+
             fill_price = self._trigger_price(order, tick)
 
             if fill_price is None:
                 continue
 
+            quantity = self._order_manager.fill_quantity(order)
+
+            if quantity <= 0.0:
+                # The group is already flat: retire the order instead of
+                # leaving a working order in the published book that can
+                # never fill.
+                self._order_manager.cancel(order.id)
+                continue
+
             fill = self._order_manager.make_fill(
                 order=order,
                 price=fill_price,
-                quantity=order.quantity,
+                quantity=quantity,
                 tick=tick,
             )
 
-            if fill.quantity <= 0.0:
+            new_orders = self._order_manager.on_fill(fill)
+
+            # on_fill refuses orders it no longer considers working, so this
+            # is the only point at which the fill is known to be real.
+            if order.status is not OrderStatus.FILLED:
                 continue
 
             fills.append(fill)
 
-            new_orders = self._order_manager.on_fill(fill)
             self._order_manager.submit(new_orders)
 
         return fills
@@ -71,18 +93,28 @@ class Execution:
         if order.type == OrderType.MARKET:
             return price
 
-        if order.type == OrderType.LIMIT:
-            if order.side == Side.BUY and price <= order.price:
-                return price
-            if order.side == Side.SELL and price >= order.price:
-                return price
+        if order.price is None or price is None:
             return None
 
-        if order.type == OrderType.STOP:
-            if order.side == Side.BUY and price >= order.price:
-                return price
-            if order.side == Side.SELL and price <= order.price:
-                return price
+        if order.side == Side.BUY:
+            if order.type == OrderType.LIMIT:
+                # Improvement: a buy limit never pays more than its limit.
+                return price if price <= order.price else None
+
+            if order.type == OrderType.STOP:
+                # A triggered buy stop becomes a market order.
+                return price if price >= order.price else None
+
             return None
+
+        if order.type == OrderType.LIMIT:
+            # Improvement: a sell limit crossed by a gap fills at the limit,
+            # not at the print. Filling take-profits at the tick price books
+            # the whole gap as profit and flatters every backtest.
+            return order.price if price >= order.price else None
+
+        if order.type == OrderType.STOP:
+            # A triggered sell stop becomes a market order: no improvement.
+            return price if price <= order.price else None
 
         return None

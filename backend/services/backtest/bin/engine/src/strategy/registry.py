@@ -1,6 +1,5 @@
-from strategy.my_strategy import MTFPullback, Strategy1
+from strategy.my_strategy import Strategy1
 
 STRATEGY_REGISTRY = {
-    "MTFPullback": MTFPullback,
     "Strategy1": Strategy1,
 }

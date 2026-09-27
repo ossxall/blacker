@@ -10,14 +10,12 @@ http:
     type: json
     data: |-
       {
-        "kind": "MTFPullback",
+        "kind": "Strategy1",
         "params": {
-          "stretch": 3.25,
-          "exit_dev": -0.5,
-          "max_bars": 34,
-          "cooldown_bars": 2,
-          "allow_short": false,
-          "use_trigger": false
+          "timeframe": "5m",
+          "label_fast": "EMA 20",
+          "label_slow": "EMA 50",
+          "quantity": 1
         }
       }
   auth: inherit

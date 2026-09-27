@@ -8,5 +8,5 @@ from .models import (
     Side,
     Signal,
 )
-from .risk_manager import RiskLevels, RiskManager
+from .risk_manager import RiskLevels, RiskManager, TrailingSpec
 from .order_manager import OrderManager

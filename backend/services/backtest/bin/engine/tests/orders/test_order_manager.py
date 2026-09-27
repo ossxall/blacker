@@ -9,6 +9,7 @@ from src.orders import (
     Side,
     Signal,
 )
+import pytest
 
 
 def make_tick(index, price, time=0):
@@ -237,11 +238,170 @@ def test_trailing_stop_ratchets_up_for_long():
     assert stop.trailing is True
     assert stop.trailing_distance == 0.5
 
+    # The distance is relative: 0.5% of the price that is moving, not the
+    # 0.5 absolute units it was worth at entry. Freezing it at entry left
+    # the stop a thousandth of the price away after a large move.
     manager.update_trailing_stops(101.0)
-    assert stop.price == 100.5
+    assert stop.price == pytest.approx(101.0 * 0.995)
 
+    # A pullback does not loosen the ratchet.
     manager.update_trailing_stops(100.0)
-    assert stop.price == 100.5
+    assert stop.price == pytest.approx(101.0 * 0.995)
+
+
+def test_trailing_stop_keeps_its_distance_after_a_large_move():
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "trailing": {
+            "enabled": True,
+            "distance": {"type": "percent", "value": 0.01},
+        },
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
+
+    manager.update_trailing_stops(200.0)
+
+    assert stop.price == pytest.approx(198.0)
+
+
+def test_absolute_trailing_distance_stays_absolute():
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "trailing": {
+            "enabled": True,
+            "distance": {"type": "absolute", "value": 2.0},
+        },
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
+
+    manager.update_trailing_stops(500.0)
+
+    assert stop.price == 498.0
+
+
+def test_trailing_stop_is_not_ratcheted_once_the_bracket_is_closed():
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "targets": [{"type": "percent", "value": 0.02}],
+        "trailing": {
+            "enabled": True,
+            "distance": {"type": "percent", "value": 0.005},
+        },
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
+    target = find_role(manager.working_orders(), OrderRole.TARGET)[0]
+
+    fill_order(manager, target, 102.0, make_tick(1, 102.0))
+
+    assert stop.status == OrderStatus.CANCELLED
+
+    manager.update_trailing_stops(500.0)
+
+    assert stop.price == 99.0
+
+
+def test_stop_takes_matching_priority_over_the_targets():
+    manager = OrderManager(
+        portfolio=Portfolio(),
+        risk_manager=RiskManager(
+            {
+                "stop": {"type": "percent", "value": 0.01},
+                "targets": [{"type": "percent", "value": 0.02}],
+            }
+        ),
+    )
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    working = manager.working_orders()
+
+    assert [o.role for o in working] == [OrderRole.STOP, OrderRole.TARGET]
+
+
+def test_entry_signal_requires_a_positive_quantity():
+    manager = OrderManager(portfolio=Portfolio())
+
+    for quantity in (0, -1, -0.5, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            manager.handle(Signal(action="BUY", quantity=quantity))
+
+    # Nothing reached the book: a zero or negative entry can never fill and
+    # would sit working forever while the strategy still reads a flat account.
+    assert manager.working_orders() == []
+    assert manager.groups() == []
+
+
+def test_second_entry_rejected_while_the_first_is_still_pending():
+    manager = OrderManager(portfolio=Portfolio())
+
+    manager.handle(Signal(action="BUY", quantity=1))
+
+    # The entry fills on the next tick, so until then there is no position to
+    # block a second one.
+    assert manager.handle(Signal(action="BUY", quantity=1)) == []
+    assert manager.handle(Signal(action="SELL", quantity=1)) == []
+
+    fill_entry(manager, manager.working_orders()[0], 100.0, make_tick(0, 100.0))
+
+    assert manager.handle(Signal(action="BUY", quantity=1)) == []
+
+
+def test_exit_order_attaches_to_the_group_that_backs_the_position():
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "targets": [{"type": "percent", "value": 0.02}],
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+
+    # First trade, closed by its own bracket.
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+    target = find_role(manager.working_orders(), OrderRole.TARGET)[0]
+    fill_order(manager, target, 102.0, make_tick(1, 102.0))
+
+    # Second trade: the exit must land on group 2, not on the closed group 1.
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 200.0, make_tick(2, 200.0))
+
+    exits = [o for o in manager.handle(Signal(action="EXIT")) if o.role == OrderRole.EXIT]
+
+    assert len(exits) == 1
+    assert exits[0].group_id == 2
+
+
+def test_fill_quantity_reports_nothing_left_for_a_flat_group():
+    config = {
+        "stop": {"type": "percent", "value": 0.01},
+        "targets": [{"type": "percent", "value": 0.02}],
+    }
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(config))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    target = find_role(manager.working_orders(), OrderRole.TARGET)[0]
+
+    assert manager.fill_quantity(target) == 1.0
+
+    manager.groups()[0].remaining_quantity = 0.0
+
+    assert manager.fill_quantity(target) == 0.0
 
 
 def test_serialization_roundtrip():

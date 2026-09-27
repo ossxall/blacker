@@ -66,7 +66,12 @@ class Order:
     status: OrderStatus = OrderStatus.WORKING
     group_id: int = 0
     trailing: bool = False
+    #: Distance resolved against the entry price, kept for inspection and
+    #: for states serialized before relative trailing specs existed.
     trailing_distance: float = 0.0
+    #: Relative trailing distance, re-resolved against the moving price on
+    #: every tick. ``None`` for orders restored from an older state.
+    trailing_spec: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -80,6 +85,7 @@ class Order:
             "group_id": self.group_id,
             "trailing": self.trailing,
             "trailing_distance": self.trailing_distance,
+            "trailing_spec": self.trailing_spec,
         }
 
     @classmethod
@@ -95,6 +101,7 @@ class Order:
             group_id=data.get("group_id", 0),
             trailing=data.get("trailing", False),
             trailing_distance=data.get("trailing_distance", 0.0),
+            trailing_spec=data.get("trailing_spec"),
         )
 
 

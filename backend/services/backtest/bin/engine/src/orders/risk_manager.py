@@ -14,10 +14,50 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
+import math
 import warnings
 
 from orders.models import Side
+
+
+#: Offset kinds understood by ``_offset`` and ``TrailingSpec``.
+OFFSET_KINDS = ("percent", "absolute", "atr")
+
+
+@dataclass(frozen=True)
+class TrailingSpec:
+    """
+    A trailing-stop distance kept in *relative* form.
+
+    The distance is re-resolved against the price that is moving, not
+    against the entry price. Freezing it at entry turns a ``percent``
+    trailing into a fixed absolute offset: after a 10x move the stop
+    ends up a thousandth of the price away from the market and is
+    triggered by noise instead of protecting the trade.
+    """
+
+    kind: str
+    value: float = 0.0
+    multiplier: float = 1.0
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "value": self.value,
+            "multiplier": self.multiplier,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> Optional["TrailingSpec"]:
+        if not data:
+            return None
+
+        return cls(
+            kind=str(data.get("kind", "")),
+            value=abs(float(data.get("value", 0.0) or 0.0)),
+            multiplier=abs(float(data.get("multiplier", 1.0) or 1.0)),
+        )
 
 
 @dataclass
@@ -30,9 +70,12 @@ class RiskLevels:
     """
 
     stop_price: Optional[float] = None
+
+    #: Profit targets, ordered so the nearest one comes first.
     target_prices: list[float] = field(default_factory=list)
-    #: Distance (in price units) used by a trailing stop. 0 disables trailing.
-    trailing_distance: float = 0.0
+
+    #: Trailing distance, or ``None`` when trailing is disabled.
+    trailing: Optional[TrailingSpec] = None
 
 
 DEFAULT_STOP_CONFIG = {"type": "percent", "value": 0.01}
@@ -66,94 +109,319 @@ class RiskManager:
     not provide a ``stop`` key, a default of 1% below/above the entry
     price is used (``DEFAULT_STOP_CONFIG``).
 
-    An ``"atr"`` stop needs an ATR reading, which is only available when a
-    ``context`` carrying ``{"atr": <value>}`` is supplied. The engine does
-    not build one, so rather than silently resolving the offset to 0.0 --
-    which would park the stop exactly on the entry price and take out every
-    position on its first tick -- the default percent stop is used instead
-    and a warning is raised.
+    An offset that cannot produce a usable price never reaches the book:
+
+    * An ``"atr"`` stop needs an ATR reading. It is taken from
+      ``atr_provider`` (a callable evaluated on every use) or from a
+      static ``context={"atr": <value>}``. When neither is available
+      the offset would be 0.0 -- which parks the stop exactly on the
+      entry price and takes out every position on its first tick -- so
+      the default percent stop is used instead and a warning is raised.
+    * A zero, negative or non-finite offset is rejected the same way.
+    * An unknown ``type`` is reported instead of being ignored: a typo
+      such as ``"pct"`` used to degrade silently to the default stop.
+
+    Every rejected spec warns exactly once, so a broken configuration is
+    visible in the engine log without flooding it once per tick.
     """
 
-    def __init__(self, config: Optional[dict] = None, context: Optional[dict] = None):
+    def __init__(
+        self,
+        config: Optional[dict] = None,
+        context: Optional[dict] = None,
+        atr_provider: Optional[Callable[[], Optional[float]]] = None,
+    ):
         self.config = config or {}
         self.context = context or {}
-        self._warned_atr = False
+        self._atr_provider = atr_provider
+        self._warned: set[str] = set()
+
+        if not isinstance(self.config, dict):
+            self._warn(
+                "config",
+                "Risk configuration must be an object, got "
+                f"{type(self.config).__name__}. Every entry falls back to the "
+                "default stop.",
+            )
+            self.config = {}
+
+        if not isinstance(self.context, dict):
+            self.context = {}
+
+    # ======================================================
+    # LEVELS
+    # ======================================================
 
     def apply(self, side: Side, entry_price: float) -> RiskLevels:
-        stop_spec = self.config.get("stop") or DEFAULT_STOP_CONFIG
-        target_specs = self.config.get("targets") or []
-        trailing_spec = self.config.get("trailing") or {}
+        if not _is_price(entry_price):
+            raise ValueError(f"entry_price must be a positive number, got {entry_price!r}")
 
         levels = RiskLevels()
 
-        stop_offset = self._offset(stop_spec, entry_price)
-        if stop_offset is None:
-            stop_offset = self._offset(
-                DEFAULT_STOP_CONFIG,
-                entry_price,
-            )
-        if stop_offset is not None:
-            levels.stop_price = self._below(stop_offset, entry_price, side)
+        stop_spec = self.config.get("stop") or DEFAULT_STOP_CONFIG
 
-        for spec in target_specs:
-            offset = self._offset(spec, entry_price)
-            if offset is None:
+        candidates = [("stop", stop_spec)]
+        if stop_spec != DEFAULT_STOP_CONFIG:
+            candidates.append(("stop.default", DEFAULT_STOP_CONFIG))
+
+        for label, spec in candidates:
+            offset = self._offset(spec, entry_price, label)
+
+            if not self._usable(offset):
                 continue
-            levels.target_prices.append(self._above(offset, entry_price, side))
 
-        if trailing_spec.get("enabled"):
-            distance_spec = trailing_spec.get("distance")
-            distance = self._offset(distance_spec, entry_price) if distance_spec else None
-            if distance is not None:
-                levels.trailing_distance = distance
+            price = self._below(offset, entry_price, side)
+
+            if _is_price(price):
+                levels.stop_price = price
+                break
+
+            self._warn(
+                f"{label}.price",
+                f"Risk configuration resolves the {label} to {price!r}, which is not "
+                "a tradable price.",
+            )
+
+        if levels.stop_price is None:
+            self._warn(
+                "stop.unusable",
+                "Risk configuration cannot produce a usable stop. The entry is left "
+                "without a stop-loss.",
+            )
+
+        for index, spec in enumerate(self._targets()):
+            offset = self._offset(spec, entry_price, f"targets[{index}]")
+
+            if not self._usable(offset):
+                continue
+
+            price = self._above(offset, entry_price, side)
+
+            if not _is_price(price):
+                self._warn(
+                    f"targets[{index}].price",
+                    f"Risk configuration resolves target {index} to {price!r}, which "
+                    "is not a tradable price. The target is dropped.",
+                )
+                continue
+
+            levels.target_prices.append(price)
+
+        # Nearest target first: a single tick that jumps through several
+        # of them must fill the closest one, not whichever happened to be
+        # listed first in the configuration.
+        levels.target_prices.sort(reverse=(side == Side.SELL))
+
+        levels.trailing = self._trailing_spec(entry_price)
 
         return levels
 
-    def _atr_value(self) -> float:
-        return abs(float(self.context.get("atr", 0.0) or 0.0))
+    def _targets(self) -> list:
+        targets = self.config.get("targets")
 
-    def _offset(self, spec: dict, entry_price: float) -> Optional[float]:
+        if targets is None:
+            return []
+
+        if not isinstance(targets, (list, tuple)):
+            self._warn(
+                "targets",
+                f"'targets' must be a list, got {type(targets).__name__}. No target "
+                "will be placed.",
+            )
+            return []
+
+        return list(targets)
+
+    def _trailing_spec(self, price: float) -> Optional[TrailingSpec]:
+        trailing = self.config.get("trailing")
+
+        if trailing is None:
+            return None
+
+        if not isinstance(trailing, dict):
+            self._warn(
+                "trailing",
+                "'trailing' must be an object, got "
+                f"{type(trailing).__name__}. Trailing is disabled.",
+            )
+            return None
+
+        if not _is_enabled(trailing.get("enabled")):
+            return None
+
+        spec = trailing.get("distance")
+
+        if not isinstance(spec, dict) or not spec:
+            self._warn(
+                "trailing.distance",
+                "Trailing stop is enabled but no distance was configured. "
+                "Trailing is disabled for this bracket.",
+            )
+            return None
+
+        kind = spec.get("type")
+
+        if kind not in OFFSET_KINDS:
+            self._warn(
+                "trailing.type",
+                f"Unknown trailing distance type {kind!r}. Expected one of "
+                f"{list(OFFSET_KINDS)}. Trailing is disabled for this bracket.",
+            )
+            return None
+
+        if not self._usable(self._offset(spec, price, "trailing.distance")):
+            return None
+
+        return TrailingSpec(
+            kind=kind,
+            value=abs(float(spec.get("value", 0.0) or 0.0)),
+            multiplier=abs(float(spec.get("multiplier", 1.0) or 1.0)),
+        )
+
+    def trailing_distance(
+        self,
+        spec: Optional[TrailingSpec | dict],
+        price: float,
+    ) -> float:
+        """
+        Resolves a trailing distance against ``price``.
+
+        Returns 0.0 when the spec is missing or unusable, which disables
+        the ratchet for that tick instead of moving the stop to the
+        market price.
+        """
+        if isinstance(spec, dict):
+            spec = TrailingSpec.from_dict(spec)
+
+        if spec is None or not _is_price(price):
+            return 0.0
+
+        if spec.kind == "percent":
+            return spec.value * price
+
+        if spec.kind == "absolute":
+            return spec.value
+
+        if spec.kind == "atr":
+            return spec.multiplier * self._atr_value()
+
+        return 0.0
+
+    # ======================================================
+    # OFFSETS
+    # ======================================================
+
+    def _atr_value(self) -> float:
+        if self._atr_provider is not None:
+            try:
+                value = self._atr_provider()
+            except Exception as exc:  # noqa: BLE001 - user supplied hook
+                self._warn(
+                    "atr_provider",
+                    f"The ATR provider raised {exc!r}. Falling back to a static "
+                    "ATR context, if any.",
+                )
+            else:
+                if value is not None:
+                    return abs(_number(value))
+
+        return abs(_number(self.context.get("atr")))
+
+    def _offset(self, spec: Optional[dict], price: float, label: str) -> Optional[float]:
         if not spec:
+            return None
+
+        if not isinstance(spec, dict):
+            self._warn(
+                f"{label}.type",
+                f"Risk offset for {label} must be an object, got "
+                f"{type(spec).__name__}. Falling back to the default percent level.",
+            )
+            return None
+
+        if not _is_price(price):
             return None
 
         kind = spec.get("type")
 
         if kind == "percent":
-            return abs(float(spec.get("value", 0.0))) * entry_price
+            return abs(_number(spec.get("value"))) * price
 
         if kind == "absolute":
-            return abs(float(spec.get("value", 0.0)))
+            return abs(_number(spec.get("value")))
 
         if kind == "atr":
             atr = self._atr_value()
 
             if atr <= 0.0:
-                if not self._warned_atr:
-                    warnings.warn(
-                        "Risk configuration asks for an 'atr' stop or target "
-                        "but no ATR context was provided, so the offset would "
-                        "be 0.0. Falling back to the default percent level. "
-                        "Pass context={'atr': <value>} to RiskManager to use "
-                        "ATR-based levels.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    self._warned_atr = True
+                self._warn(
+                    f"{label}.atr",
+                    f"Risk configuration resolves {label} with type 'atr' but no ATR "
+                    "reading is available, so the offset would be 0.0. Falling back to "
+                    "the default percent level. Pass context={'atr': <value>} or an "
+                    "atr_provider to RiskManager to use ATR-based levels.",
+                )
                 return None
 
-            multiplier = abs(float(spec.get("multiplier", 1.0)))
-            return multiplier * atr
+            return abs(_number(spec.get("multiplier"), default=1.0)) * atr
+
+        self._warn(
+            f"{label}.type",
+            f"Unknown risk offset type {kind!r} for {label}. Expected one of "
+            f"{list(OFFSET_KINDS)}. Falling back to the default percent level.",
+        )
 
         return None
 
-    def _below(self, offset: float, entry_price: float, side: Side) -> float:
+    # ======================================================
+    # UTILITIES
+    # ======================================================
+
+    @staticmethod
+    def _usable(offset: Optional[float]) -> bool:
+        return offset is not None and math.isfinite(offset) and offset > 0.0
+
+    def _warn(self, key: str, message: str) -> None:
+        if key in self._warned:
+            return
+
+        self._warned.add(key)
+
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+    @staticmethod
+    def _below(offset: float, entry_price: float, side: Side) -> float:
         # Long stops are placed below the entry, short stops above it.
         if side == Side.BUY:
             return entry_price - offset
         return entry_price + offset
 
-    def _above(self, offset: float, entry_price: float, side: Side) -> float:
+    @staticmethod
+    def _above(offset: float, entry_price: float, side: Side) -> float:
         # Long targets sit above the entry, short targets below it.
         if side == Side.BUY:
             return entry_price + offset
         return entry_price - offset
+
+
+def _number(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if not math.isfinite(number):
+        return default
+
+    return number
+
+
+def _is_price(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0.0
+
+
+def _is_enabled(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
+    return bool(value)
