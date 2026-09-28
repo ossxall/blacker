@@ -102,6 +102,15 @@ class TrailValue:
     valuation: float
 
 
+def _get_param(params: dict, key: str, default):
+    """The frontend can send a parameter either as a plain value or as a
+    parameter descriptor object carrying the value (``affectsCompute``)."""
+    value = params.get(key, default)
+    if isinstance(value, dict):
+        value = value.get("value", default)
+    return value
+
+
 class Trail(Series):
 
     def __init__(
@@ -125,47 +134,47 @@ class Trail(Series):
         # =====================================================
 
         self.trend_length = int(
-            params.get("trend_length", 34)
+            _get_param(params, "trend_length", 34)
         )
 
         self.momentum_length = int(
-            params.get("momentum_length", 12)
+            _get_param(params, "momentum_length", 12)
         )
 
         self.sensitivity = float(
-            params.get("sensitivity", 0.35)
+            _get_param(params, "sensitivity", 0.35)
         )
 
         self.st_fast_length = int(
-            params.get("st_fast_length", 9)
+            _get_param(params, "st_fast_length", 9)
         )
 
         self.st_fast_factor = float(
-            params.get("st_fast_factor", 1.45)
+            _get_param(params, "st_fast_factor", 1.45)
         )
 
         self.st_mid_length = int(
-            params.get("st_mid_length", 14)
+            _get_param(params, "st_mid_length", 14)
         )
 
         self.st_mid_factor = float(
-            params.get("st_mid_factor", 1.95)
+            _get_param(params, "st_mid_factor", 1.95)
         )
 
         self.st_slow_length = int(
-            params.get("st_slow_length", 21)
+            _get_param(params, "st_slow_length", 21)
         )
 
         self.st_slow_factor = float(
-            params.get("st_slow_factor", 2.55)
+            _get_param(params, "st_slow_factor", 2.55)
         )
 
         self.trail_size = float(
-            params.get("trail_size", 1.00)
+            _get_param(params, "trail_size", 1.00)
         )
 
         self.smoothness = int(
-            params.get("smoothness", 5)
+            _get_param(params, "smoothness", 5)
         )
 
         # =====================================================
