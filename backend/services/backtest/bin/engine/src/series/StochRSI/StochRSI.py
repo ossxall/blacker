@@ -86,6 +86,26 @@ class StochRSI(Series):
             "params": self.params,
             "live": asdict(self.live) if self.live is not None else None,
             "history": [asdict(s) for s in self.history],
+            # `live` is suppressed during the warm-up and is only an alias of
+            # `_internal` once the chain is warm, so it cannot stand in for the
+            # chain state on restore: an engine rebuilt without it would
+            # confirm the previous bar a second time.
+            "internal": (
+                asdict(self._internal)
+                if self._internal is not None
+                else None
+            ),
+            # The RSI / %K / %D windows are advanced on every update, not once
+            # per bar, so they carry state that `history` cannot rebuild: the
+            # rolling means and the cross detection both depend on how many
+            # updates the open bar has already produced.
+            "buffers": {
+                "rsis": list(self._rsis),
+                "ks": list(self._ks),
+                "ds": list(self._ds),
+                "prev_k": self._prev_k,
+                "prev_d": self._prev_d,
+            },
         }
 
     def set_state(self, state: dict) -> None:
@@ -95,8 +115,46 @@ class StochRSI(Series):
         )
         live_state = state.get("live")
         self.live = StochRsiValue(**live_state) if live_state is not None else None
-        self._internal = self.live or (self.history[-1] if self.history else None)
-        # The k/d chains are rebuilt from the retained history.
+
+        # `internal` supersedes the fallback kept for states serialized
+        # before this field existed.
+        internal_state = state.get("internal")
+
+        self._internal = (
+            StochRsiValue(**internal_state)
+            if internal_state is not None
+            else (
+                self.live
+                or (self.history[-1] if self.history else None)
+            )
+        )
+
+        buffers = state.get("buffers")
+
+        if buffers is not None:
+            self._rsis = deque(
+                (float(value) for value in (buffers.get("rsis") or [])),
+                maxlen=self.stoch_period,
+            )
+            self._ks = deque(
+                (float(value) for value in (buffers.get("ks") or [])),
+                maxlen=self.k_period,
+            )
+            self._ds = deque(
+                (float(value) for value in (buffers.get("ds") or [])),
+                maxlen=self.d_period,
+            )
+
+            prev_k = buffers.get("prev_k")
+            prev_d = buffers.get("prev_d")
+
+            self._prev_k = float(prev_k) if prev_k is not None else None
+            self._prev_d = float(prev_d) if prev_d is not None else None
+
+            return
+
+        # The k/d chains are rebuilt from the retained history for states
+        # serialized before the windows were persisted.
         self._ks = deque((s.k for s in self.history), maxlen=self.k_period)
         self._ds = deque((s.d for s in self.history), maxlen=self.d_period)
         self._rsis = deque(

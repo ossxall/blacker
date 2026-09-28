@@ -288,6 +288,16 @@ class ReversalTrap(Series):
                 asdict(value)
                 for value in self.history
             ],
+
+            # `live` is the provisional value of the bar that is still open,
+            # so it cannot stand in for `_closed`: a restored engine would
+            # carry the open bar into the confirmed chain, count it twice and
+            # end up one bar behind with every chain skewed.
+            "closed": (
+                asdict(self._closed)
+                if self._closed is not None
+                else None
+            ),
         }
 
     def set_state(self, state: dict) -> None:
@@ -307,11 +317,21 @@ class ReversalTrap(Series):
             maxlen=MAX_HISTORY,
         )
 
-        # The confirmed chain is rebuilt from live, or from the last
-        # history entry when live is suppressed by the warm-up period.
+        # `closed` supersedes the fallback kept for states serialized before
+        # this field existed. That fallback is an approximation and cannot be
+        # better: `history` receives the previous `_closed` on the following
+        # bar, so the newest confirmed value was never published. The
+        # approximation is left exactly as it was so that data recorded
+        # before this fix keeps restoring the way it always did.
+        closed_state = state.get("closed")
+
         self._closed = (
-            self.live
-            or (self.history[-1] if self.history else None)
+            self._coerce(dict(closed_state))
+            if closed_state is not None
+            else (
+                self.live
+                or (self.history[-1] if self.history else None)
+            )
         )
 
     def update(self) -> None:

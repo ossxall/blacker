@@ -75,6 +75,15 @@ class BollingerBands(Series):
             "params": self.params,
             "live": asdict(self.live) if self.live is not None else None,
             "history": [asdict(b) for b in self.history],
+            # `live` is suppressed until the close window is full and is only
+            # an alias of `_internal` once the series is warm, so it cannot
+            # stand in for the band state on restore: an engine rebuilt without
+            # it would confirm the previous bar a second time.
+            "internal": (
+                asdict(self._internal)
+                if self._internal is not None
+                else None
+            ),
         }
 
     def set_state(self, state: dict) -> None:
@@ -84,7 +93,20 @@ class BollingerBands(Series):
         )
         live_state = state.get("live")
         self.live = BollingerValue(**live_state) if live_state is not None else None
-        self._internal = self.live or (self.history[-1] if self.history else None)
+
+        # `internal` supersedes the fallback kept for states serialized
+        # before this field existed.
+        internal_state = state.get("internal")
+
+        self._internal = (
+            BollingerValue(**internal_state)
+            if internal_state is not None
+            else (
+                self.live
+                or (self.history[-1] if self.history else None)
+            )
+        )
+
         # Rebuild the rolling close window from the retained history.
         self._closes = deque((b.close for b in self.history), maxlen=self.period)
 

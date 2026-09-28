@@ -106,6 +106,15 @@ class ADX(Series):
             "params": self.params,
             "live": asdict(self.live) if self.live is not None else None,
             "history": [asdict(a) for a in self.history],
+            # `live` is suppressed during the warm-up and is only an alias of
+            # `_internal` once the chain is warm, so it cannot stand in for the
+            # RMA chain on restore: an engine rebuilt without it would resume
+            # from the previous confirmed bar and confirm it a second time.
+            "internal": (
+                asdict(self._internal)
+                if self._internal is not None
+                else None
+            ),
         }
 
     def set_state(self, state: dict) -> None:
@@ -120,9 +129,18 @@ class ADX(Series):
             Adx(**live_state) if live_state is not None else None
         )
 
-        # The internal state is rebuilt from live, or from the last history
-        # entry when live is suppressed by the warm-up period.
-        self._internal = self.live or (self.history[-1] if self.history else None)
+        # `internal` supersedes the fallback kept for states serialized
+        # before this field existed.
+        internal_state = state.get("internal")
+
+        self._internal = (
+            Adx(**internal_state)
+            if internal_state is not None
+            else (
+                self.live
+                or (self.history[-1] if self.history else None)
+            )
+        )
 
     def update(self) -> None:
         candle = self._timeframe.live

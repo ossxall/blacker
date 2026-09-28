@@ -308,9 +308,11 @@ class Strategy1(Strategy):
         #
         # LONG:
         # EMA20 > EMA50
+        # Y el precio cerrado está por encima de EMA20
         #
         # SHORT:
         # EMA20 < EMA50
+        # Y el precio cerrado está por debajo de EMA20
         # ---------------------------------------------------------
 
         ema20_1m = self._get_series(
@@ -331,11 +333,24 @@ class Strategy1(Strategy):
         ema20_1m_value = self._ema_closed_value(ema20_1m)
         ema50_1m_value = self._ema_closed_value(ema50_1m)
 
-        if ema20_1m_value is None or ema50_1m_value is None:
+        close_1m = self._closed_close(tf_1m)
+
+        if (
+            ema20_1m_value is None
+            or ema50_1m_value is None
+            or close_1m is None
+        ):
             return None
 
-        bullish_1m = ema20_1m_value > ema50_1m_value
-        bearish_1m = ema20_1m_value < ema50_1m_value
+        bullish_1m = (
+            ema20_1m_value > ema50_1m_value
+            and close_1m > ema20_1m_value
+        )
+
+        bearish_1m = (
+            ema20_1m_value < ema50_1m_value
+            and close_1m < ema20_1m_value
+        )
 
         # ---------------------------------------------------------
         # ENTRADA LONG
