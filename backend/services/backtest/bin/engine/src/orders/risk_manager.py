@@ -14,7 +14,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 import math
 import warnings
 
@@ -22,7 +22,7 @@ from orders.models import Side
 
 
 #: Offset kinds understood by ``_offset``.
-OFFSET_KINDS = ("percent", "absolute", "atr")
+OFFSET_KINDS = ("percent", "absolute")
 
 
 @dataclass
@@ -60,8 +60,7 @@ class RiskManager:
 
         {
             "stop":    {"type": "percent",  "value": 0.01}
-                     | {"type": "absolute", "value": 1.5}
-                     | {"type": "atr",      "multiplier": 2.0},
+                     | {"type": "absolute", "value": 1.5},
             "targets": [
                 {"type": "percent",  "value": 0.02},
                 {"type": "absolute", "value": 3.0},
@@ -74,29 +73,17 @@ class RiskManager:
 
     An offset that cannot produce a usable price never reaches the book:
 
-    * An ``"atr"`` stop needs an ATR reading. It is taken from
-      ``atr_provider`` (a callable evaluated on every use) or from a
-      static ``context={"atr": <value>}``. When neither is available
-      the offset would be 0.0 -- which parks the stop exactly on the
-      entry price and takes out every position on its first tick -- so
-      the default percent stop is used instead and a warning is raised.
-    * A zero, negative or non-finite offset is rejected the same way.
+    * A zero, negative or non-finite offset is rejected.
     * An unknown ``type`` is reported instead of being ignored: a typo
-      such as ``"pct"`` used to degrade silently to the default stop.
+      such as ``"pct"`` used to degrade silently to the default stop,
+      and so does a removed kind such as ``"atr"``.
 
     Every rejected spec warns exactly once, so a broken configuration is
     visible in the engine log without flooding it once per tick.
     """
 
-    def __init__(
-        self,
-        config: Optional[dict] = None,
-        context: Optional[dict] = None,
-        atr_provider: Optional[Callable[[], Optional[float]]] = None,
-    ):
+    def __init__(self, config: Optional[dict] = None):
         self.config = config or {}
-        self.context = context or {}
-        self._atr_provider = atr_provider
         self._warned: set[str] = set()
 
         if not isinstance(self.config, dict):
@@ -107,9 +94,6 @@ class RiskManager:
                 "default stop.",
             )
             self.config = {}
-
-        if not isinstance(self.context, dict):
-            self.context = {}
 
         if "trailing" in self.config:
             self._warn(
@@ -205,22 +189,6 @@ class RiskManager:
     # OFFSETS
     # ======================================================
 
-    def _atr_value(self) -> float:
-        if self._atr_provider is not None:
-            try:
-                value = self._atr_provider()
-            except Exception as exc:  # noqa: BLE001 - user supplied hook
-                self._warn(
-                    "atr_provider",
-                    f"The ATR provider raised {exc!r}. Falling back to a static "
-                    "ATR context, if any.",
-                )
-            else:
-                if value is not None:
-                    return abs(_number(value))
-
-        return abs(_number(self.context.get("atr")))
-
     def _offset(self, spec: Optional[dict], price: float, label: str) -> Optional[float]:
         if not spec:
             return None
@@ -243,21 +211,6 @@ class RiskManager:
 
         if kind == "absolute":
             return abs(_number(spec.get("value")))
-
-        if kind == "atr":
-            atr = self._atr_value()
-
-            if atr <= 0.0:
-                self._warn(
-                    f"{label}.atr",
-                    f"Risk configuration resolves {label} with type 'atr' but no ATR "
-                    "reading is available, so the offset would be 0.0. Falling back to "
-                    "the default percent level. Pass context={'atr': <value>} or an "
-                    "atr_provider to RiskManager to use ATR-based levels.",
-                )
-                return None
-
-            return abs(_number(spec.get("multiplier"), default=1.0)) * atr
 
         self._warn(
             f"{label}.type",

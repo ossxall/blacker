@@ -57,9 +57,8 @@ def test_targets_are_ordered_nearest_first():
 
 
 def test_zero_offset_never_parks_the_stop_on_the_entry():
-    # A stop at exactly the entry price is filled by the very next tick. The
-    # same reasoning that rejects an ATR offset of 0.0 applies to a percent
-    # or absolute one: the default is used instead.
+    # A stop at exactly the entry price is filled by the very next tick, so a
+    # percent or absolute offset of zero is rejected in favour of the default.
     assert long_stop(RiskManager({"stop": {"type": "percent", "value": 0.0}})) == 99.0
     assert long_stop(RiskManager({"stop": {"type": "absolute", "value": 0.0}})) == 99.0
     assert long_stop(RiskManager({"stop": {"type": "percent", "value": -0.01}})) == 99.0
@@ -84,43 +83,13 @@ def test_targets_that_resolve_to_a_non_positive_price_are_dropped():
     assert levels.target_prices == [95.0]
 
 
-def test_atr_offset_uses_a_static_context():
-    risk = RiskManager(
-        {"stop": {"type": "atr", "multiplier": 2.0}},
-        context={"atr": 1.5},
-    )
-
-    assert long_stop(risk) == 97.0
-
-
-def test_atr_offset_uses_a_live_provider():
-    readings = [2.0, 4.0]
-    risk = RiskManager(
-        {"stop": {"type": "atr", "multiplier": 2.0}},
-        atr_provider=lambda: readings.pop(0),
-    )
-
-    assert long_stop(risk) == 96.0
-    assert long_stop(risk) == 92.0
-
-
-def test_atr_without_a_reading_falls_back_and_warns():
+def test_a_removed_atr_type_is_reported_and_falls_back():
+    # 'atr' is no longer a kind. A configuration that still carries one is
+    # reported rather than silently honoured, so the bracket degrades to the
+    # default stop the same way a typo does.
     risk = RiskManager({"stop": {"type": "atr", "multiplier": 2.0}})
 
-    with pytest.warns(RuntimeWarning, match="atr"):
-        assert long_stop(risk) == 99.0
-
-
-def test_a_failing_atr_provider_does_not_break_the_bracket():
-    def boom():
-        raise RuntimeError("no series")
-
-    risk = RiskManager(
-        {"stop": {"type": "atr", "multiplier": 2.0}},
-        atr_provider=boom,
-    )
-
-    with pytest.warns(RuntimeWarning, match="ATR provider"):
+    with pytest.warns(RuntimeWarning, match="Unknown risk offset type 'atr'"):
         assert long_stop(risk) == 99.0
 
 
