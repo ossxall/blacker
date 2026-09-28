@@ -13,6 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -99,6 +100,13 @@ class Portfolio:
     The OrderManager delegates every fill to this object, so the
     strategy can derive its state from ``state.portfolio.position``
     instead of keeping its own duplicated flags.
+
+    ``cash`` is the *available balance*: it moves with every fill and
+    says nothing about what the open position is worth. The value of
+    the account is ``equity``, which is ``cash`` plus the signed market
+    value of the position, and the engine marks the book on every tick
+    (``mark``) so both can be published instead of leaving the client to
+    guess them.
     """
 
     def __init__(self, initial_cash: float = 100_000.0):
@@ -107,20 +115,87 @@ class Portfolio:
         self.position: Optional[Position] = None
         self.realized_pnl: float = 0.0
         self.trades: list[Trade] = []
+        #: Last price the position was valued at. ``None`` until the
+        #: engine marks the book, and restored from the payload so a
+        #: resumed backtest can value its position before the first tick.
+        self.mark_price: Optional[float] = None
 
-    def equity(self, price: Optional[float] = None) -> float:
+    # ======================================================
+    # VALUATION
+    # ======================================================
+
+    def mark(self, price: Optional[float]) -> None:
+        """
+        Values the open position at ``price``.
+
+        A price that is not a tradable number is ignored rather than
+        stored: a mark of zero or NaN would silently wipe out the market
+        value of the position and report a fabricated equity.
+        """
+        if price is None:
+            return
+
+        try:
+            mark = float(price)
+        except (TypeError, ValueError):
+            return
+
+        if not math.isfinite(mark) or mark <= 0.0:
+            return
+
+        self.mark_price = mark
+
+    def valuation_price(self) -> Optional[float]:
+        """
+        Price the open position is valued at, or ``None`` if there is
+        nothing to value.
+        """
         if self.position is None:
-            return self.cash
+            return None
+
+        if self.mark_price is not None:
+            return self.mark_price
+
+        # Never marked: the cost basis is the only price known, so the
+        # open PnL is reported as zero instead of being invented.
+        return self.position.avg_price
+
+    def market_value(self, price: Optional[float] = None) -> float:
+        """Signed market value of the open position."""
+        position = self.position
+
+        if position is None:
+            return 0.0
 
         if price is None:
-            price = self.position.avg_price
+            price = self.valuation_price()
 
-        if self.position.side == Side.BUY:
-            market_value = self.position.quantity * price
-        else:
-            market_value = -self.position.quantity * price
+        if price is None:
+            return 0.0
 
-        return self.cash + market_value
+        if position.side == Side.BUY:
+            return position.quantity * price
+
+        return -position.quantity * price
+
+    def unrealized_pnl(self, price: Optional[float] = None) -> float:
+        """Open PnL of the position at ``price``."""
+        position = self.position
+
+        if position is None:
+            return 0.0
+
+        if price is None:
+            price = self.valuation_price()
+
+        if price is None:
+            return 0.0
+
+        return position.unrealized_pnl(price)
+
+    def equity(self, price: Optional[float] = None) -> float:
+        """Value of the account: available cash plus the position."""
+        return self.cash + self.market_value(price)
 
     def apply_fill(self, fill) -> None:
         role = fill.role.value
@@ -190,12 +265,21 @@ class Portfolio:
             self.position = None
 
     def to_dict(self) -> dict:
+        position = (
+            self.position.to_dict() if self.position is not None else None
+        )
+
+        # ``equity`` and ``unrealized_pnl`` are derived, never restored:
+        # they are a function of the position and the mark, so reading
+        # them back would let a stale snapshot override the fills that
+        # the position is rebuilt from.
         return {
             "initial_cash": self.initial_cash,
             "cash": self.cash,
-            "position": (
-                self.position.to_dict() if self.position is not None else None
-            ),
+            "mark_price": self.mark_price,
+            "equity": self.equity(),
+            "unrealized_pnl": self.unrealized_pnl(),
+            "position": position,
             "realized_pnl": self.realized_pnl,
             "trades": [trade.to_dict() for trade in self.trades],
         }
@@ -213,6 +297,7 @@ class Portfolio:
         portfolio.trades = [
             Trade.from_dict(trade) for trade in data.get("trades", [])
         ]
+        portfolio.mark(data.get("mark_price"))
 
         position = data.get("position")
         if position is not None:

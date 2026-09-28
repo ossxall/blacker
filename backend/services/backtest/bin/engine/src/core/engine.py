@@ -155,7 +155,17 @@ class TradingEngine:
         fills = self.execution.update(None, tick)
 
         # --------------------------------------------------
-        # 2. Settle the book, then build the state.
+        # 2. Value the book at this tick.
+        #    Marking after the fills means the position that was
+        #    just opened or closed is already the one being
+        #    priced, so the published equity is the account as
+        #    it stands right now and not as it stood a tick ago.
+        # --------------------------------------------------
+
+        self.portfolio.mark(tick.price)
+
+        # --------------------------------------------------
+        # 3. Settle the book, then build the state.
         #    Pruning first keeps both the state handed to the
         #    strategy and the state shipped to the client
         #    proportional to live exposure instead of to the
@@ -177,7 +187,7 @@ class TradingEngine:
         )
 
         # --------------------------------------------------
-        # 3. Evaluate the strategy on the consistent state:
+        # 4. Evaluate the strategy on the consistent state:
         #    the portfolio *and* the order book both reflect
         #    the fills that just happened, not the previous
         #    tick's view of them.
@@ -186,7 +196,7 @@ class TradingEngine:
         signal = self.strategy.evaluate(self.state)
 
         # --------------------------------------------------
-        # 4. Translate the alpha intent into orders and queue
+        # 5. Translate the alpha intent into orders and queue
         #    them for the next tick.
         # --------------------------------------------------
 
@@ -195,7 +205,7 @@ class TradingEngine:
         self.execution.submit(orders)
 
         # --------------------------------------------------
-        # 5. The published state must reflect everything this
+        # 6. The published state must reflect everything this
         #    tick has done (fills, position, order book).
         # --------------------------------------------------
 

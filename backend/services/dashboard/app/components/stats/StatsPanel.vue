@@ -55,7 +55,12 @@ interface Dashboard {
   trades: NormalizedTrade[];
   summary: {
     realizedPnl: number;
+    /** Saldo disponible: lo que queda en la cuenta sin la posición abierta. */
     cash: number;
+    /** Valor de la cuenta: `initialCash + realizedPnl + unrealizedPnl`. */
+    equity: number;
+    /** PnL de la posición abierta, sin realizar. */
+    unrealizedPnl: number;
     initialCash: number;
     winRate: number;
     profitFactor: number;
@@ -69,6 +74,9 @@ interface Dashboard {
     quantity: number;
     avg_price: number;
   } | null;
+  /** Equity tras cada trade cerrado, con un punto final si sigue abierta una posición. */
+  equityCurve: number[];
+  equityLabels: string[];
 }
 
 interface Props {
@@ -88,6 +96,7 @@ const subEl = ref<HTMLElement>();
 const badgeEl = ref<HTMLElement>();
 const pnlEl = ref<HTMLElement>();
 const cashEl = ref<HTMLElement>();
+const eqEl = ref<HTMLElement>();
 const wrEl = ref<HTMLElement>();
 const pfEl = ref<HTMLElement>();
 const ddEl = ref<HTMLElement>();
@@ -111,16 +120,45 @@ let charts: Chart[] = [];
 // -----------------------------------------------------------------------------
 
 /**
+ * Valor de mercado con signo de una posición abierta.
+ * `price` es el precio marcado por el motor; si no hay precio se usa el
+ * coste, de modo que el PnL abierto sale a cero en vez de inventarse.
+ */
+function positionValue(position: any, price: number | null): number {
+  if (!position || price === null) return 0;
+  const sign = position.side === "BUY" ? 1 : -1;
+  return sign * position.quantity * price;
+}
+
+function openPnl(position: any, price: number | null): number {
+  if (!position || price === null) return 0;
+  const sign = position.side === "BUY" ? 1 : -1;
+  return sign * (price - position.avg_price) * position.quantity;
+}
+
+/**
  * Acepta tanto el JSON ya simplificado (`{ trades, summary }`) como la
  * estructura completa de backend (`{ master: { engine_state: { portfolio } } }`).
+ *
+ * `cash` es el saldo disponible y `equity` el valor de la cuenta. Los
+ * payloads antiguos no traían `equity` ni `mark_price`, así que ambos se
+ * reconstruyen desde la posición abierta.
  */
 function normalize(raw: any): Dashboard {
   if (raw && Array.isArray(raw.trades) && raw.summary) {
-    if (raw.summary.initialCash === undefined) {
-      // fallback si el JSON ya viene simplificado
-      raw.summary.initialCash = raw.summary.cash - raw.summary.realizedPnl;
+    const s = raw.summary;
+    // Orden importa: cada campo se deriva de los anteriores cuando falta.
+    if (s.unrealizedPnl === undefined) s.unrealizedPnl = 0;
+    if (s.equity === undefined) {
+      s.equity =
+        s.initialCash !== undefined
+          ? s.initialCash + s.realizedPnl + s.unrealizedPnl
+          : s.cash + s.unrealizedPnl;
     }
-    return raw;
+    if (s.initialCash === undefined) {
+      s.initialCash = s.equity - s.realizedPnl - s.unrealizedPnl;
+    }
+    return withEquityCurve(raw);
   }
   const master = raw && (raw.master || raw);
   const engine = master && master.engine_state;
@@ -158,9 +196,15 @@ function normalize(raw: any): Dashboard {
     losses = pnls.filter((p) => p < 0);
   const grossProfit = wins.reduce((a, b) => a + b, 0),
     grossLoss = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const openPosition = portfolio.position || null;
+  const mark = portfolio.mark_price ?? (openPosition ? openPosition.avg_price : null);
+  const unrealizedPnl = portfolio.unrealized_pnl ?? openPnl(openPosition, mark);
+  const equity = portfolio.equity ?? portfolio.cash + positionValue(openPosition, mark);
   const summary: Dashboard["summary"] = {
     realizedPnl: portfolio.realized_pnl,
     cash: portfolio.cash,
+    equity,
+    unrealizedPnl,
     initialCash: portfolio.initial_cash,
     winRate: trades.length ? (wins.length / trades.length) * 100 : 0,
     profitFactor: grossLoss
@@ -173,12 +217,35 @@ function normalize(raw: any): Dashboard {
     maxLoss: pnls.length ? Math.min(...pnls) : 0,
     avgPnl: pnls.length ? pnls.reduce((a, b) => a + b, 0) / pnls.length : 0,
   };
-  return {
-    symbol,
-    trades,
-    summary,
-    openPosition: portfolio.position || null,
-  };
+  return withEquityCurve({ symbol, trades, summary, openPosition });
+}
+
+/**
+ * Añade la curva de equity: un punto por trade cerrado y, si queda una
+ * posición abierta, un punto final con su PnL sin realizar. Sin él la
+ * curva termina en el último cierre y oculta lo que está pasando ahora.
+ */
+function withEquityCurve(d: any): Dashboard {
+  const equityCurve = d.trades.map((t: any) => d.summary.initialCash + t.cumPnl);
+  const equityLabels = d.trades.map((t: any) => "#" + t.n);
+  const last = equityCurve[equityCurve.length - 1];
+
+  // La comparación lleva tolerancia: el equity llega por una suma distinta
+  // a la del PnL acumulado y sin ella saldría un punto repetido por ruido
+  // de coma flotante.
+  const moved =
+    last === undefined ||
+    Math.abs(d.summary.equity - last) > Math.max(1e-6, Math.abs(last) * 1e-12);
+
+  if (d.openPosition && moved) {
+    equityCurve.push(d.summary.equity);
+    equityLabels.push("abierta");
+  }
+
+  d.equityCurve = equityCurve;
+  d.equityLabels = equityLabels;
+
+  return d as Dashboard;
 }
 
 // -----------------------------------------------------------------------------
@@ -201,7 +268,12 @@ function render(D: Dashboard) {
 
   badgeEl.value!.textContent = D.trades.length + " trades";
   pnlEl.value!.textContent = fm(D.summary.realizedPnl);
-  cashEl.value!.textContent = money.format(D.summary.cash);
+  cashEl.value!.textContent =
+    "Cash disponible: " +
+    money.format(D.summary.cash) +
+    " · PnL abierto: " +
+    fm(D.summary.unrealizedPnl);
+  eqEl.value!.textContent = money.format(D.summary.equity);
   wrEl.value!.textContent = D.summary.winRate.toFixed(1) + "%";
   pfEl.value!.textContent = D.summary.profitFactor.toFixed(2);
   ddEl.value!.textContent = fm(D.summary.maxDrawdown);
@@ -219,7 +291,6 @@ function render(D: Dashboard) {
 
   const labels = D.trades.map((t) => "#" + t.n);
   const pnl = D.trades.map((t) => t.pnl);
-  const cumSeries = D.trades.map((t) => t.cumPnl);
 
   // ---------------------------------------------------------------------------
   // Gráfico 1 · PnL por trade (barras)
@@ -249,8 +320,13 @@ function render(D: Dashboard) {
 
   // ---------------------------------------------------------------------------
   // Gráfico 2 · PnL acumulado y curva de equity (doble eje)
+  //
+  // `cumSeries` se deja con un hueco al final: el último punto de la curva
+  // de equity es la posición abierta, que no es un trade cerrado.
   // ---------------------------------------------------------------------------
-  const equity = D.trades.map((t) => D.summary.initialCash + t.cumPnl);
+  const equity = D.equityCurve;
+  const cumSeries: (number | null)[] = D.trades.map((t) => t.cumPnl);
+  while (cumSeries.length < equity.length) cumSeries.push(null);
   const cumOpts = {
     responsive: true,
     maintainAspectRatio: false,
@@ -283,7 +359,7 @@ function render(D: Dashboard) {
     new Chart(cumEl.value!, {
       type: "line",
       data: {
-        labels,
+        labels: D.equityLabels,
         datasets: [
           { label: "PnL acumulado", data: cumSeries, yAxisID: "y", tension: 0.25, pointRadius: 4, borderColor: "#6ea8fe" },
           { label: "Equity", data: equity, yAxisID: "y1", tension: 0.25, pointRadius: 4, borderColor: "#35d07f" },
@@ -333,7 +409,7 @@ function render(D: Dashboard) {
   // Gráfico 4 · Curva de equity con drawdown
   // ---------------------------------------------------------------------------
   const initial = D.summary.initialCash;
-  const eq = D.trades.map((t) => initial + t.cumPnl);
+  const eq = D.equityCurve;
   const isDown = (i: number) => eq[i] < initial;
   let pk = Math.max(eq[0] || initial, initial),
     mddPct = 0;
@@ -346,7 +422,7 @@ function render(D: Dashboard) {
     new Chart(drawdownEl.value!, {
       type: "line",
       data: {
-        labels,
+        labels: D.equityLabels,
         datasets: [
           {
             label: "Breakeven (capital inicial)",
@@ -491,7 +567,12 @@ onBeforeUnmount(() => {
         <div class="card">
           <div class="label">PnL realizado</div>
           <div ref="pnlEl" class="value"></div>
-          <div class="small">Cash final: <span ref="cashEl"></span></div>
+          <div class="small" ref="cashEl"></div>
+        </div>
+        <div class="card">
+          <div class="label">Equity</div>
+          <div ref="eqEl" class="value"></div>
+          <div class="small">Capital inicial + realizado + abierto</div>
         </div>
         <div class="card">
           <div class="label">Win rate</div>
@@ -615,7 +696,7 @@ h1 {
 }
 .grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 14px;
 }
 .card {
