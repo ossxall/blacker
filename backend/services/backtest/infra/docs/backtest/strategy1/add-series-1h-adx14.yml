@@ -1,0 +1,36 @@
+info:
+  name: add-series-1h-adx14
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: http://localhost:3002/api/backtest/master/add-series
+  body:
+    type: json
+    data: |-
+      {
+        "timeframe_id": "1h",
+        "id": "adx14",
+        "kind": "ADX",
+        "level": 1,
+        "primary": false,
+        "overlay": false,
+        "params": {
+          "label": "ADX 14",
+          "layer": "foreground",
+          "color": "#9C27B0",
+          "priceTagColor": "#9C27B0",
+          "lineWidth": 1,
+          "dilen": 14,
+          "adxlen": 14,
+          "key_level": 23
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

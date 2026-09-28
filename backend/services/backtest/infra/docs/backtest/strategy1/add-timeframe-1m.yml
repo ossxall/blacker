@@ -1,0 +1,21 @@
+info:
+  name: add-timeframe-1m
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: http://localhost:3002/api/backtest/master/add-timeframe
+  body:
+    type: json
+    data: |-
+      {
+        "id": "1m"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

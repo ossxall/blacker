@@ -1,0 +1,34 @@
+info:
+  name: add-series-5m-ema20
+  type: http
+  seq: 13
+
+http:
+  method: POST
+  url: http://localhost:3002/api/backtest/master/add-series
+  body:
+    type: json
+    data: |-
+      {
+        "timeframe_id": "5m",
+        "id": "ema20",
+        "kind": "EMA",
+        "level": 1,
+        "primary": false,
+        "overlay": true,
+        "params": {
+          "label": "EMA 20",
+          "layer": "foreground",
+          "color": "#FF9800",
+          "priceTagColor": "#FF9800",
+          "lineWidth": 1,
+          "period": 20
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -1,0 +1,33 @@
+info:
+  name: set-strategy
+  type: http
+  seq: 17
+
+http:
+  method: POST
+  url: http://localhost:3002/api/backtest/master/set-strategy
+  body:
+    type: json
+    data: |-
+      {
+        "kind": "Strategy1",
+        "params": {
+          "tf_trend": "1h",
+          "tf_confirm": "30m",
+          "tf_pullback": "15m",
+          "tf_setup": "5m",
+          "tf_trigger": "1m",
+          "label_fast": "EMA 20",
+          "label_slow": "EMA 50",
+          "adx_label": "ADX 14",
+          "adx_threshold": 25.0,
+          "quantity": 1
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
