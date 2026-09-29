@@ -55,8 +55,19 @@ interface Dashboard {
   trades: NormalizedTrade[];
   summary: {
     realizedPnl: number;
-    /** Saldo disponible: lo que queda en la cuenta sin la posición abierta. */
+    /**
+     * Efectivo libre: el saldo que mueve cada fill, con el nocional de la
+     * entrada ya descontado (`Portfolio._entry`). Es margen de compra, no un
+     * saldo contable.
+     */
     cash: number;
+    /**
+     * Capital comprometido en la posición abierta al precio de entrada, con
+     * signo: un BUY lo resta del efectivo y un SELL lo acredita. Con él
+     * `equity = cash + invested + unrealizedPnl` cuadra en las dos
+     * direcciones, porque `cash` solo tiene el nocional descontado una vez.
+     */
+    invested: number;
     /** Valor de la cuenta: `initialCash + realizedPnl + unrealizedPnl`. */
     equity: number;
     /** PnL de la posición abierta, sin realizar. */
@@ -137,6 +148,18 @@ function openPnl(position: any, price: number | null): number {
 }
 
 /**
+ * Capital comprometido en la posición abierta, al precio de entrada y con
+ * signo. El motor no lo publica porque es derivable, y sin él la diferencia
+ * entre el efectivo libre y el equity parece dinero perdido: el nocional
+ * descontado al abrir no sale en ninguna tarjeta.
+ */
+function investedCapital(position: any): number {
+  if (!position) return 0;
+  const sign = position.side === "BUY" ? 1 : -1;
+  return sign * position.quantity * position.avg_price;
+}
+
+/**
  * Acepta tanto el JSON ya simplificado (`{ trades, summary }`) como la
  * estructura completa de backend (`{ master: { engine_state: { portfolio } } }`).
  *
@@ -149,6 +172,7 @@ function normalize(raw: any): Dashboard {
     const s = raw.summary;
     // Orden importa: cada campo se deriva de los anteriores cuando falta.
     if (s.unrealizedPnl === undefined) s.unrealizedPnl = 0;
+    if (s.invested === undefined) s.invested = investedCapital(raw.openPosition);
     if (s.equity === undefined) {
       s.equity =
         s.initialCash !== undefined
@@ -203,6 +227,7 @@ function normalize(raw: any): Dashboard {
   const summary: Dashboard["summary"] = {
     realizedPnl: portfolio.realized_pnl,
     cash: portfolio.cash,
+    invested: investedCapital(openPosition),
     equity,
     unrealizedPnl,
     initialCash: portfolio.initial_cash,
@@ -268,11 +293,19 @@ function render(D: Dashboard) {
 
   badgeEl.value!.textContent = D.trades.length + " trades";
   pnlEl.value!.textContent = fm(D.summary.realizedPnl);
-  cashEl.value!.textContent =
-    "Cash disponible: " +
-    money.format(D.summary.cash) +
-    " · PnL abierto: " +
-    fm(D.summary.unrealizedPnl);
+  // El desglose va en tres filas y no en una línea porque `cash` es margen
+  // libre y no el saldo de la cuenta: sin el capital invertido al lado, el
+  // hueco entre estas cifras y el equity parece un bug.
+  cashEl.value!.innerHTML = [
+    ["Efectivo libre", fp(D.summary.cash)],
+    ["Invertido", fp(D.summary.invested)],
+    ["PnL abierto", fm(D.summary.unrealizedPnl)],
+  ]
+    .map(
+      ([k, v]) =>
+        '<span class="k">' + k + '</span><span class="v">' + v + "</span>",
+    )
+    .join("");
   eqEl.value!.textContent = money.format(D.summary.equity);
   wrEl.value!.textContent = D.summary.winRate.toFixed(1) + "%";
   pfEl.value!.textContent = D.summary.profitFactor.toFixed(2);
@@ -567,12 +600,12 @@ onBeforeUnmount(() => {
         <div class="card">
           <div class="label">PnL realizado</div>
           <div ref="pnlEl" class="value"></div>
-          <div class="small" ref="cashEl"></div>
+          <div ref="cashEl" class="kv"></div>
         </div>
         <div class="card">
           <div class="label">Equity</div>
           <div ref="eqEl" class="value"></div>
-          <div class="small">Capital inicial + realizado + abierto</div>
+          <div class="small">Efectivo libre + invertido + PnL abierto</div>
         </div>
         <div class="card">
           <div class="label">Win rate</div>
@@ -720,6 +753,20 @@ h1 {
   color: #94a3b8;
   font-size: 12px;
   margin-top: 5px;
+}
+.kv {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+:deep(.kv .k) {
+  color: #94a3b8;
+}
+:deep(.kv .v) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .charts {
   display: grid;
