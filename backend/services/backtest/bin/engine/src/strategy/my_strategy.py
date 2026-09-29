@@ -308,11 +308,13 @@ class Strategy1(Strategy):
         #
         # LONG:
         # EMA20 > EMA50
-        # Y el precio cerrado está por encima de EMA20
+        # Cierre de la vela cerrada > EMA20
+        # Cierre rompe el máximo de la vela anterior
         #
         # SHORT:
         # EMA20 < EMA50
-        # Y el precio cerrado está por debajo de EMA20
+        # Cierre de la vela cerrada < EMA20
+        # Cierre rompe el mínimo de la vela anterior
         # ---------------------------------------------------------
 
         ema20_1m = self._get_series(
@@ -333,23 +335,45 @@ class Strategy1(Strategy):
         ema20_1m_value = self._ema_closed_value(ema20_1m)
         ema50_1m_value = self._ema_closed_value(ema50_1m)
 
-        close_1m = self._closed_close(tf_1m)
+        # ---------------------------------------------------------
+        # Candlestick 1m
+        #
+        # history[-1] = última vela cerrada
+        # history[-2] = vela cerrada inmediatamente anterior
+        # ---------------------------------------------------------
+
+        current_1m, previous_1m = self._get_last_two_candles(tf_1m)
 
         if (
             ema20_1m_value is None
             or ema50_1m_value is None
-            or close_1m is None
+            or current_1m is None
+            or previous_1m is None
         ):
             return None
+
+        close_1m = current_1m.close
+        previous_high_1m = previous_1m.high
+        previous_low_1m = previous_1m.low
+
+        # ---------------------------------------------------------
+        # Trigger LONG
+        # ---------------------------------------------------------
 
         bullish_1m = (
             ema20_1m_value > ema50_1m_value
             and close_1m > ema20_1m_value
+            and close_1m > previous_high_1m
         )
+
+        # ---------------------------------------------------------
+        # Trigger SHORT
+        # ---------------------------------------------------------
 
         bearish_1m = (
             ema20_1m_value < ema50_1m_value
             and close_1m < ema20_1m_value
+            and close_1m < previous_low_1m
         )
 
         # ---------------------------------------------------------
@@ -509,3 +533,29 @@ class Strategy1(Strategy):
             "close",
             None,
         )
+
+    @staticmethod
+    def _get_last_two_candles(timeframe):
+        """
+        Devuelve:
+
+        current  = history[-1] -> última vela cerrada
+        previous = history[-2] -> vela cerrada anterior
+        """
+
+        if timeframe is None:
+            return None, None
+
+        for series in getattr(timeframe, "_series", {}).values():
+
+            if getattr(series, "kind", None) != "Candlestick":
+                continue
+
+            history = getattr(series, "history", None)
+
+            if history is None or len(history) < 2:
+                return None, None
+
+            return history[-1], history[-2]
+
+        return None, None    
