@@ -296,6 +296,63 @@ def test_partial_exit_leaves_the_target_ladder_intact():
     assert manager.working_orders() == []
 
 
+def test_pending_partial_exit_is_cancelled_when_the_stop_closes_the_position():
+    # A partial exit sits in the book as a working order. If the stop
+    # takes the rest of the position first, the position is gone, so the
+    # exit has nothing left to fill and must die with the bracket --
+    # otherwise the book keeps an order for a position that no longer
+    # exists, working forever.
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    pending = manager.handle(Signal(action="EXIT", quantity=0.5))[0]
+
+    assert pending.status == OrderStatus.WORKING
+
+    stop = find_role(manager.working_orders(), OrderRole.STOP)[0]
+    fill_order(manager, stop, stop.price, make_tick(1, stop.price))
+
+    assert manager.portfolio.position is None
+    assert manager.working_orders() == []
+    assert pending.status == OrderStatus.CANCELLED
+
+
+def test_pending_partial_exit_is_cancelled_when_a_target_closes_the_position():
+    # Same race, won by the target instead of the stop.
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    pending = manager.handle(Signal(action="EXIT", quantity=0.5))[0]
+    target = find_role(manager.working_orders(), OrderRole.TARGET)[0]
+
+    fill_order(manager, target, target.price, make_tick(1, target.price))
+
+    assert manager.portfolio.position is None
+    assert pending.status == OrderStatus.CANCELLED
+
+
+def test_a_pending_partial_exit_still_works_when_the_position_survives():
+    # The cancel only applies when the position actually went away: a
+    # partial exit must not cancel itself just because it filled.
+    manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
+
+    entry = manager.handle(Signal(action="BUY", quantity=1))[0]
+    fill_entry(manager, entry, 100.0, make_tick(0, 100.0))
+
+    exit_order = manager.handle(Signal(action="EXIT", quantity=0.5))[0]
+    fill_order(manager, exit_order, 100.0, make_tick(1, 100.0))
+
+    assert exit_order.status == OrderStatus.FILLED
+    assert manager.portfolio.position.quantity == pytest.approx(0.5)
+
+    group = manager._groups[exit_order.group_id]
+    assert group.exit_order_ids == []
+
+
 def test_exit_quantity_larger_than_the_position_is_capped():
     manager = OrderManager(portfolio=Portfolio(), risk_manager=RiskManager(BRACKET))
 

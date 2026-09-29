@@ -153,6 +153,7 @@ class OrderGroup:
     entry_order_id: Optional[int] = None
     stop_order_id: Optional[int] = None
     target_order_ids: list[int] = field(default_factory=list)
+    exit_order_ids: list[int] = field(default_factory=list)
     remaining_quantity: float = 0.0
 
     def to_dict(self) -> dict:
@@ -163,6 +164,7 @@ class OrderGroup:
             "entry_order_id": self.entry_order_id,
             "stop_order_id": self.stop_order_id,
             "target_order_ids": list(self.target_order_ids),
+            "exit_order_ids": list(self.exit_order_ids),
             "remaining_quantity": self.remaining_quantity,
         }
 
@@ -175,5 +177,6 @@ class OrderGroup:
             entry_order_id=data.get("entry_order_id"),
             stop_order_id=data.get("stop_order_id"),
             target_order_ids=list(data.get("target_order_ids", [])),
+            exit_order_ids=list(data.get("exit_order_ids", [])),
             remaining_quantity=data.get("remaining_quantity", 0.0),
         )

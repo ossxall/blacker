@@ -276,16 +276,25 @@ class OrderManager:
 
         side = Side.SELL if position.side == Side.BUY else Side.BUY
 
-        return [
-            self._new_order(
-                side=side,
-                order_type=OrderType.MARKET,
-                role=OrderRole.EXIT,
-                quantity=quantity,
-                price=None,
-                group_id=group.id if group is not None else 0,
-            )
-        ]
+        exit_order = self._new_order(
+            side=side,
+            order_type=OrderType.MARKET,
+            role=OrderRole.EXIT,
+            quantity=quantity,
+            price=None,
+            group_id=group.id if group is not None else 0,
+        )
+
+        # The exit belongs to the bracket: if the position closes by any
+        # other route first -- a stop filling, a target filling -- this
+        # order is cancelled with the rest. Without it a partial exit that
+        # never filled would stay WORKING with nothing left to fill, and
+        # the book would keep an order for a position that no longer
+        # exists.
+        if group is not None:
+            group.exit_order_ids.append(exit_order.id)
+
+        return [exit_order]
 
     def _exit_quantity(self, signal: Optional[Signal], position) -> float:
         """
@@ -376,6 +385,9 @@ class OrderManager:
 
         if order.role == OrderRole.ENTRY:
             return self._create_bracket(group, fill)
+
+        if group is not None and order.id in group.exit_order_ids:
+            group.exit_order_ids.remove(order.id)
 
         return self._after_exit_fill(order, group, fill.quantity)
 
@@ -574,6 +586,7 @@ class OrderManager:
         order_ids = list(group.target_order_ids)
         if group.stop_order_id is not None:
             order_ids.append(group.stop_order_id)
+        order_ids.extend(group.exit_order_ids)
 
         for order_id in order_ids:
             if order_id == exclude:
