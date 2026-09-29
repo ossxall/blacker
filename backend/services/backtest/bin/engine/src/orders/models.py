@@ -47,6 +47,11 @@ class Signal:
     The signal only carries *what* the strategy wants: an entry
     (BUY / SELL) or a close (EXIT), with the desired quantity.
 
+    ``quantity`` is absolute, in the same units as the entry, and is
+    required for BUY / SELL. On EXIT it is optional: without it the
+    position is closed in full, and with it only that many units are
+    closed and the rest of the position stays open and protected.
+
     Protective orders (stop-loss, take-profit targets) are attached
     later by the RiskManager, not by the strategy.
     """

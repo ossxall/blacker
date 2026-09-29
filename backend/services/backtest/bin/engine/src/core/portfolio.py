@@ -24,6 +24,17 @@ class Side(str, Enum):
     SELL = "SELL"
 
 
+#: Quantities at or below this are treated as "nothing left".
+#:
+#: Positions can be closed in fractional slices, and binary floating point
+#: does not add up: exiting 0.1 three times and then 0.7 off a 1.0 position
+#: leaves 1.1e-16. Without a tolerance that sliver stays open forever, the
+#: strategy keeps reading a live position and the single-position gate
+#: refuses every future entry, so the run is stuck with a backtest that can
+#: never trade again.
+QUANTITY_EPSILON = 1e-9
+
+
 @dataclass
 class Position:
     side: Side
@@ -261,7 +272,7 @@ class Portfolio:
 
         position.quantity -= quantity
 
-        if position.quantity <= 0:
+        if position.quantity <= QUANTITY_EPSILON:
             self.position = None
 
     def to_dict(self) -> dict:

@@ -1,6 +1,7 @@
 from src.core.engine import TradingEngine
 from src.ingestion.tick import Tick
-from src.orders import OrderManager, OrderRole, Side
+from src.orders import OrderManager, OrderRole, Side, Signal
+from src.strategy.base import Strategy
 from src.strategy.my_strategy import Strategy1
 import pytest
 
@@ -92,12 +93,17 @@ def build_engine_state(risk=None, direction="long", params=None):
     """
     Synthetic engine_state for set_state():
 
-        - 15m / 5m / 1m timeframes with EMA 20, EMA 50 and ADX 14
+        - the five timeframes Strategy1 declares (1h, 30m, 15m, 5m, 1m)
+          with EMA 20, EMA 50 and ADX 14
         - the EMAs are seeded already aligned with `direction`, which is
-          what a config looks like at the moment a strategy starts:
-          Strategy1 reads the 5m pair and acts straight away
-        - ADX is seeded so the fixture keeps the shape of a real
-          engine_state, even though this strategy does not read it
+          what a config looks like at the moment a strategy starts: the
+          strategy sees a full agreement and acts straight away
+        - the ADX of every timeframe is aligned too, so 1h counts as
+          trending and the strategy gets past its first gate
+
+    All five are needed: `evaluate()` returns None straight away if 1h or
+    30m is missing, which used to make every test here fail with "strategy
+    never emitted a BUY signal".
 
     `direction` also decides whether the steady move that follows is up
     or down, so the position opened by the strategy stays in its favour
@@ -119,6 +125,12 @@ def build_engine_state(risk=None, direction="long", params=None):
     adx15_hist = [adx_state(1 - i, BASE_TS - i * 900_000, 26.0, above, below) for i in range(28)]
     adx15_live = dict(adx15_hist[-1])
 
+    adx30_hist = [adx_state(1 - i, BASE_TS - i * 1_800_000, 25.0, above, below) for i in range(28)]
+    adx30_live = dict(adx30_hist[-1])
+
+    adx1h_hist = [adx_state(1 - i, BASE_TS - i * 3_600_000, 27.0, above, below) for i in range(28)]
+    adx1h_live = dict(adx1h_hist[-1])
+
     return {
         "tick_index": 0,
         "time": 0,
@@ -126,6 +138,8 @@ def build_engine_state(risk=None, direction="long", params=None):
             "1m": tf_state("1m", 60_000, [{"time": 1, "value": above}], [{"time": 1, "value": e50}], [], None),
             "5m": tf_state("5m", 300_000, [{"time": 1, "value": above}], [{"time": 1, "value": e50}], adx5_hist, adx5_live),
             "15m": tf_state("15m", 900_000, [{"time": 1, "value": above}], [{"time": 1, "value": e50}], adx15_hist, adx15_live),
+            "30m": tf_state("30m", 1_800_000, [{"time": 1, "value": above}], [{"time": 1, "value": e50}], adx30_hist, adx30_live),
+            "1h": tf_state("1h", 3_600_000, [{"time": 1, "value": above}], [{"time": 1, "value": e50}], adx1h_hist, adx1h_live),
         },
         "strategy": {"kind": "Strategy1", "params": params or {}},
         "risk": risk or None,
@@ -271,15 +285,31 @@ def test_engine_short_entry_bracket_geometry():
     assert target.price == pytest.approx(position.avg_price * 0.98, rel=1e-9)
 
 
+def flip_structure(engine, tf_id, fast, slow):
+    """
+    Turns the EMA structure of `tf_id` to (fast, slow).
+
+    The strategy reads ``series._closed``, and the fixture seeds those
+    once and never recomputes them, so no amount of feeding ticks will
+    make a structure turn on its own. Driving the turn here is what a
+    new closed candle would do in a real run.
+    """
+    timeframe = engine.state.timeframes.get(tf_id)
+
+    for label, value in (("EMA 20", fast), ("EMA 50", slow)):
+        series = timeframe.get_series("EMA", label)
+        series._closed = type("Closed", (), {"value": value})()
+
+
 def test_engine_short_internal_exit_path():
-    # The short is opened while the 5m structure is bearish, so the strategy
-    # only asks to exit once the fast EMA has crossed back above the slow
-    # one. Feeding a rising price is what produces that crossing.
+    # The short is opened while the 1h structure is bearish. It only exits
+    # once that structure turns bullish again, so the test flips the 1h
+    # EMAs rather than trying to move the price: the fixture's series are
+    # static, and the strategy only ever reads their confirmed values.
     #
     # The stop is deliberately wide: this test is about the exit the
     # *strategy* asks for, and with the default 1% stop the reversal would
-    # take the position out through the bracket long before the 5m
-    # structure had time to turn.
+    # take the position out through the bracket first.
     risk = {
         "stop": {"type": "percent", "value": 0.25},
         "targets": [{"type": "percent", "value": 0.05}],
@@ -305,6 +335,11 @@ def test_engine_short_internal_exit_path():
     assert sig is None
 
     # --- the structure turns: the strategy exits ---
+    # 1h goes bullish. This is a 1h reversal, so the close is a full one:
+    # leaving 30m untouched is deliberate, otherwise the 30m cross would
+    # ask for a scale-out and the position would never close.
+    flip_structure(engine, "1h", 110.0, 100.0)
+
     price = price_at(sell_minute + 1, "short")
     exit_minute = None
 
@@ -318,6 +353,7 @@ def test_engine_short_internal_exit_path():
             break
 
     assert exit_minute is not None, "strategy never exited the short"
+    assert sig.quantity is None, "a 1h reversal must close in full"
 
     # The bracket is cancelled and replaced by a single market exit.
     working = engine.order_manager.working_orders()
@@ -393,23 +429,139 @@ def test_engine_book_stays_bounded_over_a_long_run():
     engine = TradingEngine()
     engine.set_state("boot", "config", build_engine_state(risk=RISK))
 
-    sizes = []
+    settled_cap = OrderManager.prune.__defaults__[0]
+    samples = []
+    plateau = None
 
-    for index in range(1200):
+    # Run until the book stops growing instead of guessing a tick count:
+    # prune() retains the last 200 settled orders, so the ceiling is only
+    # reached once enough trades have settled to fill it. How many ticks
+    # that takes depends on how often the strategy trades.
+    for index in range(20_000):
         # Zigzag: enough crossings to trade repeatedly in both directions.
         price = 100.0 + 0.4 * index if (index // 25) % 2 == 0 else 100.0 - 0.4 * (index % 50)
         state, _ = engine.on_tick(
             make_tick(index, BASE_TS + index * 60_000, price)
         )
 
-        if (index + 1) % 400 == 0:
-            sizes.append(len(state.orders["orders"]))
+        if (index + 1) % 400 != 0:
+            continue
 
-    # The book is capped, so the last two samples are identical no matter how
-    # many trades happened in between.
-    assert sizes[-1] == sizes[-2]
+        size = len(state.orders["orders"])
+        samples.append((index + 1, size))
+
+        if len(samples) > 2 and size == samples[-3][1] == samples[-2][1]:
+            plateau = index + 1
+            break
+
+    assert plateau is not None, f"the book never settled, sizes: {samples}"
+
+    # Once capped, the book stops tracking the length of the replay.
     assert len(engine.order_manager.working_orders()) <= 3
-    assert len(engine.order_manager._orders) <= 202
+    assert len(engine.order_manager._orders) <= settled_cap + 2
 
     # The trade history itself is the backtest output and is untouched.
     assert len(engine.portfolio.trades) > 10
+
+
+def test_engine_partial_exit_keeps_the_residual_open_and_protected():
+    # A strategy that scales out instead of closing: it opens one position,
+    # exits half of it, and lets the rest run under its original bracket.
+    #
+    # It drives itself off the portfolio rather than off the series, so the
+    # test is about the order lifecycle and not about which timeframes a
+    # particular strategy happens to read.
+    engine = TradingEngine()
+    state = build_engine_state(risk=RISK)
+    engine.set_state("boot", "config", state)
+
+    class ScaleOut(Strategy):
+        def __init__(self):
+            super().__init__("ScaleOut", {})
+
+        def evaluate(self, state):
+            position = state.portfolio.position
+
+            if position is None:
+                return Signal(action="BUY", quantity=1)
+
+            # Scale out the first time only, then hold the residual.
+            if position.quantity == 1.0:
+                return Signal(action="EXIT", quantity=position.quantity * 0.5)
+
+            return None
+
+    engine.strategy = ScaleOut()
+
+    # --- the entry is submitted, then fills on the next tick ---
+    _, signal = engine.on_tick(make_tick(0, BASE_TS, 100.0))
+
+    assert signal is not None
+    assert signal.action == "BUY"
+
+    published, signal = engine.on_tick(make_tick(1, BASE_TS + 60_000, 100.0))
+
+    position = engine.portfolio.position
+    assert position is not None
+    assert position.quantity == 1.0
+    assert position.avg_price == 100.0
+
+    # The entry filled, its bracket went in, and the strategy already asked
+    # to scale out on the very tick it filled: the exit is working
+    # alongside the stop and the target.
+    assert signal is not None
+    assert signal.action == "EXIT"
+    assert signal.quantity == 0.5
+
+    exit_orders = [o for o in engine.order_manager.working_orders() if o.role == OrderRole.EXIT]
+    assert len(exit_orders) == 1
+    assert exit_orders[0].quantity == 0.5
+
+    # The bracket survived the partial exit: the residual is still covered.
+    assert {o.role for o in engine.order_manager.working_orders()} == {
+        OrderRole.STOP,
+        OrderRole.TARGET,
+        OrderRole.EXIT,
+    }
+
+    # --- the market exit fills on the next tick ---
+    #
+    # Inside the bracket on purpose: a tick past the target would let the
+    # protective order win the race, which is the documented priority and
+    # not what this test is about.
+    exit_price = 101.0
+    published, _ = engine.on_tick(make_tick(2, BASE_TS + 120_000, exit_price))
+
+    position = engine.portfolio.position
+    assert position is not None
+    assert position.quantity == 0.5
+    assert engine.portfolio.realized_pnl == pytest.approx(0.5, rel=1e-9)
+
+    # Exactly one trade was booked, for the slice that actually closed.
+    assert len(engine.portfolio.trades) == 1
+    assert engine.portfolio.trades[0].quantity == 0.5
+
+    # The published state reports the residual, not the original position.
+    assert published.to_dict()["portfolio"]["position"]["quantity"] == 0.5
+
+    # The stop shrank to the quantity that is left.
+    stop = [o for o in engine.order_manager.working_orders() if o.role == OrderRole.STOP]
+    assert len(stop) == 1
+    assert stop[0].quantity == 0.5
+
+    # The target is still there to close the residual...
+    target = [o for o in engine.order_manager.working_orders() if o.role == OrderRole.TARGET]
+    assert len(target) == 1
+
+    # ...and when it does, the bracket retires with it and the position is
+    # gone. The only thing left working is the new entry the strategy
+    # opened on that same flat tick.
+    target_price = target[0].price
+    engine.on_tick(make_tick(3, BASE_TS + 180_000, target_price))
+
+    assert engine.portfolio.position is None
+    assert engine.portfolio.realized_pnl == pytest.approx(0.5 + 1.0, rel=1e-9)
+
+    working = engine.order_manager.working_orders()
+    assert all(o.role == OrderRole.ENTRY for o in working)
+    assert all(o.group_id == 2 for o in working)

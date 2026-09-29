@@ -1,9 +1,34 @@
 from core.engine_state import EngineState
+from core.portfolio import QUANTITY_EPSILON
 from strategy.base import Strategy
 from orders import Signal, Side
 
 
 class Strategy1(Strategy):
+    """
+    Entrada por confirmacion multi-timeframe y salida en dos etapas.
+
+    La entrada exige que los cinco timeframes estén de acuerdo: 1H da
+    la tendencia, 30m la confirma, 15m exige un pullback, 5m marca el
+    setup y 1m el gatillo.
+
+    La salida se decide por cuál es el timeframe que se ha girado:
+
+        - 1H en contra        -> cierre completo. La tendencia se
+                                rompió y no queda nada que sostener.
+        - 1H igual, 30m en
+          contra             -> salida parcial (``scale_out_fraction``
+                                de la posición). Se asegura parte y se
+                                deja correr el resto, que sigue bajo su
+                                stop y sus targets originales.
+        - 30m de acuerdo      -> mantener.
+
+    El orden importa: 1H manda porque su reverso ya cierra entero, así
+    que un 30m en contra no llegaría a ejecutarse nunca. La salida
+    parcial solo se pide mientras la posición esté completa, de modo
+    que no se repite cada tick mientras el 30m siga girado.
+    """
+
     DEFAULT_PARAMS = {
         # Timeframes
         "tf_trend": "1h",
@@ -22,6 +47,11 @@ class Strategy1(Strategy):
 
         # Position
         "quantity": 1,
+
+        # Cuanto se sale en el cross de 30m, como fraccion de la
+        # posicion. Es una fraccion y no una cantidad absoluta para que
+        # la misma cuenta sirva con cualquier tamano de posicion.
+        "scale_out_fraction": 0.5,
     }
 
     def __init__(self, kind: str, params: dict):
@@ -51,6 +81,16 @@ class Strategy1(Strategy):
             quantity = 1.0
 
         self.quantity = quantity if quantity > 0.0 else 1.0
+
+        try:
+            scale_out = float(merged["scale_out_fraction"])
+        except (TypeError, ValueError):
+            scale_out = 0.5
+
+        # Una fraccion >= 1 convertiria el cross de 30m en un cierre
+        # completo, que es lo que ya hace el reverso de 1H, y una <= 0 no
+        # cerraria nada. En los dos casos el valor cae a la mitad.
+        self.scale_out_fraction = scale_out if 0.0 < scale_out < 1.0 else 0.5
 
     def evaluate(self, state: EngineState):
         # ---------------------------------------------------------
@@ -159,7 +199,9 @@ class Strategy1(Strategy):
         # ---------------------------------------------------------
         # Si existe posición:
         #
-        # Solo cerramos cuando la tendencia 1H se vuelve contraria.
+        # 1H en contra      -> cierre completo.
+        # 1H igual, 30m en contra -> salida parcial.
+        # En otro caso      -> mantener.
         # ---------------------------------------------------------
 
         if position is not None:
@@ -169,6 +211,11 @@ class Strategy1(Strategy):
 
             if position.side == Side.SELL and bullish_1h:
                 return Signal(action="EXIT")
+
+            scale_out = self._scale_out_signal(state, position)
+
+            if scale_out is not None:
+                return scale_out
 
             return None
 
@@ -188,31 +235,18 @@ class Strategy1(Strategy):
         #
         # SHORT:
         # EMA20 < EMA50
+        #
+        # Se lee con el mismo helper que usa la salida parcial, para
+        # que el cross que abre y el que sale se juzguen con la misma
+        # regla y no puedan discrepar.
         # ---------------------------------------------------------
 
-        ema20_30m = self._get_series(
-            tf_30m,
-            "EMA",
-            self.label_fast,
-        )
+        structure_30m = self._ema_structure(tf_30m)
 
-        ema50_30m = self._get_series(
-            tf_30m,
-            "EMA",
-            self.label_slow,
-        )
-
-        if ema20_30m is None or ema50_30m is None:
+        if structure_30m is None:
             return None
 
-        ema20_30m_value = self._ema_closed_value(ema20_30m)
-        ema50_30m_value = self._ema_closed_value(ema50_30m)
-
-        if ema20_30m_value is None or ema50_30m_value is None:
-            return None
-
-        bullish_30m = ema20_30m_value > ema50_30m_value
-        bearish_30m = ema20_30m_value < ema50_30m_value
+        bullish_30m, bearish_30m = structure_30m
 
         # ---------------------------------------------------------
         # 15m - PULLBACK + TENDENCIA
@@ -409,6 +443,86 @@ class Strategy1(Strategy):
             )
 
         return None
+
+    # =============================================================
+    # SCALE OUT
+    # =============================================================
+
+    def _scale_out_signal(self, state, position):
+        """
+        Salida parcial cuando el cross de 30m va contra la posición.
+
+        Devuelve None cuando no hay que salir, y la señal con la
+        cantidad cuando sí.
+
+        La estrategia es sin estado a propósito: el portfolio es la
+        única fuente de verdad y el motor restaura exactamente el estado
+        que publica. Por eso la idempotencia no se guarda en un flag
+        sino que se deduce de la propia posición.
+
+        Si no, el 30m en contra se leería en cada tick y la posición
+        menguaría 1.0 -> 0.5 -> 0.25 -> 0.125 ... hasta quedar en polvo,
+        que es una pérdida por goteo y no una salida parcial.
+
+        La condición es que la posición siga completa: en cuanto una
+        salida (parcial o de bracket) la reduce, ya no vuelve a
+        escalar. Un target que llenó antes también cuenta como salida
+        ya realizada, que es lo conservador.
+        """
+
+        if position.quantity < self.quantity - QUANTITY_EPSILON:
+            return None
+
+        tf_30m = state.timeframes.get(self.tf_confirm)
+
+        if tf_30m is None:
+            return None
+
+        structure = self._ema_structure(tf_30m)
+
+        if structure is None:
+            return None
+
+        bullish_30m, bearish_30m = structure
+
+        if position.side == Side.BUY and bearish_30m:
+            against = True
+        elif position.side == Side.SELL and bullish_30m:
+            against = True
+        else:
+            against = False
+
+        if not against:
+            return None
+
+        return Signal(
+            action="EXIT",
+            quantity=position.quantity * self.scale_out_fraction,
+        )
+
+    def _ema_structure(self, timeframe):
+        """
+        (alcista, bajista) según el cruce de las dos EMA en el
+        timeframe, o None si todavía no se pueden leer.
+
+        Estar en None es distinto de estar en neutral: neutral es una
+        decisión, None es "todavía no hay datos" y no debe abrir ni
+        cerrar nada.
+        """
+
+        ema_fast = self._get_series(timeframe, "EMA", self.label_fast)
+        ema_slow = self._get_series(timeframe, "EMA", self.label_slow)
+
+        if ema_fast is None or ema_slow is None:
+            return None
+
+        fast = self._ema_closed_value(ema_fast)
+        slow = self._ema_closed_value(ema_slow)
+
+        if fast is None or slow is None:
+            return None
+
+        return fast > slow, fast < slow
 
     # =============================================================
     # HELPERS

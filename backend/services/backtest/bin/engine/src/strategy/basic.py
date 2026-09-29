@@ -18,7 +18,7 @@ from strategy.base import Strategy
 from orders import Signal, Side
 
 
-class Strategy1(Strategy):
+class Strategy1UNUSED(Strategy):
     """
     Cruce de EMAs: la estrategia mas simple que se puede escribir sobre
     este motor. No busca alfa, sirve de ejemplo y de banco de pruebas del

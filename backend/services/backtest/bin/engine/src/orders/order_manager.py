@@ -16,7 +16,7 @@
 from typing import Optional
 import math
 
-from core.portfolio import Portfolio
+from core.portfolio import QUANTITY_EPSILON, Portfolio
 from orders.models import (
     Fill,
     Order,
@@ -46,8 +46,11 @@ class OrderManager:
           position is open.
         * A working order always has a positive fill quantity, or it is
           cancelled. Orders are never left working with nothing to fill.
-        * The bracket of a group is created on the entry fill and its
-          siblings are OCO: the first exit fill cancels the rest.
+        * The bracket of a group is created on the entry fill. It is
+          OCO: the first exit fill that flattens the position cancels
+          the rest, while a partial one leaves the residual protected by
+          the same stop (shrunk to the quantity that is left) and the
+          same targets (capped by the group when they fill).
         * The bracket is static. A stop is priced once against the entry
           fill and is never moved again, so no order in the book depends
           on where price travelled afterwards.
@@ -175,9 +178,27 @@ class OrderManager:
             return self._open(signal, Side.SELL)
 
         if signal.action == "EXIT":
-            return self._exit_position()
+            return self._exit_position(signal)
 
         raise ValueError(f"Unknown signal action: {signal.action}")
+
+    @staticmethod
+    def _positive_quantity(value, action: str) -> float:
+        """
+        Quantity a signal asks for, or a loud failure.
+
+        A non-positive or non-finite quantity can never fill, and the
+        order would sit in the book as WORKING forever while the
+        strategy keeps seeing the account it asked for.
+        """
+        quantity = float(value)
+
+        if not math.isfinite(quantity) or quantity <= 0.0:
+            raise ValueError(
+                f"{action} signal requires a positive quantity, got {value!r}"
+            )
+
+        return quantity
 
     def _open(self, signal: Signal, side: Side) -> list[Order]:
         # Single-position engine: ignore entries while a position is open.
@@ -194,16 +215,7 @@ class OrderManager:
         if signal.quantity is None:
             raise ValueError(f"{signal.action} signal requires quantity")
 
-        quantity = float(signal.quantity)
-
-        # A non-positive or non-finite quantity can never fill, and the
-        # order would sit in the book as WORKING forever while the
-        # strategy keeps seeing a flat portfolio.
-        if not math.isfinite(quantity) or quantity <= 0.0:
-            raise ValueError(
-                f"{signal.action} signal requires a positive quantity, "
-                f"got {signal.quantity!r}"
-            )
+        quantity = self._positive_quantity(signal.quantity, signal.action)
 
         group = self._new_group(side, quantity)
 
@@ -237,12 +249,15 @@ class OrderManager:
         remaining quantity.
         """
         for group in self._groups.values():
-            if group.remaining_quantity > 0.0 and group.entry_order_id is not None:
+            if (
+                group.remaining_quantity > QUANTITY_EPSILON
+                and group.entry_order_id is not None
+            ):
                 return group
 
         return None
 
-    def _exit_position(self) -> list[Order]:
+    def _exit_position(self, signal: Optional[Signal] = None) -> list[Order]:
         position = self._portfolio.position
 
         if position is None:
@@ -250,8 +265,13 @@ class OrderManager:
 
         group = self._open_group()
 
-        # An explicit exit invalidates the whole bracket.
-        if group is not None:
+        quantity = self._exit_quantity(signal, position)
+
+        # An exit that leaves the position flat invalidates the whole
+        # bracket. A partial one does not: the residual stays protected by
+        # the same stop and targets, shrunk to whatever is left of the
+        # group when they fill (see ``_after_exit_fill``).
+        if group is not None and quantity >= position.quantity - QUANTITY_EPSILON:
             self._cancel_children(group)
 
         side = Side.SELL if position.side == Side.BUY else Side.BUY
@@ -261,11 +281,31 @@ class OrderManager:
                 side=side,
                 order_type=OrderType.MARKET,
                 role=OrderRole.EXIT,
-                quantity=position.quantity,
+                quantity=quantity,
                 price=None,
                 group_id=group.id if group is not None else 0,
             )
         ]
+
+    def _exit_quantity(self, signal: Optional[Signal], position) -> float:
+        """
+        Quantity an EXIT asks to close.
+
+        No quantity means "close everything", which is what a strategy
+        that only ever trades one position wants. A quantity closes that
+        many units and leaves the rest of the position open and protected.
+
+        A quantity larger than the position is capped rather than
+        rejected: the venue would fill what exists, and a strategy sizing
+        an exit off a position it already partly closed should see that
+        exit fill, not kill the run.
+        """
+        if signal is None or signal.quantity is None:
+            return position.quantity
+
+        requested = self._positive_quantity(signal.quantity, "EXIT")
+
+        return min(requested, position.quantity)
 
     # ======================================================
     # FILLS
@@ -278,11 +318,18 @@ class OrderManager:
         Protective orders are capped by what is left of the group, so an
         order can be working while nothing is left to fill it. Callers
         must retire those orders instead of leaving them in the book.
+
+        A leftover of floating-point dust counts as nothing left: a group
+        holding 1.1e-16 is closed, and reporting it as fillable would book
+        a fill that moves nothing and leave the order working forever.
         """
         group = self._groups.get(order.group_id)
 
         if group is not None and order.role != OrderRole.ENTRY:
-            return min(order.quantity, max(group.remaining_quantity, 0.0))
+            if group.remaining_quantity <= QUANTITY_EPSILON:
+                return 0.0
+
+            return min(order.quantity, group.remaining_quantity)
 
         return order.quantity
 
@@ -321,7 +368,9 @@ class OrderManager:
         group = self._groups.get(fill.group_id)
 
         if group is not None and order.role != OrderRole.ENTRY:
-            group.remaining_quantity = max(0.0, group.remaining_quantity - fill.quantity)
+            group.remaining_quantity = max(
+                0.0, group.remaining_quantity - fill.quantity
+            )
 
         self._portfolio.apply_fill(fill)
 
@@ -372,7 +421,7 @@ class OrderManager:
 
                 # A target that rounds down to nothing would sit in the
                 # book working forever without ever being fillable.
-                if target_quantity <= 0.0:
+                if target_quantity <= QUANTITY_EPSILON:
                     continue
 
                 order = self._new_order(
@@ -400,15 +449,15 @@ class OrderManager:
             self._cancel_children(group, exclude=order.id)
             return []
 
-        if order.role == OrderRole.TARGET:
-            if group is not None and group.remaining_quantity <= 0:
+        if order.role in (OrderRole.TARGET, OrderRole.EXIT):
+            if group is not None and group.remaining_quantity <= QUANTITY_EPSILON:
                 self._cancel_children(group, exclude=order.id)
             else:
+                # Quantity is left on the position, so the stop shrinks to
+                # match. The sibling targets keep their own size: they are
+                # capped by what is left of the group when they fill, which
+                # is what lets a ladder survive a partial exit untouched.
                 self._reduce_stop_quantity(group, fill_quantity)
-            return []
-
-        if order.role == OrderRole.EXIT:
-            self._cancel_children(group, exclude=order.id)
             return []
 
         return []
@@ -475,7 +524,8 @@ class OrderManager:
         closed = [
             group_id
             for group_id, group in self._groups.items()
-            if group.remaining_quantity <= 0.0 and not self._group_is_working(group)
+            if group.remaining_quantity <= QUANTITY_EPSILON
+            and not self._group_is_working(group)
         ]
 
         removed_groups = 0
@@ -514,7 +564,7 @@ class OrderManager:
 
         stop.quantity = max(0.0, stop.quantity - amount)
 
-        if stop.quantity <= 0.0:
+        if stop.quantity <= QUANTITY_EPSILON:
             self.cancel(stop.id)
 
     def _cancel_children(self, group: Optional[OrderGroup], exclude: Optional[int] = None) -> None:

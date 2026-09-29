@@ -21,7 +21,8 @@ http:
           "label_slow": "EMA 50",
           "adx_label": "ADX 14",
           "adx_threshold": 25.0,
-          "quantity": 1
+          "quantity": 1,
+          "scale_out_fraction": 0.5
         }
       }
   auth: inherit
