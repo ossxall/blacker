@@ -150,21 +150,18 @@ class Strategy1(Strategy):
         ema20_1h_value = self._ema_closed_value(ema20_1h)
         ema50_1h_value = self._ema_closed_value(ema50_1h)
 
-        adx_value = self._adx_confirmed_value(
+        adx_value = self._adx_closed_value(
             adx_1h,
-            tf_1h,
             "adx",
         )
 
-        plus_di = self._adx_confirmed_value(
+        plus_di = self._adx_closed_value(
             adx_1h,
-            tf_1h,
             "plus_di",
         )
 
-        minus_di = self._adx_confirmed_value(
+        minus_di = self._adx_closed_value(
             adx_1h,
-            tf_1h,
             "minus_di",
         )
 
@@ -372,8 +369,8 @@ class Strategy1(Strategy):
         # ---------------------------------------------------------
         # Candlestick 1m
         #
-        # history[-1] = última vela cerrada
-        # history[-2] = vela cerrada inmediatamente anterior
+        # current_1m  = _closed     -> última vela cerrada
+        # previous_1m = history[-2] -> vela cerrada anterior
         # ---------------------------------------------------------
 
         current_1m, previous_1m = self._get_last_two_candles(tf_1m)
@@ -554,75 +551,45 @@ class Strategy1(Strategy):
             return None
 
     @staticmethod
-    def _ema_closed_value(series):
+    def _closed(series):
         """
-        EMA:
-        _closed = último valor confirmado.
+        Última lectura confirmada de una serie, sea cual sea su tipo.
+
+        Todas las series exponen su confirmación en ``_closed``:
+
+            - EMA -> EMAValue, con el valor confirmado
+            - ADX -> Adx, con adx / +DI / -DI confirmados
+
+        Devolver el payload entero y no un float es lo que permite separar
+        "todavía no hay confirmación" de "el valor confirmado es 0", y es
+        lo que hace que el mismo accessor sirva para todas las series.
+
+        ``_closed`` es el unico contrato de cierre del motor: leer ``live``
+        es leer la vela que sigue abierta, que se repinta tick a tick.
         """
 
         if series is None:
             return None
 
-        closed = getattr(series, "_closed", None)
+        return getattr(series, "_closed", None)
+
+    @classmethod
+    def _ema_closed_value(cls, series):
+        closed = cls._closed(series)
 
         if closed is None:
             return None
 
         return closed.value
 
-    @staticmethod
-    def _adx_confirmed_value(series, timeframe, field: str):
-        """
-        ADX no tiene _closed como EMA.
+    @classmethod
+    def _adx_closed_value(cls, series, field: str):
+        closed = cls._closed(series)
 
-        Si ADX.live corresponde a la última vela cerrada,
-        usamos live.
-
-        Si live corresponde a la vela actualmente abierta,
-        usamos history[-1].
-        """
-
-        if series is None:
+        if closed is None:
             return None
 
-        closed_bar = getattr(timeframe, "closed", None)
-        live = getattr(series, "live", None)
-
-        if closed_bar is not None and live is not None:
-
-            live_start_ts = getattr(
-                live,
-                "start_ts",
-                None,
-            )
-
-            closed_start_ts = getattr(
-                closed_bar,
-                "start_ts",
-                None,
-            )
-
-            if (
-                live_start_ts is not None
-                and closed_start_ts is not None
-                and live_start_ts == closed_start_ts
-            ):
-                return getattr(
-                    live,
-                    field,
-                    None,
-                )
-
-        history = getattr(series, "history", None)
-
-        if not history:
-            return None
-
-        return getattr(
-            history[-1],
-            field,
-            None,
-        )
+        return getattr(closed, field, None)
 
     @staticmethod
     def _closed_close(timeframe):
@@ -648,13 +615,17 @@ class Strategy1(Strategy):
             None,
         )
 
-    @staticmethod
-    def _get_last_two_candles(timeframe):
+    @classmethod
+    def _get_last_two_candles(cls, timeframe):
         """
         Devuelve:
 
-        current  = history[-1] -> última vela cerrada
+        current  = _closed     -> última vela cerrada
         previous = history[-2] -> vela cerrada anterior
+
+        En ``Candlestick`` ``_closed`` y ``history[-1]`` son la misma vela,
+        así que la anterior es ``history[-2]``. Se leen por el mismo
+        contrato que las EMA y el ADX, y no por ``history`` a secas.
         """
 
         if timeframe is None:
@@ -665,11 +636,12 @@ class Strategy1(Strategy):
             if getattr(series, "kind", None) != "Candlestick":
                 continue
 
+            current = cls._closed(series)
             history = getattr(series, "history", None)
 
-            if history is None or len(history) < 2:
+            if current is None or history is None or len(history) < 2:
                 return None, None
 
-            return history[-1], history[-2]
+            return current, history[-2]
 
         return None, None    

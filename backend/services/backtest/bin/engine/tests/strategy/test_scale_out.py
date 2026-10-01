@@ -49,19 +49,19 @@ def ema(series_id, label, value):
 
 
 def adx(values=ADX_LONG):
-    # La estrategia lee el ADX confirmado de ``history[-1]``, no de
-    # ``_closed``: son rutas distintas a propósito en el código real.
+    # La estrategia lee el ADX confirmado de ``_closed``, el mismo contrato
+    # que usa para las EMA.
     return FakeSeries(
         "adx",
         "ADX",
         "ADX 14",
-        history=[_Box(**values)],
+        closed=_Box(**values),
     )
 
 
 class _Box:
-    """La estrategia lee ``._closed.value`` de las EMA y atributos sueltos
-    del ADX confirmado."""
+    """La estrategia lee ``._closed.value`` de las EMA y ``._closed.<campo>``
+    del ADX: en ambos casos el mismo accessor sobre ``_closed``."""
 
     def __init__(self, value=None, **fields):
         self.value = value

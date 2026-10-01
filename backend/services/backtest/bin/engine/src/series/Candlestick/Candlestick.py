@@ -55,8 +55,16 @@ class Candlestick(Series):
             params
         )
 
+        self._closed: Candle | None = None
+
         self._live: Candle | None = None
 
+        # Unlike EMA/ATR, `history` does not lag `_closed` by one bar: the
+        # candle that `_closed` holds is also the newest one in `history`.
+        # `history` is the record the frontend renders, so shifting it to
+        # match the indicator series would drop the newest closed candle
+        # from every published state to make the two arrangements look
+        # alike. ADX keeps the same arrangement.
         self.history: deque[Candle] = deque(
             maxlen=MAX_HISTORY
         )
@@ -82,6 +90,34 @@ class Candlestick(Series):
             end_ts=bar.end_ts,
         )
 
+    def _confirm(self, bar: "Bar | None") -> None:
+        """
+        Confirma la vela cerrada y la publica en `_closed` y en `history`.
+
+        `timeframe.closed` es la autoridad de cuál es la vela cerrada: en un
+        rollover es la que acaba de morir y en un `flush()` es la que se
+        acaba de finalizar. `_closed` y `history` se Actualizan juntas, así
+        que la serie nunca queda una vela por detrás de su Timeframe.
+
+        La guarda por `start_ts` evita que un `flush()` seguido de una vela
+        nueva empuje la misma vela dos veces: en el flush ya se confirmó, y
+        la vela que nace después volvería a encontrarla en `self.live`.
+        """
+
+        if bar is None:
+            return
+
+        if (
+            self._closed is not None
+            and self._closed.start_ts == bar.start_ts
+        ):
+            return
+
+        candle = self._to_candle(bar)
+
+        self._closed = candle
+        self.history.append(candle)
+
     def update(self) -> None:
         """
         Actualiza la Candle usando la barra actual
@@ -92,8 +128,11 @@ class Candlestick(Series):
         Timeframe.is_new indica si la Bar actual
         acaba de comenzar.
 
+        Timeframe.is_closed indica que hay una Bar
+        cerrada pendiente de confirmar.
+
         Candlestick solamente transforma Bar -> Candle
-        y administra live/history.
+        y administra closed/live/history.
         """
 
         timeframe = self._timeframe
@@ -108,12 +147,21 @@ class Candlestick(Series):
 
         if timeframe.is_new:
 
-            if self.live is not None:
-                self.history.append(self.live)
+            self._confirm(timeframe.closed)
 
             self.live = self._to_candle(bar)
 
             return
+
+        # --------------------------------------------------
+        # Timeframe.flush(): la barra viva se acaba de
+        # finalizar y ninguna la reemplazó, así que también
+        # es una vela cerrada. Sin esto la serie se
+        # quedaría una vela detrás de `timeframe.closed`.
+        # --------------------------------------------------
+
+        if timeframe.is_closed:
+            self._confirm(timeframe.closed)
 
         # --------------------------------------------------
         # Actualización de la barra actual
@@ -140,6 +188,16 @@ class Candlestick(Series):
                 asdict(candle)
                 for candle in self.history
             ],
+
+            # `live` is the bar that is still open, so it cannot stand in
+            # for `_closed`: a restored engine would render the open bar as
+            # confirmed. It is published because `history` only receives a
+            # bar once the next one starts.
+            "closed": (
+                asdict(self._closed)
+                if self._closed is not None
+                else None
+            ),
         }
 
     def set_state(self, state: dict) -> None:
@@ -157,4 +215,19 @@ class Candlestick(Series):
                 for candle in (state.get("history") or [])
             ),
             maxlen=MAX_HISTORY,
+        )
+
+        # `closed` supersedes the fallback kept for states serialized before
+        # this field existed. `history[-1]` is the exact alias of `_closed`
+        # here, unlike in EMA/ATR where `history` lags one bar behind.
+        closed_state = state.get("closed")
+
+        self._closed = (
+            Candle(**closed_state)
+            if closed_state is not None
+            else (
+                self.history[-1]
+                if self.history
+                else None
+            )
         )

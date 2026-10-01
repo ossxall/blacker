@@ -265,7 +265,8 @@ def test_stochrsi_windows_are_restored_not_approximated():
 @pytest.mark.parametrize(
     "series, extra_keys",
     [
-        pytest.param([ADX], ["internal"], id="adx"),
+        pytest.param([ADX], ["internal", "closed"], id="adx"),
+        pytest.param([CANDLE], ["closed"], id="candlestick"),
         pytest.param([RSI], ["internal"], id="rsi"),
         pytest.param([BB], ["internal"], id="bollinger"),
     ],

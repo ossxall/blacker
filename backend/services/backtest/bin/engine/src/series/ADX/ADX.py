@@ -83,6 +83,13 @@ class ADX(Series):
         # Internal chain state, never suppressed.
         self._internal: Adx | None = None
 
+        # Last fully evaluated CLOSED bar, suppressed during warm-up for
+        # the same reason `live` is: adx/+DI/-DI are not meaningful until
+        # the chain has enough confirmed bars behind them. Publishing them
+        # here while `live` hides them would let a reader reach a value
+        # through the back door that it cannot get from `live`.
+        self._closed: Adx | None = None
+
         # Visible state (None during warm-up).
         self._live: Adx | None = None
 
@@ -115,6 +122,17 @@ class ADX(Series):
                 if self._internal is not None
                 else None
             ),
+            # `live` is the provisional value of the bar that is still open,
+            # so it cannot stand in for `_closed`: a restored engine would
+            # carry the open bar into the confirmed chain, count it twice and
+            # end up one bar behind with the RMA skewed. It is published
+            # because `history` only receives a bar on the next rollover, so
+            # the newest confirmed one is not in there yet.
+            "closed": (
+                asdict(self._closed)
+                if self._closed is not None
+                else None
+            ),
         }
 
     def set_state(self, state: dict) -> None:
@@ -142,8 +160,28 @@ class ADX(Series):
             )
         )
 
+        # `closed` supersedes the fallback kept for states serialized
+        # before this field existed. `history[-1]` is an exact alias of
+        # `_closed` on every checkpoint taken while a bar is open, because
+        # both are the value the rollover confirmed, so an old checkpoint
+        # restores to the very same state. `live` is not a candidate: it
+        # belongs to the bar that is still open.
+        closed_state = state.get("closed")
+
+        self._closed = (
+            Adx(**closed_state)
+            if closed_state is not None
+            else (
+                self.history[-1]
+                if self.history
+                else None
+            )
+        )
+
     def update(self) -> None:
-        candle = self._timeframe.live
+        timeframe = self._timeframe
+
+        candle = timeframe.live
 
         if candle is None:
             return
@@ -153,6 +191,11 @@ class ADX(Series):
             self._internal is not None
             and self._internal.start_ts == candle.start_ts
         )
+
+        # The value of the bar confirmed by this update, if it confirms
+        # one. On a rollover it is the bar that was live, whose value is
+        # still in `_internal` right up to the step below recomputing it.
+        confirmed: "Adx | None" = None
 
         # Select the previous state used to continue the RMA chain.
         if self._internal is None:
@@ -164,6 +207,7 @@ class ADX(Series):
 
         else:
             # Confirm the previous candle before starting a new one.
+            confirmed = self._internal
             self.history.append(self._internal)
             prev_chain = self._internal
 
@@ -174,8 +218,16 @@ class ADX(Series):
         # Compute the current ADX state.
         self._internal = self._compute_step(candle, prev_chain, prev1, prev2)
 
+        if timeframe.is_closed and is_same_candle:
+            # Timeframe.flush(): the bar that was live has just been
+            # finalized and no new bar replaced it, so the value computed
+            # above is the confirmed one.
+            confirmed = self._internal
+
         # Expose values only after the required warm-up period.
         if len(self.history) >= self.dilen + self.adxlen - 1:
+            if confirmed is not None:
+                self._closed = confirmed
             self.live = self._internal
         else:
             self.live = None
