@@ -5,7 +5,11 @@ info:
 
 http:
   method: GET
-  url: http://localhost:3002/api/backtest/master/get-state
+  url: http://localhost:3002/api/backtest/master/get-state?ui=true
+  params:
+    - name: ui
+      value: "true"
+      type: query
   auth: inherit
 
 settings:
