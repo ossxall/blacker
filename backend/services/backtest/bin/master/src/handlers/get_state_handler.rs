@@ -34,10 +34,7 @@ pub async fn get_state_handler(
     // on the shared `Timeframe` type: the snapshot still persists them for the
     // engine restore.
     if params.ui {
-        for timeframe in master.engine_state.timeframes.values_mut() {
-            timeframe.live = None;
-            timeframe.closed = None;
-        }
+        master.strip_timeframe_bars();
     }
 
     Json(Response {

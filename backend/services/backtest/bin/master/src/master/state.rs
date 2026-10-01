@@ -112,6 +112,20 @@ impl MasterState {
     pub fn can_publish(&self) -> bool {
         self.status == MasterStatus::Ready && self.replay_status == ReplayStatus::Running
     }
+
+    /// Drops the aggregated timeframe bars from the serialized state.
+    ///
+    /// The bars carry the per-price footprint (`volume_at_price`), which is
+    /// unbounded within a bucket and dominates the payload. The bars are
+    /// stripped here instead of on the shared `Timeframe` type because the
+    /// engine still needs them: the snapshot persists them, and they survive
+    /// inside each series, so only the raw bars are dropped.
+    pub fn strip_timeframe_bars(&mut self) {
+        for timeframe in self.engine_state.timeframes.values_mut() {
+            timeframe.live = None;
+            timeframe.closed = None;
+        }
+    }
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -189,7 +203,14 @@ impl AppState {
     pub async fn publish_master_state(&self) -> Result<()> {
         let json: String = {
             let master: RwLockReadGuard<'_, MasterState> = self.master.read().await;
-            serde_json::to_string_pretty(&*master)?
+
+            // The socket feeds the dashboard, which renders from the series
+            // definitions and never reads the bars, so the payload goes out
+            // without them.
+            let mut light: MasterState = master.clone();
+            light.strip_timeframe_bars();
+
+            serde_json::to_string_pretty(&light)?
         };
 
         let _ = self.master_state_tx.send(Arc::new(json));
