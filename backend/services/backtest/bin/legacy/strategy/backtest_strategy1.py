@@ -70,14 +70,14 @@ class Config:
     adx_threshold: float = 25.0
 
     quantity: float = 1.0
-    scale_out_fraction: float = 0.5
+    scale_out_fraction: float = 0.75
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
 
     # Stop loss fijo desde el precio de entrada.
-    stop_loss_pct: float = 0.006
+    stop_loss_pct: float = 0.007
 
     # Si True, una posición que queda abierta al final se cierra al último close.
     force_close_at_end: bool = True
@@ -541,23 +541,37 @@ class Strategy1Backtester:
     def _tf_state(self, name: str, now: pd.Timestamp) -> Optional[dict]:
         tf = self.tfs[name]
         i = self._latest_index(tf, now)
+
         if i is None:
             return None
 
-        if not np.isfinite(tf.ema_fast.iloc[i]) or not np.isfinite(tf.ema_slow.iloc[i]):
+        if (
+            not np.isfinite(tf.ema_fast.iloc[i])
+            or not np.isfinite(tf.ema_slow.iloc[i])
+        ):
             return None
 
         state = {
             "bar_time": tf.bars.index[i],
             "bar_end": tf.ends[i],
+
+            "open": float(tf.bars["open"].iloc[i]),
+            "high": float(tf.bars["high"].iloc[i]),
+            "low": float(tf.bars["low"].iloc[i]),
             "close": float(tf.bars["close"].iloc[i]),
+
             "ema_fast": float(tf.ema_fast.iloc[i]),
             "ema_slow": float(tf.ema_slow.iloc[i]),
         }
 
         if tf.adx is not None:
             adx = tf.adx.iloc[i]
-            if pd.isna(adx["adx"]) or pd.isna(adx["plus_di"]) or pd.isna(adx["minus_di"]):
+
+            if (
+                pd.isna(adx["adx"])
+                or pd.isna(adx["plus_di"])
+                or pd.isna(adx["minus_di"])
+            ):
                 return None
 
             state.update({
@@ -672,17 +686,16 @@ class Strategy1Backtester:
         bullish_15 = fifteen["ema_fast"] > fifteen["ema_slow"]
         bearish_15 = fifteen["ema_fast"] < fifteen["ema_slow"]
         
-        pullback_ema50_buffer = 0.002  # 0.20%
-
         long_pullback = (
             bullish_15
             and fifteen["close"] <= fifteen["ema_fast"]
-            and fifteen["low"] > fifteen["ema_slow"] * (1.0 - pullback_ema50_buffer)
+            and fifteen["close"] > fifteen["ema_slow"]
         )
+
         short_pullback = (
             bearish_15
             and fifteen["close"] >= fifteen["ema_fast"]
-            and fifteen["high"] < fifteen["ema_slow"] * (1.0 + pullback_ema50_buffer)
+            and fifteen["close"] < fifteen["ema_slow"]
         )
 
         bullish_5 = five["ema_fast"] > five["ema_slow"]
@@ -1154,11 +1167,11 @@ def parse_args():
     p.add_argument("parquet", help="Ruta al dataset .parquet")
     p.add_argument("--capital", type=float, default=10_000.0)
     p.add_argument("--quantity", type=float, default=1.0)
-    p.add_argument("--scale-out", type=float, default=0.5)
+    p.add_argument("--scale-out", type=float, default=0.75)
     p.add_argument("--adx-threshold", type=float, default=25.0)
     p.add_argument("--commission-bps", type=float, default=0.0)
     p.add_argument("--slippage-bps", type=float, default=0.0)
-    p.add_argument("--stop-loss-pct", type=float, default=0.006,
+    p.add_argument("--stop-loss-pct", type=float, default=0.007,
                     help="Stop loss como fracción del precio de entrada (default: 0.006 = 0.6%%)")
     p.add_argument(
         "--no-force-close",
