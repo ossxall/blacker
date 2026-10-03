@@ -17,7 +17,8 @@ La estrategia replica:
 Salidas:
     Stop-loss -> cierre total al 0.6% desde la entrada.
     1H contra la posición -> cierre total.
-    30m contra la posición -> scale-out del 50% por defecto.
+    30m contra la posición -> scale-out del 50% por defecto, y el stop
+    del tramo restante sube a breakeven (precio de entrada).
 
 Convención anti-lookahead:
     La señal se calcula usando exclusivamente velas cerradas.
@@ -28,6 +29,16 @@ STOP LOSS:
     El backtest aplica un stop-loss fijo del 0.6% desde el precio de
     entrada. Se comprueba intrabar sobre cada vela 1m. Si hay un gap
     que cruza el stop, la ejecución se realiza al open de la vela.
+
+    Tras un scale-out por reverso de 30m el stop se mueve a breakeven
+    (precio de entrada), porque el tramo restante ya no arriesga capital
+    propio. El nivel solo se estrecha: nunca vuelve a alejarse. El cierre
+    por ese nivel se etiqueta `BREAKEVEN` en `trades.csv`, para
+    distinguirlo del stop inicial.
+
+    Breakeven es el precio de entrada nominal, no la comisión cubierta:
+    el round-trip sigue pagando la comisión de entrada y el slippage de
+    salida, así que un `BREAKEVEN` puede salir ligeramente en negativo.
 
 FIDELIDAD CON my_strategy.py:
     Este archivo es una reimplementación, no un import. Las diferencias
@@ -126,6 +137,11 @@ class Position:
     entry_price: float
     entry_time: pd.Timestamp
     entry_fee: float = 0.0
+
+    # True cuando un scale-out ya aseguro parte de la posicion y el stop
+    # se ha subido a breakeven. El stop nunca vuelve a alejarse: la
+    # bandera solo se activa y el nivel se calcula contra `entry_price`.
+    stop_at_entry: bool = False
 
 
 @dataclass
@@ -722,6 +738,7 @@ class Strategy1Backtester:
                         "action": "EXIT",
                         "fraction": self.cfg.scale_out_fraction,
                         "reason": "30M_SCALE_OUT",
+                        "move_stop_to_entry": True,
                     }
 
                 if self.position.side == -1 and bullish_30:
@@ -729,6 +746,7 @@ class Strategy1Backtester:
                         "action": "EXIT",
                         "fraction": self.cfg.scale_out_fraction,
                         "reason": "30M_SCALE_OUT",
+                        "move_stop_to_entry": True,
                     }
 
             return None
@@ -841,6 +859,7 @@ class Strategy1Backtester:
         price: float,
         time: pd.Timestamp,
         reason: str,
+        move_stop_to_entry: bool = False,
     ):
         if self.position is None:
             return
@@ -904,51 +923,85 @@ class Strategy1Backtester:
             # cantidad todavía abierta.
             self.position.quantity = remaining
             self.position.entry_fee -= entry_fee_alloc
+            # El resto de la posicion ya no arriesga capital propio: el
+            # stop sube a breakeven. Solo tiene sentido si queda posicion
+            # viva, y solo puede activarse una vez por posicion.
+            if move_stop_to_entry:
+                self.position.stop_at_entry = True
 
     def _check_stop_loss(self, bar_open: float, bar_high: float, bar_low: float, bar_time: pd.Timestamp) -> bool:
         """
-        Comprueba el stop-loss fijo del 0.6% contra el OHLC de la vela 1m.
+        Comprueba el stop contra el OHLC de la vela 1m.
 
-        LONG: stop = entrada * (1 - stop_loss_pct)
-        SHORT: stop = entrada * (1 + stop_loss_pct)
+        El nivel depende de si la posicion ya aseguro parte con un
+        scale-out:
 
-        Si existe gap a través del stop, la ejecución se hace al open.
-        Si el precio cruza el nivel durante la vela, se ejecuta al nivel
-        del stop. Devuelve True si cerró la posición.
+            antes del scale-out:
+                LONG  stop = entrada * (1 - stop_loss_pct)
+                SHORT stop = entrada * (1 + stop_loss_pct)
+
+            despues del scale-out (breakeven):
+                LONG  stop = entrada
+                SHORT stop = entrada
+
+        El stop solo se estrecha: breakeven esta siempre mas cerca que el
+        stop inicial, en la misma direccion que el. Si el precio abre al
+        otro lado del nivel, el fill es el open (gap) y no el nivel.
+
+        Devuelve True si cerro la posicion.
         """
-        if self.position is None or self.cfg.stop_loss_pct <= 0:
+        if self.position is None:
+            return False
+
+        at_entry = self.position.stop_at_entry
+
+        # Con el stop en breakeven el nivel no depende de stop_loss_pct,
+        # asi que un stop_loss_pct = 0 (stop desactivado) no debe apagar
+        # la proteccion del tramo que ya se aseguro.
+        if not at_entry and self.cfg.stop_loss_pct <= 0:
             return False
 
         pct = self.cfg.stop_loss_pct
         side = self.position.side
+        entry_price = self.position.entry_price
 
         if side == 1:
-            stop_price = self.position.entry_price * (1.0 - pct)
+            stop_price = (
+                entry_price if at_entry
+                else entry_price * (1.0 - pct)
+            )
             if bar_low > stop_price:
                 return False
             # Gap bajista: el fill realista es el open, no el nivel del stop.
             fill_price = bar_open if bar_open <= stop_price else stop_price
         else:
-            stop_price = self.position.entry_price * (1.0 + pct)
+            stop_price = (
+                entry_price if at_entry
+                else entry_price * (1.0 + pct)
+            )
             if bar_high < stop_price:
                 return False
             # Gap alcista: el fill realista es el open, no el nivel del stop.
             fill_price = bar_open if bar_open >= stop_price else stop_price
 
         qty_before = self.position.quantity
-        entry_price = self.position.entry_price
-        # La etiqueta deriva del valor configurado para que no pueda
-        # contradecir al stop realmente aplicado.
+        # La etiqueta deriva del nivel realmente aplicado, para que no
+        # pueda contradecirlo.
+        reason = (
+            "BREAKEVEN"
+            if at_entry
+            else f"STOP_LOSS_{pct * 100:.1f}%"
+        )
         self._close_fraction(
             fraction=1.0,
             price=fill_price,
             time=bar_time,
-            reason=f"STOP_LOSS_{pct * 100:.1f}%",
+            reason=reason,
         )
         print(
             f"[STOP] {bar_time} | {'LONG' if side == 1 else 'SHORT'} | "
             f"entrada={entry_price:.8f} | "
-            f"stop={stop_price:.8f} | fill={fill_price:.8f} | qty={qty_before}",
+            f"stop={stop_price:.8f} | fill={fill_price:.8f} | qty={qty_before} | {reason}",
             flush=True,
         )
         return True
@@ -984,6 +1037,7 @@ class Strategy1Backtester:
                 price=bar_open,
                 time=bar_time,
                 reason=sig["reason"],
+                move_stop_to_entry=bool(sig.get("move_stop_to_entry", False)),
             )
 
     # -------------------------- equity --------------------------
@@ -1212,6 +1266,7 @@ def print_report(metrics: dict, config: Config, data: pd.DataFrame):
     print(f"  Commission    : {config.commission_bps} bps")
     print(f"  Slippage      : {config.slippage_bps} bps")
     print(f"  Stop loss     : {config.stop_loss_pct * 100:.3f}%")
+    print("  Stop tras scale-out: breakeven (precio de entrada)")
     print("=" * 72)
 
 
