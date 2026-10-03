@@ -1282,10 +1282,10 @@ def parse_args():
     p.add_argument("--capital", type=float, default=10_000.0)
     p.add_argument("--quantity", type=float, default=1.0)
     p.add_argument("--scale-out", type=float, default=0.5)
-    p.add_argument("--adx-threshold", type=float, default=25.0)
+    p.add_argument("--adx-threshold", type=float, default=26.0)
     p.add_argument("--commission-bps", type=float, default=0.0)
     p.add_argument("--slippage-bps", type=float, default=0.0)
-    p.add_argument("--stop-loss-pct", type=float, default=0.006,
+    p.add_argument("--stop-loss-pct", type=float, default=0.007,
                     help="Stop loss como fracción del precio de entrada (default: 0.006 = 0.6%%)")
     p.add_argument(
         "--no-force-close",
