@@ -1167,7 +1167,7 @@ def parse_args():
     p.add_argument("parquet", help="Ruta al dataset .parquet")
     p.add_argument("--capital", type=float, default=10_000.0)
     p.add_argument("--quantity", type=float, default=1.0)
-    p.add_argument("--scale-out", type=float, default=0.75)
+    p.add_argument("--scale-out", type=float, default=0.5)
     p.add_argument("--adx-threshold", type=float, default=25.0)
     p.add_argument("--commission-bps", type=float, default=0.0)
     p.add_argument("--slippage-bps", type=float, default=0.0)
