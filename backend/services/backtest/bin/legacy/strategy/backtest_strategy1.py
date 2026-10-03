@@ -15,6 +15,7 @@ La estrategia replica:
            ruptura del máximo/mínimo de la vela anterior
 
 Salidas:
+    Stop-loss -> cierre total al 0.6% desde la entrada.
     1H contra la posición -> cierre total.
     30m contra la posición -> scale-out del 50% por defecto.
 
@@ -23,11 +24,10 @@ Convención anti-lookahead:
     Una señal conocida al cierre de una vela se ejecuta en la apertura
     de la siguiente vela 1m.
 
-IMPORTANTE:
-    La estrategia suministrada no define stop-loss, take-profit ni
-    trailing-stop. Este motor no los inventa. Pueden añadirse como
-    parámetros opcionales si el sistema real los utiliza fuera de
-    Strategy1.
+STOP LOSS:
+    El backtest aplica un stop-loss fijo del 0.6% desde el precio de
+    entrada. Se comprueba intrabar sobre cada vela 1m. Si hay un gap
+    que cruza el stop, la ejecución se realiza al open de la vela.
 
 Dependencias:
     pip install pandas pyarrow numpy
@@ -75,6 +75,9 @@ class Config:
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
+
+    # Stop loss fijo desde el precio de entrada.
+    stop_loss_pct: float = 0.006
 
     # Si True, una posición que queda abierta al final se cierra al último close.
     force_close_at_end: bool = True
@@ -828,6 +831,52 @@ class Strategy1Backtester:
             self.position.entry_fee -= entry_fee_alloc
             self.scaleout_done = True
 
+    def _check_stop_loss(self, bar_open: float, bar_high: float, bar_low: float, bar_time: pd.Timestamp) -> bool:
+        """
+        Comprueba el stop-loss fijo del 0.6% contra el OHLC de la vela 1m.
+
+        LONG: stop = entrada * (1 - stop_loss_pct)
+        SHORT: stop = entrada * (1 + stop_loss_pct)
+
+        Si existe gap a través del stop, la ejecución se hace al open.
+        Si el precio cruza el nivel durante la vela, se ejecuta al nivel
+        del stop. Devuelve True si cerró la posición.
+        """
+        if self.position is None or self.cfg.stop_loss_pct <= 0:
+            return False
+
+        pct = self.cfg.stop_loss_pct
+        side = self.position.side
+
+        if side == 1:
+            stop_price = self.position.entry_price * (1.0 - pct)
+            if bar_low > stop_price:
+                return False
+            # Gap bajista: el fill realista es el open, no el nivel del stop.
+            fill_price = bar_open if bar_open <= stop_price else stop_price
+        else:
+            stop_price = self.position.entry_price * (1.0 + pct)
+            if bar_high < stop_price:
+                return False
+            # Gap alcista: el fill realista es el open, no el nivel del stop.
+            fill_price = bar_open if bar_open >= stop_price else stop_price
+
+        qty_before = self.position.quantity
+        entry_price = self.position.entry_price
+        self._close_fraction(
+            fraction=1.0,
+            price=fill_price,
+            time=bar_time,
+            reason="STOP_LOSS_0.6%",
+        )
+        print(
+            f"[STOP] {bar_time} | {'LONG' if side == 1 else 'SHORT'} | "
+            f"entrada={entry_price:.8f} | "
+            f"stop={stop_price:.8f} | fill={fill_price:.8f} | qty={qty_before}",
+            flush=True,
+        )
+        return True
+
     def _execute_pending(self, bar_open: float, bar_time: pd.Timestamp):
         if self.pending_signal is None:
             return
@@ -915,11 +964,21 @@ class Strategy1Backtester:
             # aquí, en la apertura de la vela actual.
             self._execute_pending(bar_open, ts)
 
+            # Stop-loss intrabar de 1m. Tiene prioridad sobre cualquier
+            # nueva señal de la estrategia en esta misma vela.
+            stop_hit = self._check_stop_loss(
+                bar_open=bar_open,
+                bar_high=float(row["high"]),
+                bar_low=float(row["low"]),
+                bar_time=ts,
+            )
+
             close_time = ts + pd.Timedelta(minutes=1)
 
             # Evaluación exclusivamente con datos cuya vela ya terminó en
-            # close_time.
-            signal = self.evaluate_signal(close_time)
+            # close_time. Si el stop acaba de cerrar la posición, no se
+            # agenda otra señal usando la misma vela.
+            signal = None if stop_hit else self.evaluate_signal(close_time)
 
             # No puede ejecutarse inmediatamente: se agenda para la próxima
             # apertura 1m. Si no existe próxima vela, se gestionará al final.
@@ -1076,6 +1135,7 @@ def print_report(metrics: dict, config: Config, data: pd.DataFrame):
     print(f"  Scale-out     : {config.scale_out_fraction:.2%}")
     print(f"  Commission    : {config.commission_bps} bps")
     print(f"  Slippage      : {config.slippage_bps} bps")
+    print(f"  Stop loss     : {config.stop_loss_pct * 100:.3f}%")
     print("=" * 72)
 
 
@@ -1094,6 +1154,8 @@ def parse_args():
     p.add_argument("--adx-threshold", type=float, default=25.0)
     p.add_argument("--commission-bps", type=float, default=0.0)
     p.add_argument("--slippage-bps", type=float, default=0.0)
+    p.add_argument("--stop-loss-pct", type=float, default=0.006,
+                    help="Stop loss como fracción del precio de entrada (default: 0.006 = 0.6%%)")
     p.add_argument(
         "--no-force-close",
         action="store_true",
@@ -1117,6 +1179,7 @@ def main():
         adx_threshold=args.adx_threshold,
         commission_bps=args.commission_bps,
         slippage_bps=args.slippage_bps,
+        stop_loss_pct=args.stop_loss_pct,
         force_close_at_end=not args.no_force_close,
     )
 
