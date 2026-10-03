@@ -671,14 +671,18 @@ class Strategy1Backtester:
 
         bullish_15 = fifteen["ema_fast"] > fifteen["ema_slow"]
         bearish_15 = fifteen["ema_fast"] < fifteen["ema_slow"]
+        
+        pullback_ema50_buffer = 0.002  # 0.20%
 
         long_pullback = (
             bullish_15
             and fifteen["close"] <= fifteen["ema_fast"]
+            and fifteen["low"] > fifteen["ema_slow"] * (1.0 - pullback_ema50_buffer)
         )
         short_pullback = (
             bearish_15
             and fifteen["close"] >= fifteen["ema_fast"]
+            and fifteen["high"] < fifteen["ema_slow"] * (1.0 + pullback_ema50_buffer)
         )
 
         bullish_5 = five["ema_fast"] > five["ema_slow"]

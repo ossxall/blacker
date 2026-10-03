@@ -1,0 +1,15 @@
+{
+  "initial_capital": 100000.0,
+  "final_equity": 106035.67531549279,
+  "net_pnl": 6035.6753154927865,
+  "return_pct": 6.035675315492786,
+  "max_drawdown_pct": -16.477467151074666,
+  "trades": 183,
+  "wins": 50,
+  "losses": 133,
+  "win_rate_pct": 27.322404371584703,
+  "profit_factor": 1.0884359575384746,
+  "avg_trade_net": 32.98183232509662,
+  "best_trade": 6996.5761303559975,
+  "worst_trade": -788.9169719748376
+}
