@@ -29,6 +29,23 @@ STOP LOSS:
     entrada. Se comprueba intrabar sobre cada vela 1m. Si hay un gap
     que cruza el stop, la ejecución se realiza al open de la vela.
 
+FIDELIDAD CON my_strategy.py:
+    Este archivo es una reimplementación, no un import. Las diferencias
+    respecto al original están acotadas y son todas intencionadas:
+
+      - Las series se calculan una sola vez sobre todo el histórico en
+        lugar de avanzar tick a tick. `ema_closed()` y `adx_exact()`
+        reproducen bit a bit la recursión de EMA.py y ADX.py, incluido
+        el seed sin SMA, el warm-up del ADX (`dilen + adxlen - 2`) y la
+        lectura exclusiva del valor confirmado.
+      - El bracket (stop / take profit) lo gestiona el motor en el
+        engine; aquí solo se modela el stop-loss fijo.
+      - `scale_out_fraction` fuera de (0, 1) lanza ValueError en lugar de
+        caer silenciosamente a 0.5 como en my_strategy.py:93.
+
+    Cualquier otra diferencia en las condiciones de entrada o salida es
+    un bug, no una adaptación.
+
 Dependencias:
     pip install pandas pyarrow numpy
 
@@ -70,17 +87,36 @@ class Config:
     adx_threshold: float = 25.0
 
     quantity: float = 1.0
-    scale_out_fraction: float = 0.75
+
+    # my_strategy.py:54 -> DEFAULT_PARAMS["scale_out_fraction"] = 0.5
+    scale_out_fraction: float = 0.5
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
 
-    # Stop loss fijo desde el precio de entrada.
-    stop_loss_pct: float = 0.007
+    # Stop loss fijo desde el precio de entrada, 0.6%.
+    stop_loss_pct: float = 0.006
 
     # Si True, una posición que queda abierta al final se cierra al último close.
     force_close_at_end: bool = True
+
+    def __post_init__(self):
+        # my_strategy.py:93 deja caer cualquier fraccion fuera de (0, 1) a
+        # 0.5, porque >= 1 convertiria el cross de 30m en un cierre completo
+        # -- que es lo que ya hace el reverso de 1H -- y <= 0 no cerraria
+        # nada. Aqui se falla de forma explicita en lugar de sustituirla en
+        # silencio, para que un valor mal escrito no pase inadvertido.
+        if not (0.0 < self.scale_out_fraction < 1.0):
+            raise ValueError(
+                "scale_out_fraction debe estar estrictamente entre 0 y 1 "
+                f"(recibido: {self.scale_out_fraction})."
+            )
+
+        if self.quantity <= 0.0:
+            raise ValueError(
+                f"quantity debe ser > 0 (recibido: {self.quantity})."
+            )
 
 
 @dataclass
@@ -273,6 +309,24 @@ def ema_closed(values: pd.Series, period: int) -> pd.Series:
 # Indicadores: ADX
 # ---------------------------------------------------------------------------
 
+def _visible_from(dilen: int, adxlen: int) -> int:
+    """
+    Indice de la primera vela cuyo ADX es visible en el motor.
+
+    ADX.py:228 solo publica valores cuando
+
+        len(history) >= dilen + adxlen - 1
+
+    y la asignacion de `_closed` ocurre dentro de esa misma puerta, de modo
+    que durante el warm-up `_closed` permanece en None. Como `history`
+    recibe una vela por rollover, la puerta se abre al procesar la vela
+    (dilen + adxlen - 1), confirmando en ese momento la vela anterior.
+
+    Primer valor confirmado visible = dilen + adxlen - 2.
+    """
+    return dilen + adxlen - 2
+
+
 def adx_exact(
     bars: pd.DataFrame,
     dilen: int = 14,
@@ -289,9 +343,10 @@ def adx_exact(
       - DI = 100 * DM_RMA / TR_RMA.
       - DX = abs(+DI - -DI) / (+DI + -DI).
       - ADX = 100*DX en el primer estado y luego RMA de DX.
-      - El valor queda 'visible/usable' tras:
-            len(history) >= dilen + adxlen - 1
-        En el motor esto se modela mediante warmup_bars.
+      - El valor queda 'visible/usable' en la vela
+            dilen + adxlen - 2
+        porque el motor solo asigna `_closed` dentro de la puerta de
+        warm-up. Ver `_visible_from()` para la derivacion.
     """
     if dilen <= 0 or adxlen <= 0:
         raise ValueError("ADX lengths must be > 0")
@@ -410,13 +465,20 @@ def adx_exact(
         prev_low = l
         prev_close = c
 
-    # La clase fuente oculta el indicador hasta:
-    # len(history) >= dilen + adxlen - 1.
-    # history crece al confirmar cada rollover.
-    warmup = dilen + adxlen - 1
+    # ADX.py:228 gatea con `len(history) >= dilen + adxlen - 1`, pero la
+    # asignacion de `_closed` esta DENTRO de esa puerta, asi que durante el
+    # warm-up `_closed` sigue en None.
+    #
+    # Traza del motor (history crece una vela por rollover):
+    #   update() de la vela k  ->  history.append(vela k-1)  ->  len = k
+    #   primer k que cumple     ->  k = dilen + adxlen - 1
+    #   `_closed` recibe        ->  la vela k-1
+    #
+    # El primer valor confirmado visible es, por tanto, la vela
+    # (dilen + adxlen - 1) - 1 = dilen + adxlen - 2.
+    visible_from = _visible_from(dilen, adxlen)
 
     if n:
-        visible_from = warmup
         if visible_from < n:
             result.iloc[visible_from:, result.columns.get_loc("adx")] = adx_arr[visible_from:]
             result.iloc[visible_from:, result.columns.get_loc("plus_di")] = plus_arr[visible_from:]
@@ -488,13 +550,8 @@ class Strategy1Backtester:
         self.equity_rows: list[dict] = []
 
         self.pending_signal = None
-        self.pending_reason = None
 
         self.trade_counter = 0
-        self.scaleout_done = False
-
-        # Últimas velas cerradas 1m.
-        self.last_1m_candles: list[tuple[pd.Timestamp, float, float, float, float]] = []
 
         self.tfs: dict[str, TFData] = {}
         self._build_timeframes()
@@ -685,17 +742,20 @@ class Strategy1Backtester:
 
         bullish_15 = fifteen["ema_fast"] > fifteen["ema_slow"]
         bearish_15 = fifteen["ema_fast"] < fifteen["ema_slow"]
-        
+
+        # my_strategy.py:296-304 -- el pullback es SOLO estructura + cierre
+        # contra la EMA rapida. No se exige nada respecto a la EMA lenta:
+        # anadir `close > ema_slow` (long) / `close < ema_slow` (short)
+        # endurecia la entrada y descartaba ~23% de los setups que la
+        # estrategia original si aceptaba.
         long_pullback = (
             bullish_15
             and fifteen["close"] <= fifteen["ema_fast"]
-            and fifteen["close"] > fifteen["ema_slow"]
         )
 
         short_pullback = (
             bearish_15
             and fifteen["close"] >= fifteen["ema_fast"]
-            and fifteen["close"] < fifteen["ema_slow"]
         )
 
         bullish_5 = five["ema_fast"] > five["ema_slow"]
@@ -774,7 +834,6 @@ class Strategy1Backtester:
             entry_time=time,
             entry_fee=fee,
         )
-        self.scaleout_done = False
 
     def _close_fraction(
         self,
@@ -840,13 +899,11 @@ class Strategy1Backtester:
 
         if remaining <= max(1e-12, self.cfg.quantity * 1e-12):
             self.position = None
-            self.scaleout_done = True
         else:
             # La comisión de entrada restante se conserva solo para la
             # cantidad todavía abierta.
             self.position.quantity = remaining
             self.position.entry_fee -= entry_fee_alloc
-            self.scaleout_done = True
 
     def _check_stop_loss(self, bar_open: float, bar_high: float, bar_low: float, bar_time: pd.Timestamp) -> bool:
         """
@@ -880,11 +937,13 @@ class Strategy1Backtester:
 
         qty_before = self.position.quantity
         entry_price = self.position.entry_price
+        # La etiqueta deriva del valor configurado para que no pueda
+        # contradecir al stop realmente aplicado.
         self._close_fraction(
             fraction=1.0,
             price=fill_price,
             time=bar_time,
-            reason="STOP_LOSS_0.6%",
+            reason=f"STOP_LOSS_{pct * 100:.1f}%",
         )
         print(
             f"[STOP] {bar_time} | {'LONG' if side == 1 else 'SHORT'} | "
@@ -1171,7 +1230,7 @@ def parse_args():
     p.add_argument("--adx-threshold", type=float, default=25.0)
     p.add_argument("--commission-bps", type=float, default=0.0)
     p.add_argument("--slippage-bps", type=float, default=0.0)
-    p.add_argument("--stop-loss-pct", type=float, default=0.007,
+    p.add_argument("--stop-loss-pct", type=float, default=0.006,
                     help="Stop loss como fracción del precio de entrada (default: 0.006 = 0.6%%)")
     p.add_argument(
         "--no-force-close",
@@ -1199,9 +1258,6 @@ def main():
         stop_loss_pct=args.stop_loss_pct,
         force_close_at_end=not args.no_force_close,
     )
-
-    if not (0.0 < config.scale_out_fraction < 1.0):
-        raise ValueError("--scale-out debe estar estrictamente entre 0 y 1.")
 
     data = load_parquet(args.parquet)
 
