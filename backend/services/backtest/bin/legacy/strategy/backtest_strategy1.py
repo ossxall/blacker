@@ -79,13 +79,13 @@ class Config:
     slippage_bps: float = 0.0
 
     # Stop fijo de respaldo (si no hay ATR disponible) y para el cálculo base.
-    stop_loss_pct: float = 0.006
+    stop_loss_pct: float = 0.005
     force_close_at_end: bool = True
 
     # --- parámetros de la versión improved ---
     risk_pct: float = 0.005              # riesgo por operación (fracción del capital)
     max_leverage: float = 3.0
-    atr_stop_mult: float = 2.5          # stop = k * ATR(15m)
+    atr_stop_mult: float = 3.0          # stop = k * ATR(15m)
     atr_stop_min_pct: float = 0.004     # tope inferior del stop (fracción)
     atr_stop_max_pct: float = 0.015     # tope superior del stop (fracción)
     trail_atr_mult: float = 2.5         # trailing tras el scale-out (0 = off)
