@@ -1,79 +1,62 @@
 #!/usr/bin/env python3
 """
-Backtesting dedicado para Strategy1
-====================================
+Backtesting Strategy1 — v2 (vectorizado + mejoras opcionales)
+=============================================================
 
-Dataset de entrada:
-    OHLCV de 1 minuto en .parquet.
+Dataset de entrada: OHLCV de 1 minuto en .parquet.
 
-La estrategia replica:
-    1H  -> tendencia: EMA20/EMA50 + ADX14 >= 25 + DI
-    30m -> confirmación: EMA20 vs EMA50
-    15m -> pullback: estructura + cierre contra EMA20
-    5m  -> setup: EMA20 vs EMA50
-    1m  -> trigger: estructura + cierre sobre/bajo EMA20 +
-           ruptura del máximo/mínimo de la vela anterior
+Qué cambia respecto a la v1
+---------------------------
+CORRECCIONES
+  - Los defaults del CLI ya coinciden con `Config` (ADX 25, stop 0.6%).
+  - Las métricas se calculan por POSICIÓN (scale-out + resto = 1 operación),
+    no por tramo. Se guardan `trades.csv` (tramos) y `positions.csv`.
+  - Métricas nuevas: expectancy en R, Sharpe/Sortino diario, peor racha de
+    pérdidas, split in-sample / out-of-sample (--oos-start).
 
-Salidas:
-    Stop-loss -> cierre total al 0.6% desde la entrada.
-    1H contra la posición -> cierre total.
-    30m contra la posición -> scale-out del 50% por defecto, y el stop
-    del tramo restante sube a breakeven (precio de entrada).
+VELOCIDAD
+  - EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False, mismo
+    seed que la recursión original: primer valor, sin SMA).
+  - El índice de la última vela confirmada de cada timeframe y todas las
+    condiciones de entrada/salida se precalculan como arrays; el bucle solo
+    gestiona posición, stop y ejecución.
 
-Convención anti-lookahead:
-    La señal se calcula usando exclusivamente velas cerradas.
-    Una señal conocida al cierre de una vela se ejecuta en la apertura
-    de la siguiente vela 1m.
+MEJORAS OPCIONALES (todas DESACTIVADAS con --preset baseline)
+  - Sizing por riesgo:        --risk-pct, --max-leverage
+  - Stop por volatilidad:     --atr-stop-mult (ATR 15m) con topes min/max
+  - Trailing del tramo resto: --trail-atr-mult (ATR 15m, tras el scale-out)
+  - Cooldown tras stop:       --cooldown-min
+  - Filtro de régimen ADX:    --adx-max, --adx-rising, --min-ema-gap-1h-pct
+  - Trigger 1m más robusto:   --min-trigger-range-atr
+  - Filtro horario (UTC):     --block-hours-utc "0,1,2,3"
 
-STOP LOSS:
-    El backtest aplica un stop-loss fijo del 0.6% desde el precio de
-    entrada. Se comprueba intrabar sobre cada vela 1m. Si hay un gap
-    que cruza el stop, la ejecución se realiza al open de la vela.
+`--preset improved` activa un conjunto inicial de HIPÓTESIS. No está
+demostrado que mejore: valídalo con --compare y --oos-start sobre tus datos.
 
-    Tras un scale-out por reverso de 30m el stop se mueve a breakeven
-    (precio de entrada), porque el tramo restante ya no arriesga capital
-    propio. El nivel solo se estrecha: nunca vuelve a alejarse. El cierre
-    por ese nivel se etiqueta `BREAKEVEN` en `trades.csv`, para
-    distinguirlo del stop inicial.
+Convención anti-lookahead (igual que la v1): las señales usan solo velas
+cerradas y se ejecutan en la apertura de la siguiente vela 1m. El trailing
+se actualiza al cierre de cada vela y rige desde la siguiente.
 
-    Breakeven es el precio de entrada nominal, no la comisión cubierta:
-    el round-trip sigue pagando la comisión de entrada y el slippage de
-    salida, así que un `BREAKEVEN` puede salir ligeramente en negativo.
+Dependencias:  pip install "pandas>=2" pyarrow numpy
 
-FIDELIDAD CON my_strategy.py:
-    Este archivo es una reimplementación, no un import. Las diferencias
-    respecto al original están acotadas y son todas intencionadas:
-
-      - Las series se calculan una sola vez sobre todo el histórico en
-        lugar de avanzar tick a tick. `ema_closed()` y `adx_exact()`
-        reproducen bit a bit la recursión de EMA.py y ADX.py, incluido
-        el seed sin SMA, el warm-up del ADX (`dilen + adxlen - 2`) y la
-        lectura exclusiva del valor confirmado.
-      - El bracket (stop / take profit) lo gestiona el motor en el
-        engine; aquí solo se modela el stop-loss fijo.
-      - `scale_out_fraction` fuera de (0, 1) lanza ValueError en lugar de
-        caer silenciosamente a 0.5 como en my_strategy.py:93.
-
-    Cualquier otra diferencia en las condiciones de entrada o salida es
-    un bug, no una adaptación.
-
-Dependencias:
-    pip install pandas pyarrow numpy
-
-Ejemplo:
-    python backtest_strategy1.py data.parquet --capital 10000 \
-        --quantity 1 --commission-bps 2 --slippage-bps 1 \
-        --output-dir ./backtest_out
+Ejemplos:
+    python backtest_strategy1_v2.py data.parquet --preset baseline \
+        --commission-bps 4 --slippage-bps 1
+    python backtest_strategy1_v2.py data.parquet --compare \
+        --commission-bps 4 --slippage-bps 1 --oos-start 2025-01-01 \
+        --output-dir ./out
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
-import time
+
 import numpy as np
 import pandas as pd
 
@@ -82,71 +65,127 @@ import pandas as pd
 # Configuración
 # ---------------------------------------------------------------------------
 
+# Parámetros de las mejoras. Con estos valores el motor es el baseline.
+V2_OFF = dict(
+    risk_pct=0.0,              # 0 = cantidad fija (`quantity`)
+    max_leverage=3.0,          # tope de apalancamiento con sizing por riesgo
+    atr_stop_mult=0.0,         # 0 = stop fijo `stop_loss_pct`
+    atr_stop_min_pct=0.004,    # tope inferior del stop por ATR (fracción)
+    atr_stop_max_pct=0.015,    # tope superior del stop por ATR (fracción)
+    trail_atr_mult=0.0,        # 0 = sin trailing
+    cooldown_min=0,            # minutos sin entrar tras un stop inicial
+    adx_max=0.0,               # 0 = sin techo de ADX
+    adx_rising=False,          # exigir ADX 1H > ADX de la vela 1H previa
+    min_ema_gap_1h_pct=0.0,    # |EMA20-EMA50|/EMA50 mínimo en 1H (fracción)
+    min_trigger_range_atr=0.0, # rango mínimo de la vela 1m en ATR(1m)
+    block_hours_utc="",        # horas UTC sin entradas, p.ej. "0,1,2,3"
+)
+
+# Punto de partida para probar (hipótesis, no resultados).
+IMPROVED_PRESET = dict(
+    risk_pct=0.01,
+    max_leverage=3.0,
+    atr_stop_mult=2.0,
+    atr_stop_min_pct=0.004,
+    atr_stop_max_pct=0.015,
+    trail_atr_mult=2.5,
+    cooldown_min=15,
+    adx_max=50.0,
+    adx_rising=True,
+    min_ema_gap_1h_pct=0.0005,
+    min_trigger_range_atr=0.5,
+)
+
+
 @dataclass
 class Config:
-    tf_trend: str = "1h"
-    tf_confirm: str = "30min"
-    tf_pullback: str = "15min"
-    tf_setup: str = "5min"
-    tf_trigger: str = "1min"
-
     ema_fast: int = 20
     ema_slow: int = 50
 
     adx_dilen: int = 14
     adx_len: int = 14
     adx_threshold: float = 25.0
+    atr_len: int = 14
 
     quantity: float = 1.0
-
-    # my_strategy.py:54 -> DEFAULT_PARAMS["scale_out_fraction"] = 0.5
     scale_out_fraction: float = 0.5
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
 
-    # Stop loss fijo desde el precio de entrada, 0.6%.
-    stop_loss_pct: float = 0.006
-
-    # Si True, una posición que queda abierta al final se cierra al último close.
+    stop_loss_pct: float = 0.007
     force_close_at_end: bool = True
 
+    # --- mejoras opcionales ---
+    risk_pct: float = 0.0
+    max_leverage: float = 3.0
+    atr_stop_mult: float = 0.0
+    atr_stop_min_pct: float = 0.004
+    atr_stop_max_pct: float = 0.015
+    trail_atr_mult: float = 0.0
+    cooldown_min: int = 0
+    adx_max: float = 0.0
+    adx_rising: bool = False
+    min_ema_gap_1h_pct: float = 0.0
+    min_trigger_range_atr: float = 0.0
+    block_hours_utc: str = ""
+
     def __post_init__(self):
-        # my_strategy.py:93 deja caer cualquier fraccion fuera de (0, 1) a
-        # 0.5, porque >= 1 convertiria el cross de 30m en un cierre completo
-        # -- que es lo que ya hace el reverso de 1H -- y <= 0 no cerraria
-        # nada. Aqui se falla de forma explicita en lugar de sustituirla en
-        # silencio, para que un valor mal escrito no pase inadvertido.
         if not (0.0 < self.scale_out_fraction < 1.0):
             raise ValueError(
                 "scale_out_fraction debe estar estrictamente entre 0 y 1 "
                 f"(recibido: {self.scale_out_fraction})."
             )
-
         if self.quantity <= 0.0:
-            raise ValueError(
-                f"quantity debe ser > 0 (recibido: {self.quantity})."
-            )
+            raise ValueError(f"quantity debe ser > 0 (recibido: {self.quantity}).")
+        if not (0.0 <= self.risk_pct <= 0.2):
+            raise ValueError("risk_pct debe estar entre 0 y 0.2.")
+        if self.max_leverage <= 0:
+            raise ValueError("max_leverage debe ser > 0.")
+        if self.atr_stop_mult < 0 or self.trail_atr_mult < 0:
+            raise ValueError("Los multiplicadores de ATR no pueden ser negativos.")
+        if self.atr_stop_min_pct > self.atr_stop_max_pct:
+            raise ValueError("atr_stop_min_pct no puede superar atr_stop_max_pct.")
+        if self.risk_pct > 0 and self.stop_loss_pct <= 0 and self.atr_stop_mult <= 0:
+            raise ValueError("risk_pct > 0 requiere un stop (stop_loss_pct o atr_stop_mult).")
+        self.blocked_hours()  # valida el formato
+
+    def blocked_hours(self) -> list[int]:
+        txt = (self.block_hours_utc or "").strip()
+        if not txt:
+            return []
+        try:
+            hours = [int(x) for x in txt.split(",") if x.strip() != ""]
+        except ValueError:
+            raise ValueError(f"block_hours_utc inválido: {txt!r}")
+        if any(h < 0 or h > 23 for h in hours):
+            raise ValueError("block_hours_utc debe contener horas entre 0 y 23.")
+        return hours
 
 
 @dataclass
 class Position:
-    side: int                 # +1 LONG, -1 SHORT
+    position_id: int
+    side: int                  # +1 LONG, -1 SHORT
     quantity: float
+    initial_quantity: float
     entry_price: float
     entry_time: pd.Timestamp
-    entry_fee: float = 0.0
+    entry_fee: float
+    stop_pct: float            # stop inicial efectivo (fracción)
+    risk_amount: float         # capital en riesgo al abrir (qty*entry*stop_pct)
 
-    # True cuando un scale-out ya aseguro parte de la posicion y el stop
-    # se ha subido a breakeven. El stop nunca vuelve a alejarse: la
-    # bandera solo se activa y el nivel se calcula contra `entry_price`.
-    stop_at_entry: bool = False
+    stop_at_entry: bool = False        # stop en breakeven tras scale-out
+    trailing: bool = False             # trailing activo (tras scale-out)
+    extreme: Optional[float] = None    # máx (long) / mín (short) desde el scale-out
+    trail_level: Optional[float] = None
 
 
 @dataclass
 class Trade:
     trade_id: int
+    position_id: int
     side: str
     entry_time: pd.Timestamp
     exit_time: pd.Timestamp
@@ -158,16 +197,16 @@ class Trade:
     pnl_net: float
     return_pct: float
     reason: str
+    position_risk: float
 
 
 # ---------------------------------------------------------------------------
-# Utilidades
+# Carga de datos
 # ---------------------------------------------------------------------------
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza nombres de columnas y localiza OHLCV."""
-    rename = {c: str(c).strip().lower() for c in df.columns}
-    df = df.rename(columns=rename)
+    df = df.rename(columns={c: str(c).strip().lower() for c in df.columns})
 
     aliases = {
         "timestamp": ["timestamp", "open_time", "datetime", "date", "time", "ts"],
@@ -177,7 +216,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "close": ["close", "c"],
         "volume": ["volume", "vol", "v"],
     }
-
     result = {}
     for canonical, candidates in aliases.items():
         found = next((c for c in candidates if c in df.columns), None)
@@ -193,23 +231,16 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     out = df.rename(columns={v: k for k, v in result.items()}).copy()
-
     if "volume" not in out.columns:
         out["volume"] = 0.0
 
-    # Timestamp en UTC para evitar problemas de DST.
-    #
-    # Binance suele exportar `open_time` como epoch en MILISEGUNDOS
-    # (por ejemplo, 1609459200000). Si se pasa directamente a
-    # pd.to_datetime sin `unit`, pandas lo interpreta como nanosegundos y
-    # produce fechas incorrectas. Detectamos automáticamente la unidad.
+    # Timestamp en UTC. Si es numérico se detecta la unidad (epoch s/ms/us/ns).
     raw_ts = out["timestamp"]
     if pd.api.types.is_numeric_dtype(raw_ts):
         numeric_ts = pd.to_numeric(raw_ts, errors="coerce")
         finite = numeric_ts.dropna()
-        if finite.empty:
-            ts = pd.to_datetime(numeric_ts, utc=True, errors="coerce")
-        else:
+        unit = None
+        if not finite.empty:
             magnitude = float(finite.abs().median())
             if magnitude >= 1e17:
                 unit = "ns"
@@ -219,13 +250,10 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
                 unit = "ms"
             elif magnitude >= 1e9:
                 unit = "s"
-            else:
-                unit = None
-
-            if unit is not None:
-                ts = pd.to_datetime(numeric_ts, unit=unit, utc=True, errors="coerce")
-            else:
-                ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+        if unit is not None:
+            ts = pd.to_datetime(numeric_ts, unit=unit, utc=True, errors="coerce")
+        else:
+            ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
     else:
         ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
 
@@ -240,7 +268,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values("timestamp")
     out = out.drop_duplicates("timestamp", keep="last")
     out = out.set_index("timestamp")
-
     return out[["open", "high", "low", "close", "volume"]]
 
 
@@ -248,306 +275,240 @@ def load_parquet(path: str | Path) -> pd.DataFrame:
     print(f"[LOAD] Leyendo Parquet: {path}", flush=True)
     t0 = time.perf_counter()
     df = pd.read_parquet(path)
-    print(f"[LOAD] {len(df):,} filas cargadas en {time.perf_counter() - t0:.2f}s", flush=True)
+    print(f"[LOAD] {len(df):,} filas en {time.perf_counter() - t0:.2f}s", flush=True)
     out = normalize_columns(df)
     print(
-        f"[LOAD] Datos normalizados: {len(out):,} velas | "
-        f"{out.index.min()} -> {out.index.max()}",
+        f"[LOAD] {len(out):,} velas | {out.index.min()} -> {out.index.max()}",
         flush=True,
     )
     return out
 
 
 def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Agrega 1m a OHLCV del timeframe solicitado."""
-    out = df.resample(
-        rule,
-        label="left",
-        closed="left",
-        origin="start_day",
-    ).agg(
-        {
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }
+    out = df.resample(rule, label="left", closed="left", origin="start_day").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     )
-    out = out.dropna(subset=["open", "high", "low", "close"])
-    return out
+    return out.dropna(subset=["open", "high", "low", "close"])
 
 
-def bar_end_index(bars: pd.DataFrame, rule: str) -> pd.DatetimeIndex:
-    """Momento en el que una vela pasa a estar confirmada."""
-    delta = pd.Timedelta(rule)
-    return bars.index + delta
+def _ns(idx: pd.DatetimeIndex) -> np.ndarray:
+    """Epoch en nanosegundos (independiente de la resolución del índice)."""
+    return idx.as_unit("ns").asi8
 
 
 # ---------------------------------------------------------------------------
-# Indicadores: EMA
+# Indicadores vectorizados
 # ---------------------------------------------------------------------------
 
 def ema_closed(values: pd.Series, period: int) -> pd.Series:
     """
-    Replica la EMA entregada:
-
-        primer valor = close
-        siguiente = alpha*close + (1-alpha)*EMA_anterior
-
-    No utiliza SMA como inicialización.
+    EMA con seed = primer valor (sin SMA): equivale a la recursión original
+        EMA_0 = close_0 ;  EMA_t = a*close_t + (1-a)*EMA_{t-1}
     """
     if period <= 0:
         raise ValueError("EMA period must be > 0")
-
-    x = values.to_numpy(dtype=float)
-    out = np.full(len(x), np.nan, dtype=float)
-
-    alpha = 2.0 / (period + 1.0)
-    prev = None
-
-    for i, close in enumerate(x):
-        if not np.isfinite(close):
-            continue
-
-        if prev is None:
-            value = close
-        else:
-            value = alpha * close + (1.0 - alpha) * prev
-
-        out[i] = value
-        prev = value
-
-    return pd.Series(out, index=values.index, name=f"EMA{period}")
+    return values.ewm(alpha=2.0 / (period + 1.0), adjust=False).mean()
 
 
-# ---------------------------------------------------------------------------
-# Indicadores: ADX
-# ---------------------------------------------------------------------------
+def _true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
+    prev_close = np.r_[np.nan, close[:-1]]
+    tr = np.maximum.reduce([
+        high - low,
+        np.abs(high - prev_close),
+        np.abs(low - prev_close),
+    ])
+    # np.maximum propaga NaN: el primer TR es high-low.
+    if len(tr):
+        tr[0] = high[0] - low[0]
+    return tr
 
-def _visible_from(dilen: int, adxlen: int) -> int:
+
+def atr_vec(bars: pd.DataFrame, length: int) -> np.ndarray:
+    """ATR de Wilder (RMA recursivo desde la primera vela)."""
+    tr = _true_range(
+        bars["high"].to_numpy(float), bars["low"].to_numpy(float),
+        bars["close"].to_numpy(float),
+    )
+    return pd.Series(tr).ewm(alpha=1.0 / length, adjust=False).mean().to_numpy()
+
+
+def adx_vec(bars: pd.DataFrame, dilen: int = 14, adxlen: int = 14) -> pd.DataFrame:
     """
-    Indice de la primera vela cuyo ADX es visible en el motor.
-
-    ADX.py:228 solo publica valores cuando
-
-        len(history) >= dilen + adxlen - 1
-
-    y la asignacion de `_closed` ocurre dentro de esa misma puerta, de modo
-    que durante el warm-up `_closed` permanece en None. Como `history`
-    recibe una vela por rollover, la puerta se abre al procesar la vela
-    (dilen + adxlen - 1), confirmando en ese momento la vela anterior.
-
-    Primer valor confirmado visible = dilen + adxlen - 2.
-    """
-    return dilen + adxlen - 2
-
-
-def adx_exact(
-    bars: pd.DataFrame,
-    dilen: int = 14,
-    adxlen: int = 14,
-    key_level: float = 23.0,
-) -> pd.DataFrame:
-    """
-    Replica la cadena de cálculo del ADX suministrada.
-
-    Particularidades conservadas:
-      - Primer TR = high-low.
-      - Primer +DM/-DM = 0.
-      - RMA recursivo desde el primer bar; no se inicializa con SMA.
-      - DI = 100 * DM_RMA / TR_RMA.
-      - DX = abs(+DI - -DI) / (+DI + -DI).
-      - ADX = 100*DX en el primer estado y luego RMA de DX.
-      - El valor queda 'visible/usable' en la vela
-            dilen + adxlen - 2
-        porque el motor solo asigna `_closed` dentro de la puerta de
-        warm-up. Ver `_visible_from()` para la derivacion.
+    ADX/DI equivalente a la cadena original:
+      primer TR = high-low; primer +DM/-DM = 0; RMA desde la primera vela;
+      DI = 100*DM_RMA/TR_RMA; DX = |+DI - -DI| / (+DI + -DI);
+      ADX = RMA(100*DX) con seed 100*DX_0.
+    El valor es visible desde la vela `dilen + adxlen - 2`.
     """
     if dilen <= 0 or adxlen <= 0:
         raise ValueError("ADX lengths must be > 0")
 
     n = len(bars)
-    result = pd.DataFrame(index=bars.index)
-    result["adx"] = np.nan
-    result["plus_di"] = np.nan
-    result["minus_di"] = np.nan
-    result["adx_color"] = pd.Series(index=bars.index, dtype="object")
-    result["is_reversal"] = pd.Series(False, index=bars.index, dtype="bool")
-    result["reversal_level"] = np.nan
-
+    out = pd.DataFrame(
+        {"adx": np.nan, "plus_di": np.nan, "minus_di": np.nan}, index=bars.index
+    )
     if n == 0:
-        return result
+        return out
 
-    high = bars["high"].to_numpy(dtype=float)
-    low = bars["low"].to_numpy(dtype=float)
-    close = bars["close"].to_numpy(dtype=float)
+    high = bars["high"].to_numpy(float)
+    low = bars["low"].to_numpy(float)
+    close = bars["close"].to_numpy(float)
 
-    adx_arr = np.full(n, np.nan)
-    plus_arr = np.full(n, np.nan)
-    minus_arr = np.full(n, np.nan)
-    reversal = np.zeros(n, dtype=bool)
-    reversal_level = np.full(n, np.nan)
-    color = np.empty(n, dtype=object)
+    up = np.r_[0.0, high[1:] - high[:-1]]
+    down = np.r_[0.0, low[:-1] - low[1:]]
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = _true_range(high, low, close)
 
-    di_alpha = 1.0 / dilen
-    adx_alpha = 1.0 / adxlen
+    a_di = 1.0 / dilen
+    tr_rma = pd.Series(tr).ewm(alpha=a_di, adjust=False).mean().to_numpy()
+    p_rma = pd.Series(plus_dm).ewm(alpha=a_di, adjust=False).mean().to_numpy()
+    m_rma = pd.Series(minus_dm).ewm(alpha=a_di, adjust=False).mean().to_numpy()
 
-    prev_high = None
-    prev_low = None
-    prev_close = None
+    safe_tr = np.where(tr_rma != 0, tr_rma, 1.0)
+    plus_di = np.where(tr_rma != 0, 100.0 * p_rma / safe_tr, 0.0)
+    minus_di = np.where(tr_rma != 0, 100.0 * m_rma / safe_tr, 0.0)
 
-    tr_rma = None
-    plus_dm_rma = None
-    minus_dm_rma = None
-    prev_adx = None
-    prev_prev_adx = None
+    summ = plus_di + minus_di
+    dx = np.abs(plus_di - minus_di) / np.where(summ != 0, summ, 1.0)
+    adx = pd.Series(100.0 * dx).ewm(alpha=1.0 / adxlen, adjust=False).mean().to_numpy()
 
-    for i in range(n):
-        h, l, c = high[i], low[i], close[i]
-
-        if prev_close is None:
-            tr = h - l
-            plus_dm = 0.0
-            minus_dm = 0.0
-
-            tr_rma = tr
-            plus_dm_rma = plus_dm
-            minus_dm_rma = minus_dm
-        else:
-            up = h - prev_high
-            down = prev_low - l
-
-            plus_dm = up if (up > down and up > 0) else 0.0
-            minus_dm = down if (down > up and down > 0) else 0.0
-
-            tr = max(
-                h - l,
-                abs(h - prev_close),
-                abs(l - prev_close),
-            )
-
-            tr_rma = tr * di_alpha + tr_rma * (1.0 - di_alpha)
-            plus_dm_rma = (
-                plus_dm * di_alpha
-                + plus_dm_rma * (1.0 - di_alpha)
-            )
-            minus_dm_rma = (
-                minus_dm * di_alpha
-                + minus_dm_rma * (1.0 - di_alpha)
-            )
-
-        plus_di = (
-            100.0 * plus_dm_rma / tr_rma
-            if tr_rma != 0 else 0.0
-        )
-        minus_di = (
-            100.0 * minus_dm_rma / tr_rma
-            if tr_rma != 0 else 0.0
-        )
-
-        summ = plus_di + minus_di
-        divisor = summ if summ != 0 else 1.0
-        dx = abs(plus_di - minus_di) / divisor
-
-        if prev_adx is None:
-            adx_value = 100.0 * dx
-        else:
-            adx_value = (
-                (100.0 * dx) * adx_alpha
-                + prev_adx * (1.0 - adx_alpha)
-            )
-
-        if prev_adx is not None and adx_value > prev_adx:
-            color[i] = "lime"
-        else:
-            color[i] = "red"
-
-        if prev_adx is not None and prev_prev_adx is not None:
-            rule1 = adx_value < prev_adx
-            rule2 = prev_adx > prev_prev_adx
-            rule3 = prev_adx > key_level
-            reversal[i] = rule1 and rule2 and rule3
-            if reversal[i]:
-                reversal_level[i] = prev_adx
-
-        adx_arr[i] = adx_value
-        plus_arr[i] = plus_di
-        minus_arr[i] = minus_di
-
-        prev_prev_adx = prev_adx
-        prev_adx = adx_value
-        prev_high = h
-        prev_low = l
-        prev_close = c
-
-    # ADX.py:228 gatea con `len(history) >= dilen + adxlen - 1`, pero la
-    # asignacion de `_closed` esta DENTRO de esa puerta, asi que durante el
-    # warm-up `_closed` sigue en None.
-    #
-    # Traza del motor (history crece una vela por rollover):
-    #   update() de la vela k  ->  history.append(vela k-1)  ->  len = k
-    #   primer k que cumple     ->  k = dilen + adxlen - 1
-    #   `_closed` recibe        ->  la vela k-1
-    #
-    # El primer valor confirmado visible es, por tanto, la vela
-    # (dilen + adxlen - 1) - 1 = dilen + adxlen - 2.
-    visible_from = _visible_from(dilen, adxlen)
-
-    if n:
-        if visible_from < n:
-            result.iloc[visible_from:, result.columns.get_loc("adx")] = adx_arr[visible_from:]
-            result.iloc[visible_from:, result.columns.get_loc("plus_di")] = plus_arr[visible_from:]
-            result.iloc[visible_from:, result.columns.get_loc("minus_di")] = minus_arr[visible_from:]
-            result.iloc[visible_from:, result.columns.get_loc("adx_color")] = color[visible_from:]
-            result.iloc[visible_from:, result.columns.get_loc("is_reversal")] = reversal[visible_from:]
-            result.iloc[visible_from:, result.columns.get_loc("reversal_level")] = reversal_level[visible_from:]
-
-    return result
+    visible_from = dilen + adxlen - 2
+    if visible_from < n:
+        out.iloc[visible_from:, 0] = adx[visible_from:]
+        out.iloc[visible_from:, 1] = plus_di[visible_from:]
+        out.iloc[visible_from:, 2] = minus_di[visible_from:]
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Timeframe calculado
+# Precálculo: features por vela 1m y señales
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TFData:
-    bars: pd.DataFrame
-    ema_fast: pd.Series
-    ema_slow: pd.Series
-    adx: Optional[pd.DataFrame]
-    ends: pd.DatetimeIndex
-
-
-def build_tf_data(
-    one_minute: pd.DataFrame,
+def _map_tf(
+    data: pd.DataFrame,
     rule: str,
-    ema_fast: int,
-    ema_slow: int,
-    adx_needed: bool = False,
-    adx_dilen: int = 14,
-    adx_len: int = 14,
-) -> TFData:
-    bars = resample_ohlcv(one_minute, rule)
-    fast = ema_closed(bars["close"], ema_fast)
-    slow = ema_closed(bars["close"], ema_slow)
-    adx = (
-        adx_exact(
-            bars,
-            dilen=adx_dilen,
-            adxlen=adx_len,
-            key_level=23.0,
-        )
-        if adx_needed
-        else None
+    cfg: Config,
+    close_ns: np.ndarray,
+    adx: bool = False,
+    atr: bool = False,
+) -> dict:
+    """
+    Calcula indicadores en `rule` y los proyecta sobre cada vela 1m usando la
+    última vela cuyo cierre (inicio + duración) es <= al cierre de la vela 1m.
+    """
+    bars = resample_ohlcv(data, rule)
+    ends = _ns(bars.index + pd.Timedelta(rule))
+    pos = np.searchsorted(ends, close_ns, side="right") - 1
+    ok = pos >= 0
+    j = np.where(ok, pos, 0)
+
+    ef = ema_closed(bars["close"], cfg.ema_fast).to_numpy()
+    es = ema_closed(bars["close"], cfg.ema_slow).to_numpy()
+    out = {
+        "ok": ok,
+        "close": bars["close"].to_numpy(float)[j],
+        "ef": ef[j],
+        "es": es[j],
+    }
+    if adx:
+        a = adx_vec(bars, cfg.adx_dilen, cfg.adx_len)
+        out["adx"] = a["adx"].to_numpy()[j]
+        out["adx_prev"] = a["adx"].shift(1).to_numpy()[j]
+        out["plus_di"] = a["plus_di"].to_numpy()[j]
+        out["minus_di"] = a["minus_di"].to_numpy()[j]
+    if atr:
+        out["atr"] = atr_vec(bars, cfg.atr_len)[j]
+    return out
+
+
+def build_features(data: pd.DataFrame, cfg: Config) -> dict:
+    """Indicadores por timeframe alineados a cada vela 1m (solo dependen de
+    EMA/ADX/ATR, no de los filtros), así se reutilizan entre configuraciones."""
+    n = len(data)
+    close_ns = _ns(data.index) + 60 * 1_000_000_000
+
+    feats = {
+        "close_ns": close_ns,
+        "1h": _map_tf(data, "1h", cfg, close_ns, adx=True),
+        "30m": _map_tf(data, "30min", cfg, close_ns),
+        "15m": _map_tf(data, "15min", cfg, close_ns, atr=True),
+        "5m": _map_tf(data, "5min", cfg, close_ns),
+    }
+    c1 = data["close"]
+    feats["1m"] = {
+        "ef": ema_closed(c1, cfg.ema_fast).to_numpy(),
+        "es": ema_closed(c1, cfg.ema_slow).to_numpy(),
+        "close": c1.to_numpy(float),
+        "high": data["high"].to_numpy(float),
+        "low": data["low"].to_numpy(float),
+        "prev_high": np.r_[np.nan, data["high"].to_numpy(float)[:-1]],
+        "prev_low": np.r_[np.nan, data["low"].to_numpy(float)[:-1]],
+        "atr": atr_vec(data, cfg.atr_len),
+    }
+    feats["n"] = n
+    return feats
+
+
+def build_signals(f: dict, cfg: Config) -> dict:
+    """Condiciones de Strategy1 como arrays booleanos (una entrada por vela 1m)."""
+    n = f["n"]
+    h1, m30, m15, m5, m1 = f["1h"], f["30m"], f["15m"], f["5m"], f["1m"]
+
+    with np.errstate(invalid="ignore"):
+        bull1h = (h1["ef"] > h1["es"]) & (h1["adx"] >= cfg.adx_threshold) \
+            & (h1["plus_di"] > h1["minus_di"])
+        bear1h = (h1["ef"] < h1["es"]) & (h1["adx"] >= cfg.adx_threshold) \
+            & (h1["minus_di"] > h1["plus_di"])
+
+        bull30 = m30["ef"] > m30["es"]
+        bear30 = m30["ef"] < m30["es"]
+
+        # Pullback: solo estructura 15m + cierre contra la EMA rápida.
+        long_pb = (m15["ef"] > m15["es"]) & (m15["close"] <= m15["ef"])
+        short_pb = (m15["ef"] < m15["es"]) & (m15["close"] >= m15["ef"])
+
+        bull5 = m5["ef"] > m5["es"]
+        bear5 = m5["ef"] < m5["es"]
+
+        bull1m = (m1["ef"] > m1["es"]) & (m1["close"] > m1["ef"]) \
+            & (m1["close"] > m1["prev_high"])
+        bear1m = (m1["ef"] < m1["es"]) & (m1["close"] < m1["ef"]) \
+            & (m1["close"] < m1["prev_low"])
+
+        entry_long = bull1h & bull30 & long_pb & bull5 & bull1m
+        entry_short = bear1h & bear30 & short_pb & bear5 & bear1m
+
+        # ---- filtros opcionales (solo afectan a entradas) ----
+        mask = np.ones(n, dtype=bool)
+        if cfg.adx_max > 0:
+            mask &= h1["adx"] <= cfg.adx_max
+        if cfg.adx_rising:
+            mask &= h1["adx"] > h1["adx_prev"]
+        if cfg.min_ema_gap_1h_pct > 0:
+            mask &= (np.abs(h1["ef"] - h1["es"]) / h1["es"]) >= cfg.min_ema_gap_1h_pct
+        if cfg.min_trigger_range_atr > 0:
+            mask &= (m1["high"] - m1["low"]) >= cfg.min_trigger_range_atr * m1["atr"]
+        blocked = cfg.blocked_hours()
+        if blocked:
+            hours = (f["close_ns"] // 3_600_000_000_000) % 24
+            mask &= ~np.isin(hours, blocked)
+
+    # Una señal solo es válida si todos los timeframes tienen estado completo.
+    valid = (
+        h1["ok"] & m30["ok"] & m15["ok"] & m5["ok"]
+        & np.isfinite(h1["adx"]) & np.isfinite(h1["plus_di"]) & np.isfinite(h1["minus_di"])
+        & (np.arange(n) >= 1)
     )
-    return TFData(
-        bars=bars,
-        ema_fast=fast,
-        ema_slow=slow,
-        adx=adx,
-        ends=bar_end_index(bars, rule),
-    )
+
+    return {
+        "valid": valid,
+        "bull1h": bull1h, "bear1h": bear1h,
+        "bull30": bull30, "bear30": bear30,
+        "entry_long": entry_long & mask,
+        "entry_short": entry_short & mask,
+        "atr15": m15["atr"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -555,302 +516,88 @@ def build_tf_data(
 # ---------------------------------------------------------------------------
 
 class Strategy1Backtester:
-    def __init__(self, data: pd.DataFrame, config: Config):
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        config: Config,
+        features: Optional[dict] = None,
+        verbose: bool = False,
+    ):
         self.data = data
         self.cfg = config
+        self.verbose = verbose
+
+        feats = features if features is not None else build_features(data, config)
+        self.sig = build_signals(feats, config)
+
+        self.o = data["open"].to_numpy(float)
+        self.h = data["high"].to_numpy(float)
+        self.l = data["low"].to_numpy(float)
+        self.c = data["close"].to_numpy(float)
+        self.times = data.index
 
         self.cash = config.initial_capital
         self.position: Optional[Position] = None
+        self.pending_signal: Optional[dict] = None
 
         self.trades: list[Trade] = []
-        self.equity_rows: list[dict] = []
-
-        self.pending_signal = None
-
         self.trade_counter = 0
+        self.position_counter = 0
 
-        self.tfs: dict[str, TFData] = {}
-        self._build_timeframes()
+        self.eq_time: list = []
+        self.eq_cash: list = []
+        self.eq_equity: list = []
+        self.eq_side: list = []
+        self.eq_qty: list = []
 
-        self.last_price = float(self.data["close"].iloc[-1])
-
-    def _build_timeframes(self):
-        c = self.cfg
-        self.tfs["1h"] = build_tf_data(
-            self.data, "1h",
-            c.ema_fast, c.ema_slow,
-            adx_needed=True,
-            adx_dilen=c.adx_dilen,
-            adx_len=c.adx_len,
-        )
-        self.tfs["30min"] = build_tf_data(
-            self.data, "30min",
-            c.ema_fast, c.ema_slow,
-        )
-        self.tfs["15min"] = build_tf_data(
-            self.data, "15min",
-            c.ema_fast, c.ema_slow,
-        )
-        self.tfs["5min"] = build_tf_data(
-            self.data, "5min",
-            c.ema_fast, c.ema_slow,
-        )
-        # 1m ya está disponible directamente, pero calculamos EMA sobre él.
-        self.tfs["1min"] = build_tf_data(
-            self.data, "1min",
-            c.ema_fast, c.ema_slow,
-        )
-
-    # -------------------------- datos confirmados --------------------------
-
-    @staticmethod
-    def _latest_index(tf: TFData, now: pd.Timestamp) -> Optional[int]:
-        """
-        Devuelve la última vela cuyo end <= now.
-        """
-        pos = tf.ends.searchsorted(now, side="right") - 1
-        return int(pos) if pos >= 0 else None
-
-    def _tf_state(self, name: str, now: pd.Timestamp) -> Optional[dict]:
-        tf = self.tfs[name]
-        i = self._latest_index(tf, now)
-
-        if i is None:
-            return None
-
-        if (
-            not np.isfinite(tf.ema_fast.iloc[i])
-            or not np.isfinite(tf.ema_slow.iloc[i])
-        ):
-            return None
-
-        state = {
-            "bar_time": tf.bars.index[i],
-            "bar_end": tf.ends[i],
-
-            "open": float(tf.bars["open"].iloc[i]),
-            "high": float(tf.bars["high"].iloc[i]),
-            "low": float(tf.bars["low"].iloc[i]),
-            "close": float(tf.bars["close"].iloc[i]),
-
-            "ema_fast": float(tf.ema_fast.iloc[i]),
-            "ema_slow": float(tf.ema_slow.iloc[i]),
-        }
-
-        if tf.adx is not None:
-            adx = tf.adx.iloc[i]
-
-            if (
-                pd.isna(adx["adx"])
-                or pd.isna(adx["plus_di"])
-                or pd.isna(adx["minus_di"])
-            ):
-                return None
-
-            state.update({
-                "adx": float(adx["adx"]),
-                "plus_di": float(adx["plus_di"]),
-                "minus_di": float(adx["minus_di"]),
-            })
-
-        return state
-
-    def _last_two_1m(self, now: pd.Timestamp):
-        tf = self.tfs["1min"]
-        i = self._latest_index(tf, now)
-        if i is None or i < 1:
-            return None, None
-
-        current = {
-            "time": tf.bars.index[i],
-            "end": tf.ends[i],
-            "open": float(tf.bars["open"].iloc[i]),
-            "high": float(tf.bars["high"].iloc[i]),
-            "low": float(tf.bars["low"].iloc[i]),
-            "close": float(tf.bars["close"].iloc[i]),
-            "ema_fast": float(tf.ema_fast.iloc[i]),
-            "ema_slow": float(tf.ema_slow.iloc[i]),
-        }
-        previous = {
-            "time": tf.bars.index[i - 1],
-            "end": tf.ends[i - 1],
-            "open": float(tf.bars["open"].iloc[i - 1]),
-            "high": float(tf.bars["high"].iloc[i - 1]),
-            "low": float(tf.bars["low"].iloc[i - 1]),
-            "close": float(tf.bars["close"].iloc[i - 1]),
-        }
-
-        if not np.isfinite(current["ema_fast"]) or not np.isfinite(current["ema_slow"]):
-            return None, None
-
-        return current, previous
-
-    # -------------------------- señales --------------------------
-
-    def evaluate_signal(self, now: pd.Timestamp):
-        """
-        Replica el orden de Strategy1.evaluate():
-
-        posición abierta:
-            1H contra -> EXIT total
-            30m contra -> EXIT parcial
-            otherwise -> HOLD
-
-        sin posición:
-            1H neutral -> no trade
-            después exige 30m + 15m + 5m + 1m.
-        """
-        one_h = self._tf_state("1h", now)
-        thirty = self._tf_state("30min", now)
-        fifteen = self._tf_state("15min", now)
-        five = self._tf_state("5min", now)
-        one = self._tf_state("1min", now)
-
-        if any(x is None for x in [one_h, thirty, fifteen, five, one]):
-            return None
-
-        bullish_1h = (
-            one_h["ema_fast"] > one_h["ema_slow"]
-            and one_h["adx"] >= self.cfg.adx_threshold
-            and one_h["plus_di"] > one_h["minus_di"]
-        )
-        bearish_1h = (
-            one_h["ema_fast"] < one_h["ema_slow"]
-            and one_h["adx"] >= self.cfg.adx_threshold
-            and one_h["minus_di"] > one_h["plus_di"]
-        )
-
-        # Posición abierta: salidas primero.
-        if self.position is not None:
-            if self.position.side == 1 and bearish_1h:
-                return {"action": "EXIT", "fraction": 1.0, "reason": "1H_REVERSAL"}
-
-            if self.position.side == -1 and bullish_1h:
-                return {"action": "EXIT", "fraction": 1.0, "reason": "1H_REVERSAL"}
-
-            # Idempotencia: solo si la posición sigue completa.
-            if self.position.quantity >= self.cfg.quantity - 1e-12:
-                bullish_30 = thirty["ema_fast"] > thirty["ema_slow"]
-                bearish_30 = thirty["ema_fast"] < thirty["ema_slow"]
-
-                if self.position.side == 1 and bearish_30:
-                    return {
-                        "action": "EXIT",
-                        "fraction": self.cfg.scale_out_fraction,
-                        "reason": "30M_SCALE_OUT",
-                        "move_stop_to_entry": True,
-                    }
-
-                if self.position.side == -1 and bullish_30:
-                    return {
-                        "action": "EXIT",
-                        "fraction": self.cfg.scale_out_fraction,
-                        "reason": "30M_SCALE_OUT",
-                        "move_stop_to_entry": True,
-                    }
-
-            return None
-
-        # Sin posición: 1H neutral = no trade.
-        if not bullish_1h and not bearish_1h:
-            return None
-
-        bullish_30 = thirty["ema_fast"] > thirty["ema_slow"]
-        bearish_30 = thirty["ema_fast"] < thirty["ema_slow"]
-
-        bullish_15 = fifteen["ema_fast"] > fifteen["ema_slow"]
-        bearish_15 = fifteen["ema_fast"] < fifteen["ema_slow"]
-
-        # my_strategy.py:296-304 -- el pullback es SOLO estructura + cierre
-        # contra la EMA rapida. No se exige nada respecto a la EMA lenta:
-        # anadir `close > ema_slow` (long) / `close < ema_slow` (short)
-        # endurecia la entrada y descartaba ~23% de los setups que la
-        # estrategia original si aceptaba.
-        long_pullback = (
-            bullish_15
-            and fifteen["close"] <= fifteen["ema_fast"]
-        )
-
-        short_pullback = (
-            bearish_15
-            and fifteen["close"] >= fifteen["ema_fast"]
-        )
-
-        bullish_5 = five["ema_fast"] > five["ema_slow"]
-        bearish_5 = five["ema_fast"] < five["ema_slow"]
-
-        current_1m, previous_1m = self._last_two_1m(now)
-        if current_1m is None or previous_1m is None:
-            return None
-
-        bullish_1m = (
-            current_1m["ema_fast"] > current_1m["ema_slow"]
-            and current_1m["close"] > current_1m["ema_fast"]
-            and current_1m["close"] > previous_1m["high"]
-        )
-
-        bearish_1m = (
-            current_1m["ema_fast"] < current_1m["ema_slow"]
-            and current_1m["close"] < current_1m["ema_fast"]
-            and current_1m["close"] < previous_1m["low"]
-        )
-
-        if (
-            bullish_1h
-            and bullish_30
-            and long_pullback
-            and bullish_5
-            and bullish_1m
-        ):
-            return {
-                "action": "BUY",
-                "quantity": self.cfg.quantity,
-                "reason": "MTF_LONG",
-            }
-
-        if (
-            bearish_1h
-            and bearish_30
-            and short_pullback
-            and bearish_5
-            and bearish_1m
-        ):
-            return {
-                "action": "SELL",
-                "quantity": self.cfg.quantity,
-                "reason": "MTF_SHORT",
-            }
-
-        return None
-
-    # -------------------------- ejecución --------------------------
+    # -------------------------- precios y costos --------------------------
 
     def _execution_price(self, raw_price: float, side: int) -> float:
-        """
-        Slippage:
-            BUY  -> precio mayor
-            SELL -> precio menor
-        """
         bps = self.cfg.slippage_bps / 10_000.0
         return raw_price * (1.0 + bps) if side == 1 else raw_price * (1.0 - bps)
 
     def _fee(self, notional: float) -> float:
         return abs(notional) * self.cfg.commission_bps / 10_000.0
 
-    def _open(self, side: int, qty: float, price: float, time: pd.Timestamp, reason: str):
-        if qty <= 0 or self.position is not None:
+    def _stop_pct_for(self, i: int, ref_price: float) -> float:
+        """Stop inicial efectivo: fijo, o k*ATR(15m) acotado."""
+        cfg = self.cfg
+        if cfg.atr_stop_mult > 0:
+            atr = self.sig["atr15"][i]
+            if np.isfinite(atr) and ref_price > 0:
+                pct = cfg.atr_stop_mult * atr / ref_price
+                return min(max(pct, cfg.atr_stop_min_pct), cfg.atr_stop_max_pct)
+        return cfg.stop_loss_pct
+
+    # -------------------------- ejecución --------------------------
+
+    def _open(self, side: int, qty: float, price: float, time: pd.Timestamp, stop_pct: float):
+        if self.position is not None:
+            return
+        cfg = self.cfg
+        exec_price = self._execution_price(price, side)
+
+        if cfg.risk_pct > 0:
+            if stop_pct <= 0 or self.cash <= 0:
+                return
+            qty = self.cash * cfg.risk_pct / (exec_price * stop_pct)
+            qty = min(qty, self.cash * cfg.max_leverage / exec_price)
+        if qty <= 0:
             return
 
-        exec_price = self._execution_price(price, side)
         fee = self._fee(exec_price * qty)
-
         self.cash -= fee
+        self.position_counter += 1
         self.position = Position(
+            position_id=self.position_counter,
             side=side,
             quantity=qty,
+            initial_quantity=qty,
             entry_price=exec_price,
             entry_time=time,
             entry_fee=fee,
+            stop_pct=stop_pct,
+            risk_amount=qty * exec_price * max(stop_pct, 0.0),
         )
 
     def _close_fraction(
@@ -861,413 +608,391 @@ class Strategy1Backtester:
         reason: str,
         move_stop_to_entry: bool = False,
     ):
-        if self.position is None:
+        pos = self.position
+        if pos is None:
             return
 
         fraction = min(max(float(fraction), 0.0), 1.0)
-        qty = self.position.quantity * fraction
+        qty = pos.quantity * fraction
         if qty <= 0:
             return
 
-        side = self.position.side
+        side = pos.side
         exec_price = self._execution_price(price, -side)
-
-        gross = (
-            (exec_price - self.position.entry_price)
-            * qty
-            * side
-        )
+        gross = (exec_price - pos.entry_price) * qty * side
         exit_fee = self._fee(exec_price * qty)
-
-        # La comisión de entrada ya fue pagada al abrir la posición.
-        # Se asigna proporcionalmente a cada tramo cerrado.
-        entry_fee_alloc = (
-            self.position.entry_fee
-            * (qty / self.position.quantity)
-        )
+        entry_fee_alloc = pos.entry_fee * (qty / pos.quantity)
         total_fees = entry_fee_alloc + exit_fee
         pnl_net = gross - total_fees
 
         self.cash += gross - exit_fee
 
         self.trade_counter += 1
-        notional_entry = self.position.entry_price * qty
-        return_pct = (
-            pnl_net / notional_entry * 100.0
-            if notional_entry != 0 else 0.0
-        )
+        notional_entry = pos.entry_price * qty
+        return_pct = pnl_net / notional_entry * 100.0 if notional_entry != 0 else 0.0
 
-        self.trades.append(
-            Trade(
-                trade_id=self.trade_counter,
-                side="LONG" if side == 1 else "SHORT",
-                entry_time=self.position.entry_time,
-                exit_time=time,
-                entry_price=self.position.entry_price,
-                exit_price=exec_price,
-                quantity=qty,
-                pnl_gross=gross,
-                fees=total_fees,
-                pnl_net=pnl_net,
-                return_pct=return_pct,
-                reason=reason,
-            )
-        )
+        self.trades.append(Trade(
+            trade_id=self.trade_counter,
+            position_id=pos.position_id,
+            side="LONG" if side == 1 else "SHORT",
+            entry_time=pos.entry_time,
+            exit_time=time,
+            entry_price=pos.entry_price,
+            exit_price=exec_price,
+            quantity=qty,
+            pnl_gross=gross,
+            fees=total_fees,
+            pnl_net=pnl_net,
+            return_pct=return_pct,
+            reason=reason,
+            position_risk=pos.risk_amount,
+        ))
 
-        remaining = self.position.quantity - qty
-
-        if remaining <= max(1e-12, self.cfg.quantity * 1e-12):
+        remaining = pos.quantity - qty
+        if remaining <= max(1e-12, pos.initial_quantity * 1e-12):
             self.position = None
         else:
-            # La comisión de entrada restante se conserva solo para la
-            # cantidad todavía abierta.
-            self.position.quantity = remaining
-            self.position.entry_fee -= entry_fee_alloc
-            # El resto de la posicion ya no arriesga capital propio: el
-            # stop sube a breakeven. Solo tiene sentido si queda posicion
-            # viva, y solo puede activarse una vez por posicion.
+            pos.quantity = remaining
+            pos.entry_fee -= entry_fee_alloc
             if move_stop_to_entry:
-                self.position.stop_at_entry = True
+                pos.stop_at_entry = True
+                if self.cfg.trail_atr_mult > 0:
+                    pos.trailing = True
 
-    def _check_stop_loss(self, bar_open: float, bar_high: float, bar_low: float, bar_time: pd.Timestamp) -> bool:
+    def _check_stop_loss(self, i: int) -> Optional[str]:
         """
-        Comprueba el stop contra el OHLC de la vela 1m.
-
-        El nivel depende de si la posicion ya aseguro parte con un
-        scale-out:
-
-            antes del scale-out:
-                LONG  stop = entrada * (1 - stop_loss_pct)
-                SHORT stop = entrada * (1 + stop_loss_pct)
-
-            despues del scale-out (breakeven):
-                LONG  stop = entrada
-                SHORT stop = entrada
-
-        El stop solo se estrecha: breakeven esta siempre mas cerca que el
-        stop inicial, en la misma direccion que el. Si el precio abre al
-        otro lado del nivel, el fill es el open (gap) y no el nivel.
-
-        Devuelve True si cerro la posicion.
+        Stop intrabar contra el OHLC de la vela 1m. Niveles:
+          inicial   : entrada -/+ stop_pct
+          breakeven : entrada (tras scale-out)
+          trailing  : el más ajustado entre breakeven y el trailing
+        Gap: si la vela abre más allá del nivel, el fill es el open.
+        Devuelve la etiqueta del cierre, o None si no se tocó.
         """
-        if self.position is None:
-            return False
+        pos = self.position
+        if pos is None:
+            return None
 
-        at_entry = self.position.stop_at_entry
+        at_entry = pos.stop_at_entry
+        pct = pos.stop_pct
+        if not at_entry and pct <= 0:
+            return None
 
-        # Con el stop en breakeven el nivel no depende de stop_loss_pct,
-        # asi que un stop_loss_pct = 0 (stop desactivado) no debe apagar
-        # la proteccion del tramo que ya se aseguro.
-        if not at_entry and self.cfg.stop_loss_pct <= 0:
-            return False
-
-        pct = self.cfg.stop_loss_pct
-        side = self.position.side
-        entry_price = self.position.entry_price
+        bo, bh, bl = self.o[i], self.h[i], self.l[i]
+        e = pos.entry_price
+        side = pos.side
+        trail_binding = False
 
         if side == 1:
-            stop_price = (
-                entry_price if at_entry
-                else entry_price * (1.0 - pct)
-            )
-            if bar_low > stop_price:
-                return False
-            # Gap bajista: el fill realista es el open, no el nivel del stop.
-            fill_price = bar_open if bar_open <= stop_price else stop_price
+            stop = e if at_entry else e * (1.0 - pct)
+            if pos.trail_level is not None and pos.trail_level > stop:
+                stop = pos.trail_level
+                trail_binding = True
+            if bl > stop:
+                return None
+            fill = bo if bo <= stop else stop
         else:
-            stop_price = (
-                entry_price if at_entry
-                else entry_price * (1.0 + pct)
+            stop = e if at_entry else e * (1.0 + pct)
+            if pos.trail_level is not None and pos.trail_level < stop:
+                stop = pos.trail_level
+                trail_binding = True
+            if bh < stop:
+                return None
+            fill = bo if bo >= stop else stop
+
+        if trail_binding:
+            reason = "TRAIL_STOP"
+        elif at_entry:
+            reason = "BREAKEVEN"
+        else:
+            reason = f"STOP_LOSS_{pct * 100:.2f}%"
+
+        qty_before = pos.quantity
+        self._close_fraction(1.0, fill, self.times[i], reason)
+        if self.verbose:
+            print(
+                f"[STOP] {self.times[i]} | {'LONG' if side == 1 else 'SHORT'} | "
+                f"entrada={e:.8f} | stop={stop:.8f} | fill={fill:.8f} | "
+                f"qty={qty_before} | {reason}",
+                flush=True,
             )
-            if bar_high < stop_price:
-                return False
-            # Gap alcista: el fill realista es el open, no el nivel del stop.
-            fill_price = bar_open if bar_open >= stop_price else stop_price
+        return reason
 
-        qty_before = self.position.quantity
-        # La etiqueta deriva del nivel realmente aplicado, para que no
-        # pueda contradecirlo.
-        reason = (
-            "BREAKEVEN"
-            if at_entry
-            else f"STOP_LOSS_{pct * 100:.1f}%"
-        )
-        self._close_fraction(
-            fraction=1.0,
-            price=fill_price,
-            time=bar_time,
-            reason=reason,
-        )
-        print(
-            f"[STOP] {bar_time} | {'LONG' if side == 1 else 'SHORT'} | "
-            f"entrada={entry_price:.8f} | "
-            f"stop={stop_price:.8f} | fill={fill_price:.8f} | qty={qty_before} | {reason}",
-            flush=True,
-        )
-        return True
-
-    def _execute_pending(self, bar_open: float, bar_time: pd.Timestamp):
-        if self.pending_signal is None:
+    def _update_trailing(self, i: int):
+        """Actualiza el trailing con la vela ya cerrada; rige desde la siguiente."""
+        pos = self.position
+        mult = self.cfg.trail_atr_mult
+        atr = self.sig["atr15"][i]
+        if pos is None or not pos.trailing or mult <= 0 or not np.isfinite(atr):
             return
+        if pos.side == 1:
+            pos.extreme = self.h[i] if pos.extreme is None else max(pos.extreme, self.h[i])
+            cand = pos.extreme - mult * atr
+            pos.trail_level = cand if pos.trail_level is None else max(pos.trail_level, cand)
+        else:
+            pos.extreme = self.l[i] if pos.extreme is None else min(pos.extreme, self.l[i])
+            cand = pos.extreme + mult * atr
+            pos.trail_level = cand if pos.trail_level is None else min(pos.trail_level, cand)
 
+    def _execute_pending(self, i: int):
         sig = self.pending_signal
+        if sig is None:
+            return
         self.pending_signal = None
+        bar_open, ts = self.o[i], self.times[i]
 
         if sig["action"] == "BUY":
-            self._open(
-                side=1,
-                qty=float(sig["quantity"]),
-                price=bar_open,
-                time=bar_time,
-                reason=sig["reason"],
-            )
-
+            self._open(1, float(sig["quantity"]), bar_open, ts, sig["stop_pct"])
         elif sig["action"] == "SELL":
-            self._open(
-                side=-1,
-                qty=float(sig["quantity"]),
-                price=bar_open,
-                time=bar_time,
-                reason=sig["reason"],
-            )
-
+            self._open(-1, float(sig["quantity"]), bar_open, ts, sig["stop_pct"])
         elif sig["action"] == "EXIT":
             self._close_fraction(
-                fraction=float(sig["fraction"]),
-                price=bar_open,
-                time=bar_time,
-                reason=sig["reason"],
+                float(sig["fraction"]), bar_open, ts, sig["reason"],
                 move_stop_to_entry=bool(sig.get("move_stop_to_entry", False)),
             )
 
     # -------------------------- equity --------------------------
 
-    def mark_to_market(self, time: pd.Timestamp, close: float):
+    def _mark(self, time: pd.Timestamp, close: float):
+        pos = self.position
         equity = self.cash
-        if self.position is not None:
-            unrealized = (
-                (close - self.position.entry_price)
-                * self.position.quantity
-                * self.position.side
-            )
-            equity += unrealized
+        if pos is not None:
+            equity += (close - pos.entry_price) * pos.quantity * pos.side
+        self.eq_time.append(time)
+        self.eq_cash.append(self.cash)
+        self.eq_equity.append(equity)
+        self.eq_side.append("FLAT" if pos is None else ("LONG" if pos.side == 1 else "SHORT"))
+        self.eq_qty.append(0.0 if pos is None else pos.quantity)
 
-        self.equity_rows.append({
-            "timestamp": time,
-            "cash": self.cash,
-            "equity": equity,
-            "close": close,
-            "position_side": (
-                "LONG" if self.position and self.position.side == 1
-                else "SHORT" if self.position
-                else "FLAT"
-            ),
-            "position_quantity": (
-                self.position.quantity if self.position else 0.0
-            ),
-        })
-
-    # -------------------------- backtest --------------------------
+    # -------------------------- bucle principal --------------------------
 
     def run(self) -> tuple[pd.DataFrame, pd.DataFrame]:
-        bars = self.data
-        total = len(bars)
+        cfg, sig = self.cfg, self.sig
+        n = len(self.data)
+        valid, bull1h, bear1h = sig["valid"], sig["bull1h"], sig["bear1h"]
+        bull30, bear30 = sig["bull30"], sig["bear30"]
+        entry_long, entry_short = sig["entry_long"], sig["entry_short"]
+
         started = time.perf_counter()
-        last_log = -1
-        print(f"[BACKTEST] Iniciando: {total:,} velas 1m", flush=True)
-        print(
-            f"[BACKTEST] Rango: {bars.index.min()} -> {bars.index.max()}",
-            flush=True,
-        )
+        last_log = -10
+        cooldown_until = 0
+        one_min = pd.Timedelta(minutes=1)
+        print(f"[BACKTEST] {n:,} velas 1m", flush=True)
 
-        # Cada iteración representa el cierre de la vela 1m cuyo timestamp
-        # es su inicio. La señal se conoce en timestamp + 1m y se ejecuta
-        # en el siguiente bar disponible.
-        for i in range(len(bars)):
-            ts = bars.index[i]
-            row = bars.iloc[i]
+        for i in range(n):
+            # 1) Ejecutar la señal generada al cierre anterior (open de esta vela).
+            if self.pending_signal is not None:
+                self._execute_pending(i)
 
-            bar_open = float(row["open"])
-            bar_close = float(row["close"])
+            # 2) Stop intrabar: prioridad sobre cualquier señal nueva.
+            stop_reason = self._check_stop_loss(i)
+            stop_hit = stop_reason is not None
+            if stop_hit and stop_reason.startswith("STOP_LOSS"):
+                cooldown_until = i + 1 + cfg.cooldown_min
 
-            # Si había una señal generada al cierre anterior, se ejecuta
-            # aquí, en la apertura de la vela actual.
-            self._execute_pending(bar_open, ts)
+            # 3) Trailing con la vela ya cerrada (rige desde la siguiente).
+            if self.position is not None and self.position.trailing:
+                self._update_trailing(i)
 
-            # Stop-loss intrabar de 1m. Tiene prioridad sobre cualquier
-            # nueva señal de la estrategia en esta misma vela.
-            stop_hit = self._check_stop_loss(
-                bar_open=bar_open,
-                bar_high=float(row["high"]),
-                bar_low=float(row["low"]),
-                bar_time=ts,
-            )
+            # 4) Señal al cierre de esta vela, a ejecutar en la próxima apertura.
+            new_sig = None
+            if not stop_hit and valid[i]:
+                pos = self.position
+                if pos is not None:
+                    side = pos.side
+                    if (side == 1 and bear1h[i]) or (side == -1 and bull1h[i]):
+                        new_sig = {"action": "EXIT", "fraction": 1.0, "reason": "1H_REVERSAL"}
+                    elif pos.quantity >= pos.initial_quantity - 1e-12 and (
+                        (side == 1 and bear30[i]) or (side == -1 and bull30[i])
+                    ):
+                        new_sig = {
+                            "action": "EXIT",
+                            "fraction": cfg.scale_out_fraction,
+                            "reason": "30M_SCALE_OUT",
+                            "move_stop_to_entry": True,
+                        }
+                elif i >= cooldown_until:
+                    if entry_long[i]:
+                        new_sig = {"action": "BUY", "quantity": cfg.quantity,
+                                   "reason": "MTF_LONG",
+                                   "stop_pct": self._stop_pct_for(i, self.c[i])}
+                    elif entry_short[i]:
+                        new_sig = {"action": "SELL", "quantity": cfg.quantity,
+                                   "reason": "MTF_SHORT",
+                                   "stop_pct": self._stop_pct_for(i, self.c[i])}
+            if new_sig is not None:
+                self.pending_signal = new_sig
 
-            close_time = ts + pd.Timedelta(minutes=1)
+            self._mark(self.times[i] + one_min, self.c[i])
 
-            # Evaluación exclusivamente con datos cuya vela ya terminó en
-            # close_time. Si el stop acaba de cerrar la posición, no se
-            # agenda otra señal usando la misma vela.
-            signal = None if stop_hit else self.evaluate_signal(close_time)
-
-            # No puede ejecutarse inmediatamente: se agenda para la próxima
-            # apertura 1m. Si no existe próxima vela, se gestionará al final.
-            if signal is not None:
-                self.pending_signal = signal
-
-            self.last_price = bar_close
-            self.mark_to_market(close_time, bar_close)
-
-            # Progreso aproximadamente cada 5%, sin inundar la consola.
-            pct = int(((i + 1) / total) * 100) if total else 100
-            if pct >= last_log + 5 or i == total - 1:
+            pct = int((i + 1) / n * 100)
+            if pct >= last_log + 10 or i == n - 1:
                 elapsed = time.perf_counter() - started
                 rate = (i + 1) / elapsed if elapsed > 0 else 0.0
-                eta = (total - i - 1) / rate if rate > 0 else 0.0
                 print(
-                    f"[BACKTEST] {pct:3d}% | {i + 1:,}/{total:,} | "
-                    f"{rate:,.0f} velas/s | transcurrido {elapsed:.1f}s | "
-                    f"ETA {eta:.1f}s | trades {len(self.trades)}",
+                    f"[BACKTEST] {pct:3d}% | {rate:,.0f} velas/s | "
+                    f"{elapsed:.1f}s | tramos {len(self.trades)}",
                     flush=True,
                 )
                 last_log = pct
 
-        # Si queda posición abierta, se cierra al último close.
-        if self.position is not None and self.cfg.force_close_at_end:
-            last_ts = bars.index[-1] + pd.Timedelta(minutes=1)
-            self._close_fraction(
-                fraction=1.0,
-                price=float(bars["close"].iloc[-1]),
-                time=last_ts,
-                reason="END_OF_DATA",
-            )
-            self.mark_to_market(last_ts, float(bars["close"].iloc[-1]))
+        if self.position is not None and cfg.force_close_at_end:
+            last_ts = self.times[-1] + one_min
+            self._close_fraction(1.0, self.c[-1], last_ts, "END_OF_DATA")
+            self._mark(last_ts, self.c[-1])
 
         trades = pd.DataFrame([asdict(t) for t in self.trades])
-        equity = pd.DataFrame(self.equity_rows)
-        elapsed = time.perf_counter() - started
+        equity = pd.DataFrame({
+            "timestamp": self.eq_time,
+            "cash": self.eq_cash,
+            "equity": self.eq_equity,
+            "position_side": self.eq_side,
+            "position_quantity": self.eq_qty,
+        })
         print(
-            f"[BACKTEST] Finalizado en {elapsed:.2f}s | "
-            f"trades={len(trades):,} | equity_rows={len(equity):,}",
+            f"[BACKTEST] Finalizado en {time.perf_counter() - started:.2f}s | "
+            f"tramos={len(trades):,}",
             flush=True,
         )
-
         return trades, equity
 
 
 # ---------------------------------------------------------------------------
-# Métricas
+# Métricas (por posición)
 # ---------------------------------------------------------------------------
 
-def calculate_metrics(
-    trades: pd.DataFrame,
-    equity: pd.DataFrame,
-    initial_capital: float,
-) -> dict:
-    if equity.empty:
-        return {
-            "initial_capital": initial_capital,
-            "final_equity": initial_capital,
-            "net_pnl": 0.0,
-            "return_pct": 0.0,
-            "max_drawdown_pct": 0.0,
-            "trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate_pct": 0.0,
-            "profit_factor": None,
-            "avg_trade_net": 0.0,
-            "best_trade": 0.0,
-            "worst_trade": 0.0,
-        }
-
-    final_equity = float(equity["equity"].iloc[-1])
-    net_pnl = final_equity - initial_capital
-    return_pct = (
-        net_pnl / initial_capital * 100.0
-        if initial_capital else 0.0
-    )
-
-    eq = equity["equity"].astype(float)
-    peak = eq.cummax()
-    dd = eq / peak - 1.0
-    max_dd_pct = float(dd.min() * 100.0)
-
+def positions_from_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    """Agrupa los tramos (scale-out + resto) en una fila por posición."""
     if trades.empty:
-        wins = losses = 0
-        win_rate = 0.0
-        profit_factor = None
-        avg_trade = best = worst = 0.0
-    else:
-        pnl = trades["pnl_net"].astype(float)
-        wins = int((pnl > 0).sum())
-        losses = int((pnl < 0).sum())
-        win_rate = wins / len(pnl) * 100.0
+        return pd.DataFrame(columns=[
+            "position_id", "side", "entry_time", "exit_time", "pnl_net",
+            "fees", "risk", "legs", "reason", "r_multiple",
+        ])
+    pos = trades.groupby("position_id", sort=True).agg(
+        side=("side", "first"),
+        entry_time=("entry_time", "first"),
+        exit_time=("exit_time", "last"),
+        pnl_net=("pnl_net", "sum"),
+        fees=("fees", "sum"),
+        risk=("position_risk", "first"),
+        legs=("trade_id", "count"),
+        reason=("reason", "last"),
+    ).reset_index()
+    pos["r_multiple"] = np.where(pos["risk"] > 0, pos["pnl_net"] / pos["risk"], np.nan)
+    return pos
 
-        gross_profit = float(pnl[pnl > 0].sum())
-        gross_loss = float(-pnl[pnl < 0].sum())
-        profit_factor = (
-            gross_profit / gross_loss
-            if gross_loss > 0 else None
-        )
 
-        avg_trade = float(pnl.mean())
-        best = float(pnl.max())
-        worst = float(pnl.min())
+def position_stats(pos: pd.DataFrame) -> dict:
+    if pos.empty:
+        return {
+            "positions": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0,
+            "profit_factor": None, "net_pnl": 0.0, "avg_pnl": 0.0,
+            "expectancy_r": None, "max_consecutive_losses": 0,
+        }
+    pnl = pos["pnl_net"].astype(float)
+    gross_profit = float(pnl[pnl > 0].sum())
+    gross_loss = float(-pnl[pnl < 0].sum())
 
+    streak = best_streak = 0
+    for v in pnl.to_numpy():
+        streak = streak + 1 if v < 0 else 0
+        best_streak = max(best_streak, streak)
+
+    r = pos["r_multiple"].dropna()
     return {
-        "initial_capital": initial_capital,
-        "final_equity": final_equity,
-        "net_pnl": net_pnl,
-        "return_pct": return_pct,
-        "max_drawdown_pct": max_dd_pct,
-        "trades": int(len(trades)),
-        "wins": wins,
-        "losses": losses,
-        "win_rate_pct": win_rate,
-        "profit_factor": profit_factor,
-        "avg_trade_net": avg_trade,
-        "best_trade": best,
-        "worst_trade": worst,
+        "positions": int(len(pnl)),
+        "wins": int((pnl > 0).sum()),
+        "losses": int((pnl < 0).sum()),
+        "win_rate_pct": float((pnl > 0).mean() * 100.0),
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else None,
+        "net_pnl": float(pnl.sum()),
+        "avg_pnl": float(pnl.mean()),
+        "expectancy_r": float(r.mean()) if len(r) else None,
+        "max_consecutive_losses": int(best_streak),
     }
 
 
-def print_report(metrics: dict, config: Config, data: pd.DataFrame):
+def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital: float) -> dict:
+    pos = positions_from_trades(trades)
+    stats = position_stats(pos)
+
+    if equity.empty:
+        final_equity = initial_capital
+        max_dd = sharpe = sortino = 0.0
+    else:
+        eq = equity["equity"].astype(float)
+        final_equity = float(eq.iloc[-1])
+        max_dd = float((eq / eq.cummax() - 1.0).min() * 100.0)
+
+        daily = equity.set_index("timestamp")["equity"].resample("1D").last().dropna()
+        rets = daily.pct_change().dropna()
+        sharpe = sortino = 0.0
+        if len(rets) > 2 and rets.std() > 0:
+            sharpe = float(rets.mean() / rets.std() * math.sqrt(365))
+            downside = rets[rets < 0]
+            if len(downside) > 1 and downside.std() > 0:
+                sortino = float(rets.mean() / downside.std() * math.sqrt(365))
+
+    net = final_equity - initial_capital
+    return {
+        "initial_capital": initial_capital,
+        "final_equity": final_equity,
+        "net_pnl": net,
+        "return_pct": net / initial_capital * 100.0 if initial_capital else 0.0,
+        "max_drawdown_pct": max_dd,
+        "sharpe_daily_365": sharpe,
+        "sortino_daily_365": sortino,
+        "legs": int(len(trades)),
+        **stats,
+    }
+
+
+def _fmt(v, spec=".3f"):
+    return "N/A" if v is None else format(v, spec)
+
+
+def print_report(label: str, m: dict, cfg: Config, data: pd.DataFrame):
     print("\n" + "=" * 72)
-    print("STRATEGY 1 — BACKTEST")
+    print(f"STRATEGY 1 — {label}")
     print("=" * 72)
-    print(f"Periodo       : {data.index[0]} -> {data.index[-1]}")
-    print(f"Barras 1m     : {len(data):,}")
-    print(f"Capital inicial: {metrics['initial_capital']:,.2f}")
-    print(f"Capital final  : {metrics['final_equity']:,.2f}")
-    print(f"PnL neto       : {metrics['net_pnl']:,.2f}")
-    print(f"Retorno        : {metrics['return_pct']:.2f}%")
-    print(f"Max drawdown   : {metrics['max_drawdown_pct']:.2f}%")
-    print(f"Trades         : {metrics['trades']:,}")
-    print(f"Ganadores      : {metrics['wins']:,}")
-    print(f"Perdedores     : {metrics['losses']:,}")
-    print(f"Win rate       : {metrics['win_rate_pct']:.2f}%")
-
-    pf = metrics["profit_factor"]
-    print(
-        f"Profit factor  : "
-        f"{pf:.3f}" if pf is not None else "Profit factor  : N/A"
-    )
-    print(f"Avg trade      : {metrics['avg_trade_net']:,.4f}")
-    print(f"Mejor trade    : {metrics['best_trade']:,.4f}")
-    print(f"Peor trade     : {metrics['worst_trade']:,.4f}")
-
-    print("\nParámetros:")
-    print(f"  EMA           : {config.ema_fast}/{config.ema_slow}")
-    print(f"  ADX           : {config.adx_dilen}/{config.adx_len}")
-    print(f"  ADX threshold : {config.adx_threshold}")
-    print(f"  Quantity      : {config.quantity}")
-    print(f"  Scale-out     : {config.scale_out_fraction:.2%}")
-    print(f"  Commission    : {config.commission_bps} bps")
-    print(f"  Slippage      : {config.slippage_bps} bps")
-    print(f"  Stop loss     : {config.stop_loss_pct * 100:.3f}%")
-    print("  Stop tras scale-out: breakeven (precio de entrada)")
+    print(f"Periodo         : {data.index[0]} -> {data.index[-1]}")
+    print(f"Capital         : {m['initial_capital']:,.2f} -> {m['final_equity']:,.2f}")
+    print(f"PnL neto        : {m['net_pnl']:,.2f}  ({m['return_pct']:.2f}%)")
+    print(f"Max drawdown    : {m['max_drawdown_pct']:.2f}%")
+    print(f"Sharpe / Sortino: {m['sharpe_daily_365']:.2f} / {m['sortino_daily_365']:.2f}")
+    print(f"Posiciones      : {m['positions']:,} (tramos: {m['legs']:,})")
+    print(f"Win rate        : {m['win_rate_pct']:.2f}%  "
+          f"({m['wins']} ganadoras / {m['losses']} perdedoras)")
+    print(f"Profit factor   : {_fmt(m['profit_factor'])}")
+    print(f"Expectancy (R)  : {_fmt(m['expectancy_r'])}")
+    print(f"Avg PnL/posición: {m['avg_pnl']:,.4f}")
+    print(f"Racha pérdidas  : {m['max_consecutive_losses']}")
+    print(f"Costos          : {cfg.commission_bps} bps comisión | {cfg.slippage_bps} bps slippage")
+    sizing = (f"riesgo {cfg.risk_pct:.2%} (lev máx {cfg.max_leverage}x)"
+              if cfg.risk_pct > 0 else f"cantidad fija {cfg.quantity}")
+    stop = (f"{cfg.atr_stop_mult}xATR15m [{cfg.atr_stop_min_pct:.2%}-{cfg.atr_stop_max_pct:.2%}]"
+            if cfg.atr_stop_mult > 0 else f"fijo {cfg.stop_loss_pct:.2%}")
+    print(f"Sizing / stop   : {sizing} / {stop}")
+    print(f"Trailing        : {cfg.trail_atr_mult}xATR15m" if cfg.trail_atr_mult > 0
+          else "Trailing        : desactivado")
+    print(f"Filtros         : cooldown={cfg.cooldown_min}m adx_max={cfg.adx_max} "
+          f"adx_rising={cfg.adx_rising} gap1h={cfg.min_ema_gap_1h_pct} "
+          f"rango1m={cfg.min_trigger_range_atr}xATR horas_bloq={cfg.block_hours_utc or '-'}")
     print("=" * 72)
+
+
+def print_oos_split(trades: pd.DataFrame, oos_start: str):
+    pos = positions_from_trades(trades)
+    if pos.empty:
+        return
+    cut = pd.Timestamp(oos_start, tz="UTC")
+    ins = position_stats(pos[pos["entry_time"] < cut])
+    oos = position_stats(pos[pos["entry_time"] >= cut])
+    print(f"\nSplit por fecha de entrada (corte {oos_start}):")
+    print(f"  {'':<14}{'posiciones':>11}{'win%':>8}{'PF':>8}{'exp.R':>8}{'PnL neto':>14}")
+    for name, s in (("in-sample", ins), ("out-of-sample", oos)):
+        print(f"  {name:<14}{s['positions']:>11}{s['win_rate_pct']:>8.1f}"
+              f"{_fmt(s['profit_factor'], '.2f'):>8}{_fmt(s['expectancy_r'], '.2f'):>8}"
+              f"{s['net_pnl']:>14,.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -1275,35 +1000,49 @@ def print_report(metrics: dict, config: Config, data: pd.DataFrame):
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    d = Config()
     p = argparse.ArgumentParser(
-        description="Backtester dedicado para Strategy1 sobre OHLCV 1m Parquet."
+        description="Backtester Strategy1 v2 sobre OHLCV 1m Parquet."
     )
     p.add_argument("parquet", help="Ruta al dataset .parquet")
-    p.add_argument("--capital", type=float, default=10_000.0)
-    p.add_argument("--quantity", type=float, default=1.0)
-    p.add_argument("--scale-out", type=float, default=0.5)
-    p.add_argument("--adx-threshold", type=float, default=26.0)
-    p.add_argument("--commission-bps", type=float, default=0.0)
-    p.add_argument("--slippage-bps", type=float, default=0.0)
-    p.add_argument("--stop-loss-pct", type=float, default=0.007,
-                    help="Stop loss como fracción del precio de entrada (default: 0.006 = 0.6%%)")
-    p.add_argument(
-        "--no-force-close",
-        action="store_true",
-        help="No cerrar la posición al final del dataset.",
-    )
-    p.add_argument(
-        "--output-dir",
-        default=None,
-        help="Directorio donde guardar trades.csv, equity.csv y metrics.json.",
-    )
+    p.add_argument("--preset", choices=["baseline", "improved"], default="improved",
+                   help="baseline = estrategia original; improved = hipótesis v2.")
+    p.add_argument("--compare", action="store_true",
+                   help="Ejecuta baseline e improved con los mismos costos y los compara.")
+    p.add_argument("--capital", type=float, default=d.initial_capital)
+    p.add_argument("--quantity", type=float, default=d.quantity)
+    p.add_argument("--scale-out", type=float, default=d.scale_out_fraction)
+    p.add_argument("--adx-threshold", type=float, default=d.adx_threshold)
+    p.add_argument("--commission-bps", type=float, default=d.commission_bps)
+    p.add_argument("--slippage-bps", type=float, default=d.slippage_bps)
+    p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct,
+                   help="Stop fijo como fracción de la entrada (0.006 = 0.6%%).")
+    p.add_argument("--no-force-close", action="store_true")
+    p.add_argument("--oos-start", default=None,
+                   help="Fecha (YYYY-MM-DD) para separar in-sample / out-of-sample.")
+    p.add_argument("--verbose", action="store_true", help="Imprime cada stop.")
+    p.add_argument("--output-dir", default=None)
+
+    # Parámetros de mejoras: default None = "usa lo que dicte el preset".
+    for key, off in V2_OFF.items():
+        flag = "--" + key.replace("_", "-")
+        if isinstance(off, bool):
+            p.add_argument(flag, action=argparse.BooleanOptionalAction, default=None)
+        else:
+            p.add_argument(flag, type=type(off), default=None)
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
-
-    config = Config(
+def make_config(args, preset: str, apply_overrides: bool = True) -> Config:
+    v2 = dict(V2_OFF)
+    if preset == "improved":
+        v2.update(IMPROVED_PRESET)
+    if apply_overrides:
+        for key in V2_OFF:
+            val = getattr(args, key)
+            if val is not None:
+                v2[key] = val
+    return Config(
         initial_capital=args.capital,
         quantity=args.quantity,
         scale_out_fraction=args.scale_out,
@@ -1312,39 +1051,86 @@ def main():
         slippage_bps=args.slippage_bps,
         stop_loss_pct=args.stop_loss_pct,
         force_close_at_end=not args.no_force_close,
+        **v2,
     )
 
-    data = load_parquet(args.parquet)
 
+def _jsonable(obj):
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (np.floating, float)):
+        return None if not math.isfinite(float(obj)) else float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    return obj
+
+
+def run_one(label, data, cfg, features, args, out_dir: Optional[Path]) -> dict:
+    engine = Strategy1Backtester(data, cfg, features=features, verbose=args.verbose)
+    trades, equity = engine.run()
+    metrics = calculate_metrics(trades, equity, cfg.initial_capital)
+    print_report(label, metrics, cfg, data)
+    if args.oos_start:
+        print_oos_split(trades, args.oos_start)
+
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        trades.to_csv(out_dir / "trades.csv", index=False)
+        positions_from_trades(trades).to_csv(out_dir / "positions.csv", index=False)
+        equity.to_csv(out_dir / "equity.csv", index=False)
+        with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
+            json.dump(_jsonable(metrics), f, indent=2)
+        with open(out_dir / "config.json", "w", encoding="utf-8") as f:
+            json.dump(asdict(cfg), f, indent=2)
+        print(f"Resultados guardados en: {out_dir.resolve()}")
+    return metrics
+
+
+def print_comparison(base: dict, imp: dict):
+    rows = [
+        ("Retorno %", "return_pct", ".2f"),
+        ("Max drawdown %", "max_drawdown_pct", ".2f"),
+        ("Sharpe", "sharpe_daily_365", ".2f"),
+        ("Sortino", "sortino_daily_365", ".2f"),
+        ("Posiciones", "positions", "d"),
+        ("Win rate %", "win_rate_pct", ".1f"),
+        ("Profit factor", "profit_factor", ".2f"),
+        ("Expectancy R", "expectancy_r", ".3f"),
+        ("Racha pérdidas", "max_consecutive_losses", "d"),
+    ]
+    print("\n" + "=" * 72)
+    print(f"{'COMPARACIÓN':<20}{'baseline':>16}{'improved':>16}")
+    print("-" * 72)
+    for name, key, spec in rows:
+        print(f"{name:<20}{_fmt(base[key], spec):>16}{_fmt(imp[key], spec):>16}")
+    print("=" * 72)
+    print("Nota: el baseline usa cantidad fija y el improved sizing por riesgo, así que "
+          "retorno y drawdown no son directamente comparables; compara PF y expectancy en R.")
+
+
+def main():
+    args = parse_args()
+    data = load_parquet(args.parquet)
     if len(data) < 100:
         raise ValueError("El dataset tiene muy pocas velas 1m para este backtest.")
 
-    engine = Strategy1Backtester(data, config)
-    trades, equity = engine.run()
+    out_root = Path(args.output_dir) if args.output_dir else None
 
-    metrics = calculate_metrics(
-        trades=trades,
-        equity=equity,
-        initial_capital=config.initial_capital,
-    )
+    base_cfg = make_config(args, "baseline", apply_overrides=not args.compare)
+    t0 = time.perf_counter()
+    features = build_features(data, base_cfg)
+    print(f"[FEATURES] Indicadores precalculados en {time.perf_counter() - t0:.2f}s", flush=True)
 
-    print_report(metrics, config, data)
-
-    if args.output_dir:
-        out = Path(args.output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-
-        trades.to_csv(out / "trades.csv", index=False)
-        equity.to_csv(out / "equity.csv", index=False)
-
-        import json
-        with open(out / "metrics.json", "w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2, default=str)
-
-        with open(out / "config.json", "w", encoding="utf-8") as f:
-            json.dump(asdict(config), f, indent=2)
-
-        print(f"\nResultados guardados en: {out.resolve()}")
+    if args.compare:
+        imp_cfg = make_config(args, "improved")
+        m_base = run_one("BASELINE", data, base_cfg, features, args,
+                         out_root / "baseline" if out_root else None)
+        m_imp = run_one("IMPROVED", data, imp_cfg, features, args,
+                        out_root / "improved" if out_root else None)
+        print_comparison(m_base, m_imp)
+    else:
+        cfg = make_config(args, args.preset)
+        run_one(args.preset.upper(), data, cfg, features, args, out_root)
 
 
 if __name__ == "__main__":
