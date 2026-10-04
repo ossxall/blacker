@@ -13,13 +13,19 @@ Reglas de la estrategia (Strategy1, sin cambios):
     1m  -> trigger: estructura + cierre sobre/bajo EMA20 +
            ruptura del máximo/mínimo de la vela anterior
 
-Mejoras activas por defecto (todas ajustables por CLI):
-    - Tamaño por riesgo: 1% del capital por operación (apalancamiento máx 3x).
-    - Stop por volatilidad: 2.0 x ATR(14) de 15m, acotado entre 0.4% y 1.5%.
-    - Trailing del tramo restante: 2.5 x ATR(15m), activo tras el scale-out.
-    - Cooldown de 15 minutos tras un stop inicial.
-    - Filtros de entrada: ADX 1H <= 50 y subiendo, separación EMA20/EMA50 en
-      1H >= 0.05%, rango de la vela 1m >= 0.5 x ATR(1m).
+Valores default reales (compatibilidad con la versión existente):
+    - EMA 21/55 en todos los timeframes.
+    - ADX 14/14, umbral 23.
+    - Riesgo 1% del capital, apalancamiento máximo 1x.
+    - Stop 3.0 x ATR(14) de 15m, acotado entre 0.4% y 1.5%.
+    - Scale-out 99% y trailing 2.5 x ATR(15m) sobre el resto.
+    - Cooldown 0 min; ADX máximo 40 y ADX creciente.
+    - Gap mínimo EMA 1H 0.1%; rango mínimo 1m 0 ATR.
+
+Arquitectura reutilizable:
+    Config -> DataFeed -> FeatureBuilder -> SignalEngine -> ExecutionEngine
+    -> Portfolio/Equity -> Metrics. Los bots posteriores pueden sustituir
+    SignalEngine sin duplicar carga, indicadores, ejecución o reporting.
 
 Salidas:
     Stop inicial (ATR)      -> cierre total.
@@ -95,8 +101,19 @@ class Config:
     min_ema_gap_1h_pct: float = 0.001  # |EMA20-EMA50|/EMA50 mínimo en 1H
     min_trigger_range_atr: float = 0.0  # rango mínimo de la vela 1m en ATR(1m)
     block_hours_utc: str = ""           # horas UTC sin entradas, p.ej. "0,1,2"
+    timestamp_is_close: bool = False   # False: timestamp = apertura de vela 1m
 
     def __post_init__(self):
+        if self.ema_fast <= 0 or self.ema_slow <= 0:
+            raise ValueError("Los periodos EMA deben ser > 0.")
+        if self.ema_fast >= self.ema_slow:
+            raise ValueError("ema_fast debe ser menor que ema_slow.")
+        if self.adx_dilen <= 0 or self.adx_len <= 0 or self.atr_len <= 0:
+            raise ValueError("Los periodos ADX/ATR deben ser > 0.")
+        if self.initial_capital <= 0:
+            raise ValueError("initial_capital debe ser > 0.")
+        if self.commission_bps < 0 or self.slippage_bps < 0:
+            raise ValueError("commission_bps y slippage_bps no pueden ser negativos.")
         if not (0.0 < self.scale_out_fraction < 1.0):
             raise ValueError(
                 "scale_out_fraction debe estar estrictamente entre 0 y 1 "
@@ -108,6 +125,8 @@ class Config:
             raise ValueError("max_leverage debe ser > 0.")
         if self.atr_stop_mult < 0 or self.trail_atr_mult < 0:
             raise ValueError("Los multiplicadores de ATR no pueden ser negativos.")
+        if self.atr_stop_min_pct < 0 or self.atr_stop_max_pct < 0:
+            raise ValueError("Los límites de stop ATR no pueden ser negativos.")
         if self.atr_stop_min_pct > self.atr_stop_max_pct:
             raise ValueError("atr_stop_min_pct no puede superar atr_stop_max_pct.")
         if self.stop_loss_pct <= 0 and self.atr_stop_mult <= 0:
@@ -355,17 +374,19 @@ def _map_tf(
     data: pd.DataFrame,
     rule: str,
     cfg: Config,
-    close_ns: np.ndarray,
+    decision_ns: np.ndarray,
     adx: bool = False,
     atr: bool = False,
 ) -> dict:
-    """
-    Calcula indicadores en `rule` y los proyecta sobre cada vela 1m usando la
-    última vela cuyo cierre (inicio + duración) es <= al cierre de la vela 1m.
+    """Calcula HTF y proyecta exclusivamente velas ya cerradas.
+
+    `decision_ns` representa el instante en que la vela 1m queda cerrada.
+    La regla es deliberadamente conservadora: una HTF solo entra en una
+    decisión si su timestamp de cierre es <= al instante de decisión.
     """
     bars = resample_ohlcv(data, rule)
     ends = _ns(bars.index + pd.Timedelta(rule))
-    pos = np.searchsorted(ends, close_ns, side="right") - 1
+    pos = np.searchsorted(ends, decision_ns, side="right") - 1
     ok = pos >= 0
     j = np.where(ok, pos, 0)
 
@@ -389,16 +410,21 @@ def _map_tf(
 
 
 def build_features(data: pd.DataFrame, cfg: Config) -> dict:
-    """Indicadores por timeframe alineados a cada vela 1m."""
+    """Indicadores alineados al instante real de decisión de cada vela 1m.
+
+    Por defecto el dataset usa timestamps de apertura, por lo que se suma un
+    minuto para obtener el cierre. Si el proveedor entrega timestamps de cierre,
+    `timestamp_is_close=True` evita el desplazamiento y, por tanto, el lookahead.
+    """
     n = len(data)
-    close_ns = _ns(data.index) + 60 * 1_000_000_000
+    decision_ns = _ns(data.index) if cfg.timestamp_is_close else _ns(data.index + pd.Timedelta(minutes=1))
 
     feats = {
-        "close_ns": close_ns,
-        "1h": _map_tf(data, "1h", cfg, close_ns, adx=True),
-        "30m": _map_tf(data, "30min", cfg, close_ns),
-        "15m": _map_tf(data, "15min", cfg, close_ns, atr=True),
-        "5m": _map_tf(data, "5min", cfg, close_ns),
+        "decision_ns": decision_ns,
+        "1h": _map_tf(data, "1h", cfg, decision_ns, adx=True),
+        "30m": _map_tf(data, "30min", cfg, decision_ns),
+        "15m": _map_tf(data, "15min", cfg, decision_ns, atr=True),
+        "5m": _map_tf(data, "5min", cfg, decision_ns),
     }
     c1 = data["close"]
     feats["1m"] = {
@@ -456,7 +482,7 @@ def build_signals(f: dict, cfg: Config) -> dict:
             mask &= (m1["high"] - m1["low"]) >= cfg.min_trigger_range_atr * m1["atr"]
         blocked = cfg.blocked_hours()
         if blocked:
-            hours = (f["close_ns"] // 3_600_000_000_000) % 24
+            hours = (f["decision_ns"] // 3_600_000_000_000) % 24
             mask &= ~np.isin(hours, blocked)
 
     # Una señal solo es válida si todos los timeframes tienen estado completo.
@@ -477,17 +503,60 @@ def build_signals(f: dict, cfg: Config) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Abstracciones reutilizables de estrategia
+# ---------------------------------------------------------------------------
+
+class FeatureBuilder:
+    """Construye features MTF. Reutilizable por cualquier bot basado en OHLCV."""
+
+    def __init__(self, config: Config):
+        self.cfg = config
+
+    def build(self, data: pd.DataFrame) -> dict:
+        return build_features(data, self.cfg)
+
+
+class SignalEngine:
+    """Contrato mínimo para una estrategia.
+
+    Un bot posterior solo necesita implementar ``build(features)`` y devolver
+    el mismo contrato de señales que consume el motor de ejecución, o adaptar
+    el motor mediante una implementación propia.
+    """
+
+    def build(self, features: dict) -> dict:
+        raise NotImplementedError
+
+
+class Strategy1SignalEngine(SignalEngine):
+    def __init__(self, config: Config):
+        self.cfg = config
+
+    def build(self, features: dict) -> dict:
+        return build_signals(features, self.cfg)
+
+
+# ---------------------------------------------------------------------------
 # Motor
 # ---------------------------------------------------------------------------
 
 class Strategy1Backtester:
-    def __init__(self, data: pd.DataFrame, config: Config, verbose: bool = False):
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        config: Config,
+        verbose: bool = False,
+        feature_builder: Optional[FeatureBuilder] = None,
+        signal_engine: Optional[SignalEngine] = None,
+    ):
         self.data = data
         self.cfg = config
         self.verbose = verbose
 
-        feats = build_features(data, config)
-        self.sig = build_signals(feats, config)
+        self.feature_builder = feature_builder or FeatureBuilder(config)
+        self.signal_engine = signal_engine or Strategy1SignalEngine(config)
+        feats = self.feature_builder.build(data)
+        self.sig = self.signal_engine.build(feats)
 
         self.o = data["open"].to_numpy(float)
         self.h = data["high"].to_numpy(float)
@@ -712,10 +781,19 @@ class Strategy1Backtester:
     # -------------------------- equity --------------------------
 
     def _mark(self, time: pd.Timestamp, close: float):
+        """Marca equity como valor de liquidación neto, no solo MTM bruto.
+
+        Esto evita que la curva de equity sobreestime ligeramente el capital
+        cuando comisión/slippage están activados. El coste hipotético de salida
+        se incluye solo en la marca; no se descuenta del cash hasta cerrar.
+        """
         pos = self.position
         equity = self.cash
         if pos is not None:
-            equity += (close - pos.entry_price) * pos.quantity * pos.side
+            liquidation_price = self._execution_price(close, -pos.side)
+            gross = (liquidation_price - pos.entry_price) * pos.quantity * pos.side
+            exit_fee = self._fee(liquidation_price * pos.quantity)
+            equity += gross - exit_fee
         self.eq_time.append(time)
         self.eq_cash.append(self.cash)
         self.eq_equity.append(equity)
@@ -733,7 +811,7 @@ class Strategy1Backtester:
 
         started = time.perf_counter()
         last_log = -10
-        cooldown_until = 0
+        cooldown_until: Optional[pd.Timestamp] = None
         one_min = pd.Timedelta(minutes=1)
         print(f"[BACKTEST] {n:,} velas 1m", flush=True)
 
@@ -746,7 +824,8 @@ class Strategy1Backtester:
             stop_reason = self._check_stop_loss(i)
             stop_hit = stop_reason is not None
             if stop_hit and stop_reason.startswith("STOP_LOSS"):
-                cooldown_until = i + 1 + cfg.cooldown_min
+                cooldown_until = self.times[i] + pd.Timedelta(minutes=cfg.cooldown_min)
+
 
             # 3) Trailing con la vela ya cerrada (rige desde la siguiente).
             if self.position is not None and self.position.trailing:
@@ -769,7 +848,7 @@ class Strategy1Backtester:
                             "reason": "30M_SCALE_OUT",
                             "move_stop_to_entry": True,
                         }
-                elif i >= cooldown_until:
+                elif cooldown_until is None or self.times[i] >= cooldown_until:
                     if entry_long[i]:
                         new_sig = {"action": "BUY", "reason": "MTF_LONG",
                                    "stop_pct": self._stop_pct_for(i, self.c[i])}
@@ -1089,6 +1168,8 @@ def parse_args():
     p.add_argument("--oos-start", default=None,
                    help="Fecha (YYYY-MM-DD) para separar el reporte antes/después.")
     p.add_argument("--verbose", action="store_true", help="Imprime cada stop.")
+    p.add_argument("--timestamp-is-close", action=argparse.BooleanOptionalAction, default=None,
+                   help=f"Indica que el timestamp de 1m es cierre, no apertura (default: {d.timestamp_is_close}).")
     p.add_argument("--output-dir", default=None)
     p.add_argument("--plot", default=None, metavar="PATH",
                    help="Ruta del gráfico de equity. Por defecto equity_curve.png "
@@ -1119,6 +1200,7 @@ def make_config(args) -> Config:
         slippage_bps=args.slippage_bps,
         stop_loss_pct=args.stop_loss_pct,
         force_close_at_end=not args.no_force_close,
+        timestamp_is_close=(Config().timestamp_is_close if args.timestamp_is_close is None else args.timestamp_is_close),
         **overrides,
     )
 
