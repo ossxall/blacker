@@ -36,7 +36,7 @@ Fidelidad: EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False),
 equivalentes a la recursión original (seed = primer valor, sin SMA; ADX
 visible desde la vela dilen + adxlen - 2).
 
-Dependencias:  pip install "pandas>=2" pyarrow numpy
+Dependencias:  pip install "pandas>=2" pyarrow numpy matplotlib
 
 Ejemplo:
     python backtest_strategy1_improved.py data.parquet --capital 100000 \
@@ -907,6 +907,74 @@ def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capita
     }
 
 
+def equity_curve_from_trades(trades: pd.DataFrame, initial_capital: float) -> pd.DataFrame:
+    """Curva de equity reconstruida desde los trades (un punto por cierre)."""
+    columns = ["timestamp", "trade_id", "pnl_net", "cum_pnl", "equity"]
+    if trades.empty or "exit_time" not in trades.columns:
+        return pd.DataFrame(columns=columns)
+
+    df = trades.sort_values(["exit_time", "trade_id"], kind="stable").copy()
+    df["cum_pnl"] = df["pnl_net"].astype(float).cumsum()
+    df["equity"] = initial_capital + df["cum_pnl"]
+    out = df[["trade_id", "exit_time", "pnl_net", "cum_pnl", "equity"]].rename(
+        columns={"exit_time": "timestamp"}
+    )
+    return out.reset_index(drop=True)[columns]
+
+
+def plot_equity(curve: pd.DataFrame, output_path: str | Path, initial_capital: float,
+                title: str = "Equity curve", dpi: int = 150) -> Optional[Path]:
+    """Guarda un gráfico de línea de la curva de equity. Devuelve None si no hay datos."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # matplotlib ausente o sin backend
+        print(f"[PLOT] matplotlib no disponible ({exc}); se omite el gráfico.", flush=True)
+        return None
+
+    if curve.empty:
+        print("[PLOT] No hay trades: no se genera la curva de equity.", flush=True)
+        return None
+
+    out = Path(output_path)
+    if out.parent != Path(""):
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+    x = pd.to_datetime(curve["timestamp"], utc=True)
+    equity = curve["equity"].to_numpy(float)
+    pnl = curve["pnl_net"].to_numpy(float)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(x, equity, color="#1f77b4", linewidth=1.4, label="Equity")
+    ax.scatter(x[pnl >= 0], equity[pnl >= 0], s=14, color="#2ca02c",
+               alpha=0.7, zorder=3, label="Cerrar ganadora")
+    ax.scatter(x[pnl < 0], equity[pnl < 0], s=14, color="#d62728",
+               alpha=0.7, zorder=3, label="Cerrar perdedora")
+    ax.axhline(initial_capital, color="grey", linestyle="--", linewidth=0.9,
+               label=f"Capital inicial ({initial_capital:,.2f})")
+
+    peak = np.maximum.accumulate(equity)
+    dd = (equity / peak - 1.0) * 100.0
+    dd_text = f" | max DD {dd.min():.2f}%" if len(dd) else ""
+
+    ax.set_title(f"{title} | {len(curve):,} cierres{dd_text}")
+    ax.set_xlabel("Fecha (UTC)")
+    ax.set_ylabel("Equity")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(out, dpi=dpi)
+    plt.close(fig)
+    print(f"[PLOT] Curva de equity guardada en: {out}", flush=True)
+    return out
+
+
 def _fmt(v, spec=".3f"):
     return "N/A" if v is None else format(v, spec)
 
@@ -976,6 +1044,11 @@ def parse_args():
                    help="Fecha (YYYY-MM-DD) para separar el reporte antes/después.")
     p.add_argument("--verbose", action="store_true", help="Imprime cada stop.")
     p.add_argument("--output-dir", default=None)
+    p.add_argument("--plot", default=None, metavar="PATH",
+                   help="Ruta del gráfico de equity. Por defecto equity_curve.png "
+                        "en --output-dir o en el directorio actual.")
+    p.add_argument("--no-plot", action="store_true", help="No genera el gráfico de equity.")
+    p.add_argument("--plot-dpi", type=int, default=150)
 
     # Parámetros improved: default None = usa el valor de Config.
     for key in CLI_KEYS:
@@ -1030,17 +1103,31 @@ def main():
     if args.oos_start:
         print_oos_split(trades, args.oos_start)
 
+    curve = equity_curve_from_trades(trades, cfg.initial_capital)
+
     if args.output_dir:
         out = Path(args.output_dir)
         out.mkdir(parents=True, exist_ok=True)
         trades.to_csv(out / "trades.csv", index=False)
         positions_from_trades(trades).to_csv(out / "positions.csv", index=False)
         equity.to_csv(out / "equity.csv", index=False)
+        curve.to_csv(out / "equity_curve.csv", index=False)
         with open(out / "metrics.json", "w", encoding="utf-8") as f:
             json.dump(_jsonable(metrics), f, indent=2)
         with open(out / "config.json", "w", encoding="utf-8") as f:
             json.dump(asdict(cfg), f, indent=2)
         print(f"\nResultados guardados en: {out.resolve()}")
+
+    if not args.no_plot:
+        plot_path = args.plot or str(Path(args.output_dir or ".") / "equity_curve.png")
+        plot_equity(
+            curve,
+            plot_path,
+            cfg.initial_capital,
+            title=f"Strategy1 improved | {metrics['initial_capital']:,.2f} -> "
+                  f"{metrics['final_equity']:,.2f}",
+            dpi=args.plot_dpi,
+        )
 
 
 if __name__ == "__main__":
