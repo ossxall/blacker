@@ -69,23 +69,23 @@ class Config:
 
     adx_dilen: int = 14
     adx_len: int = 14
-    adx_threshold: float = 26.0
+    adx_threshold: float = 23.0
     atr_len: int = 14
 
-    scale_out_fraction: float = 0.1
+    scale_out_fraction: float = 0.9
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
 
     # Stop fijo de respaldo (si no hay ATR disponible) y para el cálculo base.
-    stop_loss_pct: float = 0.005
+    stop_loss_pct: float = 0.006
     force_close_at_end: bool = True
 
     # --- parámetros de la versión improved ---
     risk_pct: float = 0.005              # riesgo por operación (fracción del capital)
     max_leverage: float = 3.0
-    atr_stop_mult: float = 2.0          # stop = k * ATR(15m)
+    atr_stop_mult: float = 2.5          # stop = k * ATR(15m)
     atr_stop_min_pct: float = 0.004     # tope inferior del stop (fracción)
     atr_stop_max_pct: float = 0.015     # tope superior del stop (fracción)
     trail_atr_mult: float = 2.5         # trailing tras el scale-out (0 = off)
