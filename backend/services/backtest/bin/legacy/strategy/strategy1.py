@@ -18,7 +18,7 @@ Valores default reales (compatibilidad con la versión existente):
     - ADX 14/14, umbral 25.
     - Riesgo 1% del capital, apalancamiento máximo 1x.
     - Stop 3.0 x ATR(14) de 15m, acotado entre 0.4% y 1.5%.
-    - Scale-out 50% y trailing 2.5 x ATR(15m) sobre el resto.
+    - Cierre parcial 50% de la posición RESTANTE ante contra-señal 30m; sin trailing.
     - Cooldown 0 min; ADX máximo 40 y ADX creciente.
     - Gap mínimo EMA 1H 0.1%; rango mínimo 1m 0.5 ATR.
 
@@ -30,18 +30,16 @@ Arquitectura reutilizable:
 Salidas:
     Stop inicial (ATR)      -> cierre total.
     1H contra la posición   -> cierre total.
-    30m contra la posición  -> scale-out parcial (50%) y el stop del resto
-                               sube a breakeven; después rige el trailing.
+    30m contra la posición  -> cierre parcial configurable de la posición restante.
+    Cualquier cierre        -> cada ejecución se registra como Trade independiente.
 
 Convención anti-lookahead:
     Las señales usan solo velas cerradas y se ejecutan en la apertura de la
-    siguiente vela 1m. El trailing se actualiza al cierre de cada vela y rige
-    desde la siguiente. Si hay gap a través del stop, el fill es el open.
+    siguiente vela 1m. Si hay gap a través del stop, el fill es el open.
 
 Fidelidad: EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False).
 Las velas HTF incompletas se excluyen y solo se usan HTF cerradas en la
-decisión 1m. El trailing se actualiza una sola vez al cierre de la vela y
-solo puede afectar a la vela siguiente. Si OHLC 1m no permite conocer el
+decisión 1m. Si OHLC 1m no permite conocer el
 orden intrabar, el motor aplica la hipótesis conservadora de stop primero.
 
 Dependencias:  pip install "pandas>=2" pyarrow numpy matplotlib
@@ -52,12 +50,12 @@ Ejemplo:
         --output-dir ./backtest_out
 
 Salidas en disco (por defecto en ./backtest_out, o en --output-dir):
-    trades.csv        un tramo por cierre (incluye scale-out y resto)
+    trades.csv        una ejecución por cierre (parcial o total)
     report.json       reporte completo: dataset, config, métricas, por lado,
                       por motivo de cierre y split in-sample/out-of-sample
     metrics.json      solo métricas (compatibilidad)
     config.json       parámetros efectivos de la corrida
-    positions.csv     una fila por posición (tramos agregados)
+    positions.csv     una fila por posición (ejecuciones agregadas)
     equity_curve.csv  equity reconstruida, un punto por cierre
     equity.csv        marca a cada vela 1m (opcional: --equity-csv, es pesado)
     equity_curve.png  gráfico de la curva de equity (--no-plot lo desactiva)
@@ -92,7 +90,7 @@ class Config:
     adx_threshold: float = 25.0
     atr_len: int = 14
 
-    scale_out_fraction: float = 0.5
+    close_on_30m_pct: float = 50.0  # % de la posición RESTANTE a cerrar ante contra-señal 30m
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
@@ -108,7 +106,6 @@ class Config:
     atr_stop_mult: float = 3.0          # stop = k * ATR(15m)
     atr_stop_min_pct: float = 0.004     # tope inferior del stop (fracción)
     atr_stop_max_pct: float = 0.015     # tope superior del stop (fracción)
-    trail_atr_mult: float = 2.5         # trailing tras el scale-out (0 = off)
     cooldown_min: int = 0              # minutos sin entrar tras un stop inicial
     adx_max: float = 40.0               # techo de ADX 1H (0 = off)
     adx_rising: bool = True             # ADX 1H > ADX de la vela 1H previa
@@ -128,17 +125,14 @@ class Config:
             raise ValueError("initial_capital debe ser > 0.")
         if self.commission_bps < 0 or self.slippage_bps < 0:
             raise ValueError("commission_bps y slippage_bps no pueden ser negativos.")
-        if not (0.0 < self.scale_out_fraction < 1.0):
-            raise ValueError(
-                "scale_out_fraction debe estar estrictamente entre 0 y 1 "
-                f"(recibido: {self.scale_out_fraction})."
-            )
+        if not (0.0 < self.close_on_30m_pct <= 100.0):
+            raise ValueError("close_on_30m_pct debe estar entre 0 y 100.")
         if not (0.0 < self.risk_pct <= 0.2):
             raise ValueError("risk_pct debe estar entre 0 (excl.) y 0.2.")
         if self.max_leverage <= 0:
             raise ValueError("max_leverage debe ser > 0.")
-        if self.atr_stop_mult < 0 or self.trail_atr_mult < 0:
-            raise ValueError("Los multiplicadores de ATR no pueden ser negativos.")
+        if self.atr_stop_mult < 0:
+            raise ValueError("atr_stop_mult no puede ser negativo.")
         if self.atr_stop_min_pct < 0 or self.atr_stop_max_pct < 0:
             raise ValueError("Los límites de stop ATR no pueden ser negativos.")
         if self.atr_stop_min_pct > self.atr_stop_max_pct:
@@ -163,7 +157,7 @@ class Config:
 # Parámetros expuestos por CLI (default None = usa el valor de Config).
 CLI_KEYS = [
     "risk_pct", "max_leverage", "atr_stop_mult", "atr_stop_min_pct",
-    "atr_stop_max_pct", "trail_atr_mult", "cooldown_min", "adx_max",
+    "atr_stop_max_pct", "cooldown_min", "adx_max",
     "adx_rising", "min_ema_gap_1h_pct", "min_trigger_range_atr",
     "block_hours_utc",
 ]
@@ -183,12 +177,6 @@ class Position:
     stop_pct: float            # stop inicial efectivo (fracción)
     risk_amount: float         # riesgo económico estimado al stop, incl. fees
     stop_price_estimate: float # nivel teórico del stop inicial
-
-    stop_at_entry: bool = False        # stop en breakeven tras scale-out
-    trailing: bool = False             # trailing activo (tras scale-out)
-    extreme: Optional[float] = None    # extremo observado tras activar trailing
-    trail_level: Optional[float] = None # nivel calculado al cierre, usable desde i+1
-    trailing_activated_at: Optional[pd.Timestamp] = None
 
 
 @dataclass
@@ -683,19 +671,23 @@ class Strategy1Backtester:
             stop_price_estimate=stop_price,
         )
 
-    def _close_fraction(
-        self,
-        fraction: float,
-        price: float,
-        time: pd.Timestamp,
-        reason: str,
-        move_stop_to_entry: bool = False,
-    ):
+    def close_position(self, percent: float, price: float, time: pd.Timestamp, reason: str):
+        """Cierra un porcentaje de la POSICIÓN ACTUAL, al estilo Binance Futures.
+
+        `percent` se aplica siempre sobre la cantidad actualmente abierta.
+        Ejemplo: abrir 1.0 BTC -> cerrar 73% => quedan 0.27 BTC; cerrar 25%
+        después => se cierra 0.0675 BTC y quedan 0.2025 BTC.
+
+        Cada ejecución de reducción queda registrada como un Trade independiente.
+        Un cierre del 100% deja la posición completamente cerrada.
+        """
         pos = self.position
         if pos is None:
             return
+        if not np.isfinite(percent) or percent <= 0 or percent > 100:
+            raise ValueError("percent debe estar entre 0 y 100.")
 
-        fraction = min(max(float(fraction), 0.0), 1.0)
+        fraction = float(percent) / 100.0
         qty = pos.quantity * fraction
         if qty <= 0:
             return
@@ -711,7 +703,7 @@ class Strategy1Backtester:
         self.cash += gross - exit_fee
 
         self.trade_counter += 1
-        notional_entry = pos.entry_price * qty + entry_fee_alloc
+        notional_entry = pos.entry_price * qty
         return_pct = pnl_net / notional_entry * 100.0 if notional_entry != 0 else 0.0
 
         self.trades.append(Trade(
@@ -732,94 +724,48 @@ class Strategy1Backtester:
         ))
 
         remaining = pos.quantity - qty
-        if remaining <= max(1e-12, pos.initial_quantity * 1e-12):
+        eps = max(1e-12, pos.initial_quantity * 1e-12)
+        if fraction >= 1.0 or remaining <= eps:
             self.position = None
         else:
             pos.quantity = remaining
             pos.entry_fee -= entry_fee_alloc
-            if move_stop_to_entry:
-                pos.stop_at_entry = True
-                if self.cfg.trail_atr_mult > 0:
-                    # El scale-out ocurre en la apertura; la primera actualización
-                    # del trailing usa el cierre de esta vela y rige desde i+1.
-                    pos.trailing = True
-                    pos.extreme = None
-                    pos.trail_level = None
-                    pos.trailing_activated_at = time
+
+    def _close_fraction(self, fraction: float, price: float, time: pd.Timestamp, reason: str):
+        """Compatibilidad interna: fraction=0.73 significa cerrar 73% de lo restante."""
+        self.close_position(float(fraction) * 100.0, price, time, reason)
 
     def _check_stop_loss(self, i: int) -> Optional[str]:
-        """
-        Stop intrabar contra el OHLC de la vela 1m. Niveles:
-          inicial   : entrada -/+ stop_pct
-          breakeven : entrada (tras scale-out)
-          trailing  : el más ajustado entre breakeven y el trailing
-        Gap: si la vela abre más allá del nivel, el fill es el open.
-        Devuelve la etiqueta del cierre, o None si no se tocó.
-        """
+        """Stop inicial fijo. No existe trailing ni movimiento automático del stop."""
         pos = self.position
-        if pos is None:
-            return None
-
-        at_entry = pos.stop_at_entry
-        pct = pos.stop_pct
-        if not at_entry and pct <= 0:
+        if pos is None or pos.stop_pct <= 0:
             return None
 
         bo, bh, bl = self.o[i], self.h[i], self.l[i]
         e = pos.entry_price
         side = pos.side
-        trail_binding = False
 
         if side == 1:
-            stop = e if at_entry else e * (1.0 - pct)
-            if pos.trail_level is not None and pos.trail_level > stop:
-                stop = pos.trail_level
-                trail_binding = True
+            stop = e * (1.0 - pos.stop_pct)
             if bl > stop:
                 return None
             fill = bo if bo <= stop else stop
         else:
-            stop = e if at_entry else e * (1.0 + pct)
-            if pos.trail_level is not None and pos.trail_level < stop:
-                stop = pos.trail_level
-                trail_binding = True
+            stop = e * (1.0 + pos.stop_pct)
             if bh < stop:
                 return None
             fill = bo if bo >= stop else stop
 
-        if trail_binding:
-            reason = "TRAIL_STOP"
-        elif at_entry:
-            reason = "BREAKEVEN"
-        else:
-            reason = f"STOP_LOSS_{pct * 100:.2f}%"
-
+        reason = f"STOP_LOSS_{pos.stop_pct * 100:.2f}%"
         qty_before = pos.quantity
-        self._close_fraction(1.0, fill, self.times[i], reason)
+        self.close_position(100.0, fill, self.times[i], reason)
         if self.verbose:
             print(
                 f"[STOP] {self.times[i]} | {'LONG' if side == 1 else 'SHORT'} | "
                 f"entrada={e:.8f} | stop={stop:.8f} | fill={fill:.8f} | "
-                f"qty={qty_before} | {reason}",
-                flush=True,
+                f"qty={qty_before} | {reason}", flush=True
             )
         return reason
-
-    def _update_trailing(self, i: int):
-        """Actualiza el trailing con la vela ya cerrada; rige desde la siguiente."""
-        pos = self.position
-        mult = self.cfg.trail_atr_mult
-        atr = self.sig["atr15"][i]
-        if pos is None or not pos.trailing or mult <= 0 or not np.isfinite(atr):
-            return
-        if pos.side == 1:
-            pos.extreme = self.h[i] if pos.extreme is None else max(pos.extreme, self.h[i])
-            cand = pos.extreme - mult * atr
-            pos.trail_level = cand if pos.trail_level is None else max(pos.trail_level, cand)
-        else:
-            pos.extreme = self.l[i] if pos.extreme is None else min(pos.extreme, self.l[i])
-            cand = pos.extreme + mult * atr
-            pos.trail_level = cand if pos.trail_level is None else min(pos.trail_level, cand)
 
     def _execute_pending(self, i: int):
         sig = self.pending_signal
@@ -833,10 +779,7 @@ class Strategy1Backtester:
         elif sig["action"] == "SELL":
             self._open(-1, bar_open, ts, sig["stop_pct"])
         elif sig["action"] == "EXIT":
-            self._close_fraction(
-                float(sig["fraction"]), bar_open, ts, sig["reason"],
-                move_stop_to_entry=bool(sig.get("move_stop_to_entry", False)),
-            )
+            self.close_position(float(sig["percent"]), bar_open, ts, sig["reason"])
 
     # -------------------------- equity --------------------------
 
@@ -887,26 +830,21 @@ class Strategy1Backtester:
                 cooldown_until = self.times[i] + pd.Timedelta(minutes=1 + cfg.cooldown_min)
 
 
-            # 3) Trailing con la vela ya cerrada (rige desde la siguiente).
-            if self.position is not None and self.position.trailing:
-                self._update_trailing(i)
-
-            # 4) Señal al cierre de esta vela, a ejecutar en la próxima apertura.
+            # 3) Señal al cierre de esta vela, a ejecutar en la próxima apertura.
             new_sig = None
             if not stop_hit and valid[i]:
                 pos = self.position
                 if pos is not None:
                     side = pos.side
                     if (side == 1 and bear1h[i]) or (side == -1 and bull1h[i]):
-                        new_sig = {"action": "EXIT", "fraction": 1.0, "reason": "1H_REVERSAL"}
+                        new_sig = {"action": "EXIT", "percent": 100.0, "reason": "1H_REVERSAL"}
                     elif pos.quantity >= pos.initial_quantity - 1e-12 and (
                         (side == 1 and bear30[i]) or (side == -1 and bull30[i])
                     ):
                         new_sig = {
                             "action": "EXIT",
-                            "fraction": cfg.scale_out_fraction,
-                            "reason": "30M_SCALE_OUT",
-                            "move_stop_to_entry": True,
+                            "percent": cfg.close_on_30m_pct,
+                            "reason": "30M_PARTIAL_CLOSE",
                         }
                 elif cooldown_until is None or self.times[i] >= cooldown_until:
                     if entry_long[i]:
@@ -933,7 +871,7 @@ class Strategy1Backtester:
 
         if self.position is not None and cfg.force_close_at_end:
             last_ts = self.times[-1] + one_min
-            self._close_fraction(1.0, self.c[-1], last_ts, "END_OF_DATA")
+            self.close_position(100.0, self.c[-1], last_ts, "END_OF_DATA")
             self._mark(last_ts, self.c[-1])
 
         trades = (
@@ -1189,8 +1127,7 @@ def print_report(m: dict, cfg: Config, data: pd.DataFrame):
     print(f"Costos          : {cfg.commission_bps} bps comisión | {cfg.slippage_bps} bps slippage")
     print(f"Sizing / stop   : riesgo {cfg.risk_pct:.2%} (lev máx {cfg.max_leverage}x) / "
           f"{cfg.atr_stop_mult}xATR15m [{cfg.atr_stop_min_pct:.2%}-{cfg.atr_stop_max_pct:.2%}]")
-    print(f"Trailing        : {cfg.trail_atr_mult}xATR15m" if cfg.trail_atr_mult > 0
-          else "Trailing        : desactivado")
+    print("Trailing        : OFF (eliminado)")
     print(f"Filtros         : cooldown={cfg.cooldown_min}m adx_max={cfg.adx_max} "
           f"adx_rising={cfg.adx_rising} gap1h={cfg.min_ema_gap_1h_pct} "
           f"rango1m={cfg.min_trigger_range_atr}xATR horas_bloq={cfg.block_hours_utc or '-'}")
@@ -1346,7 +1283,7 @@ def parse_args():
     )
     p.add_argument("parquet", help="Ruta al dataset .parquet")
     p.add_argument("--capital", type=float, default=d.initial_capital)
-    p.add_argument("--scale-out", type=float, default=d.scale_out_fraction)
+    p.add_argument("--close-on-30m", type=float, default=d.close_on_30m_pct, help="Porcentaje de la posición RESTANTE a cerrar ante contra-señal 30m (0-100).")
     p.add_argument("--adx-threshold", type=float, default=d.adx_threshold)
     p.add_argument("--commission-bps", type=float, default=d.commission_bps)
     p.add_argument("--slippage-bps", type=float, default=d.slippage_bps)
@@ -1387,7 +1324,7 @@ def make_config(args) -> Config:
     overrides = {k: getattr(args, k) for k in CLI_KEYS if getattr(args, k) is not None}
     return Config(
         initial_capital=args.capital,
-        scale_out_fraction=args.scale_out,
+        close_on_30m_pct=args.close_on_30m,
         adx_threshold=args.adx_threshold,
         commission_bps=args.commission_bps,
         slippage_bps=args.slippage_bps,
