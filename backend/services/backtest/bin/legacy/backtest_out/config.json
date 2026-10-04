@@ -5,7 +5,7 @@
   "adx_len": 14,
   "adx_threshold": 25.0,
   "atr_len": 14,
-  "close_on_30m_pct": 50.0,
+  "close_on_30m_pct": 25.0,
   "initial_capital": 10000.0,
   "commission_bps": 0.0,
   "slippage_bps": 0.0,
