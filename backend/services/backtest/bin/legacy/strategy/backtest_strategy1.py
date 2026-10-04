@@ -64,7 +64,7 @@ import pandas as pd
 
 @dataclass
 class Config:
-    ema_fast: int = 20
+    ema_fast: int = 21
     ema_slow: int = 55
 
     adx_dilen: int = 14
