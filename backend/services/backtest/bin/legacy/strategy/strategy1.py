@@ -144,7 +144,7 @@ class Config:
     exit_rsi_len: int = 14
 
     # LONG: salida si RSI >= nivel
-    exit_rsi_long: float = 70.0
+    exit_rsi_long: float = 100.0
 
     # SHORT: salida si RSI <= nivel
     exit_rsi_short: float = 30.0
