@@ -93,7 +93,7 @@ class Config:
     adx_max: float = 40.0               # techo de ADX 1H (0 = off)
     adx_rising: bool = True             # ADX 1H > ADX de la vela 1H previa
     min_ema_gap_1h_pct: float = 0.001  # |EMA20-EMA50|/EMA50 mínimo en 1H
-    min_trigger_range_atr: float = 0.5  # rango mínimo de la vela 1m en ATR(1m)
+    min_trigger_range_atr: float = 0.0  # rango mínimo de la vela 1m en ATR(1m)
     block_hours_utc: str = ""           # horas UTC sin entradas, p.ej. "0,1,2"
 
     def __post_init__(self):
