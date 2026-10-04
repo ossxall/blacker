@@ -6,25 +6,25 @@ Backtesting Strategy1 — IMPROVED
 Dataset de entrada: OHLCV de 1 minuto en .parquet.
 
 Reglas de la estrategia (Strategy1, sin cambios):
-    1H  -> tendencia: EMA20/EMA50 + ADX14 >= 25 + DI
-    30m -> confirmación: EMA20 vs EMA50
-    15m -> pullback: estructura + cierre contra EMA20
-    5m  -> setup: EMA20 vs EMA50
-    1m  -> trigger: estructura + cierre sobre/bajo EMA20 +
+    1H  -> tendencia: EMA21/EMA55 + ADX14 >= 25 + DI
+    30m -> confirmación: EMA21 vs EMA55
+    15m -> pullback: EMA21/EMA55 + cierre contra EMA21
+    5m  -> setup: EMA21 vs EMA55
+    1m  -> trigger: EMA21/EMA55 + cierre sobre/bajo EMA21 +
            ruptura del máximo/mínimo de la vela anterior
 
 Valores default reales (compatibilidad con la versión existente):
     - EMA 21/55 en todos los timeframes.
-    - ADX 14/14, umbral 23.
+    - ADX 14/14, umbral 25.
     - Riesgo 1% del capital, apalancamiento máximo 1x.
     - Stop 3.0 x ATR(14) de 15m, acotado entre 0.4% y 1.5%.
-    - Scale-out 99% y trailing 2.5 x ATR(15m) sobre el resto.
+    - Scale-out 50% y trailing 2.5 x ATR(15m) sobre el resto.
     - Cooldown 0 min; ADX máximo 40 y ADX creciente.
-    - Gap mínimo EMA 1H 0.1%; rango mínimo 1m 0 ATR.
+    - Gap mínimo EMA 1H 0.1%; rango mínimo 1m 0.5 ATR.
 
 Arquitectura reutilizable:
-    Config -> DataFeed -> FeatureBuilder -> SignalEngine -> ExecutionEngine
-    -> Portfolio/Equity -> Metrics. Los bots posteriores pueden sustituir
+    Config -> DataFeed -> FeatureBuilder -> SignalEngine -> Backtester
+    -> Equity -> Metrics. Los bots posteriores pueden sustituir
     SignalEngine sin duplicar carga, indicadores, ejecución o reporting.
 
 Salidas:
@@ -38,9 +38,11 @@ Convención anti-lookahead:
     siguiente vela 1m. El trailing se actualiza al cierre de cada vela y rige
     desde la siguiente. Si hay gap a través del stop, el fill es el open.
 
-Fidelidad: EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False),
-equivalentes a la recursión original (seed = primer valor, sin SMA; ADX
-visible desde la vela dilen + adxlen - 2).
+Fidelidad: EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False).
+Las velas HTF incompletas se excluyen y solo se usan HTF cerradas en la
+decisión 1m. El trailing se actualiza una sola vez al cierre de la vela y
+solo puede afectar a la vela siguiente. Si OHLC 1m no permite conocer el
+orden intrabar, el motor aplica la hipótesis conservadora de stop primero.
 
 Dependencias:  pip install "pandas>=2" pyarrow numpy matplotlib
 
@@ -179,12 +181,14 @@ class Position:
     entry_time: pd.Timestamp
     entry_fee: float
     stop_pct: float            # stop inicial efectivo (fracción)
-    risk_amount: float         # capital en riesgo al abrir (qty*entry*stop_pct)
+    risk_amount: float         # riesgo económico estimado al stop, incl. fees
+    stop_price_estimate: float # nivel teórico del stop inicial
 
     stop_at_entry: bool = False        # stop en breakeven tras scale-out
     trailing: bool = False             # trailing activo (tras scale-out)
-    extreme: Optional[float] = None    # máx (long) / mín (short) desde el scale-out
-    trail_level: Optional[float] = None
+    extreme: Optional[float] = None    # extremo observado tras activar trailing
+    trail_level: Optional[float] = None # nivel calculado al cierre, usable desde i+1
+    trailing_activated_at: Optional[pd.Timestamp] = None
 
 
 @dataclass
@@ -393,70 +397,84 @@ def adx_vec(bars: pd.DataFrame, dilen: int = 14, adxlen: int = 14) -> pd.DataFra
 # ---------------------------------------------------------------------------
 
 def _map_tf(
-    data: pd.DataFrame,
+    source_1m_open: pd.DataFrame,
     rule: str,
     cfg: Config,
     decision_ns: np.ndarray,
     adx: bool = False,
     atr: bool = False,
 ) -> dict:
-    """Calcula HTF y proyecta exclusivamente velas ya cerradas.
+    """Proyecta exclusivamente HTF cerradas y completas al instante de decisión."""
+    bars = resample_ohlcv(source_1m_open, rule)
+    expected = {"5min": 5, "15min": 15, "30min": 30, "1h": 60}[rule]
+    counts = source_1m_open["close"].resample(
+        rule, label="left", closed="left", origin="start_day"
+    ).count().reindex(bars.index, fill_value=0).to_numpy()
+    complete = counts == expected
 
-    `decision_ns` representa el instante en que la vela 1m queda cerrada.
-    La regla es deliberadamente conservadora: una HTF solo entra en una
-    decisión si su timestamp de cierre es <= al instante de decisión.
-    """
-    bars = resample_ohlcv(data, rule)
     ends = _ns(bars.index + pd.Timedelta(rule))
     pos = np.searchsorted(ends, decision_ns, side="right") - 1
     ok = pos >= 0
     j = np.where(ok, pos, 0)
+    ok &= complete[j]
 
     ef = ema_closed(bars["close"], cfg.ema_fast).to_numpy()
     es = ema_closed(bars["close"], cfg.ema_slow).to_numpy()
+    close = bars["close"].to_numpy(float)
     out = {
         "ok": ok,
-        "close": bars["close"].to_numpy(float)[j],
-        "ef": ef[j],
-        "es": es[j],
+        "close": np.where(ok, close[j], np.nan),
+        "ef": np.where(ok, ef[j], np.nan),
+        "es": np.where(ok, es[j], np.nan),
     }
     if adx:
         a = adx_vec(bars, cfg.adx_dilen, cfg.adx_len)
-        out["adx"] = a["adx"].to_numpy()[j]
-        out["adx_prev"] = a["adx"].shift(1).to_numpy()[j]
-        out["plus_di"] = a["plus_di"].to_numpy()[j]
-        out["minus_di"] = a["minus_di"].to_numpy()[j]
+        adx_arr = a["adx"].to_numpy()
+        plus_arr = a["plus_di"].to_numpy()
+        minus_arr = a["minus_di"].to_numpy()
+        out["adx"] = np.where(ok, adx_arr[j], np.nan)
+        prev = np.r_[np.nan, adx_arr[:-1]]
+        out["adx_prev"] = np.where(ok, prev[j], np.nan)
+        out["plus_di"] = np.where(ok, plus_arr[j], np.nan)
+        out["minus_di"] = np.where(ok, minus_arr[j], np.nan)
     if atr:
-        out["atr"] = atr_vec(bars, cfg.atr_len)[j]
+        atr_arr = atr_vec(bars, cfg.atr_len)
+        out["atr"] = np.where(ok, atr_arr[j], np.nan)
     return out
 
 
 def build_features(data: pd.DataFrame, cfg: Config) -> dict:
-    """Indicadores alineados al instante real de decisión de cada vela 1m.
-
-    Por defecto el dataset usa timestamps de apertura, por lo que se suma un
-    minuto para obtener el cierre. Si el proveedor entrega timestamps de cierre,
-    `timestamp_is_close=True` evita el desplazamiento y, por tanto, el lookahead.
-    """
+    """Construye features sin lookahead; internamente 1m usa timestamps de apertura."""
     n = len(data)
-    decision_ns = _ns(data.index) if cfg.timestamp_is_close else _ns(data.index + pd.Timedelta(minutes=1))
+    if cfg.timestamp_is_close:
+        open_index = data.index - pd.Timedelta(minutes=1)
+        decision_ns = _ns(data.index)
+    else:
+        open_index = data.index
+        decision_ns = _ns(data.index + pd.Timedelta(minutes=1))
+
+    source_1m_open = data.copy()
+    source_1m_open.index = open_index
+    source_1m_open = source_1m_open.sort_index()
 
     feats = {
         "decision_ns": decision_ns,
-        "1h": _map_tf(data, "1h", cfg, decision_ns, adx=True),
-        "30m": _map_tf(data, "30min", cfg, decision_ns),
-        "15m": _map_tf(data, "15min", cfg, decision_ns, atr=True),
-        "5m": _map_tf(data, "5min", cfg, decision_ns),
+        "1h": _map_tf(source_1m_open, "1h", cfg, decision_ns, adx=True),
+        "30m": _map_tf(source_1m_open, "30min", cfg, decision_ns),
+        "15m": _map_tf(source_1m_open, "15min", cfg, decision_ns, atr=True),
+        "5m": _map_tf(source_1m_open, "5min", cfg, decision_ns),
     }
     c1 = data["close"]
+    high = data["high"].to_numpy(float)
+    low = data["low"].to_numpy(float)
     feats["1m"] = {
         "ef": ema_closed(c1, cfg.ema_fast).to_numpy(),
         "es": ema_closed(c1, cfg.ema_slow).to_numpy(),
         "close": c1.to_numpy(float),
-        "high": data["high"].to_numpy(float),
-        "low": data["low"].to_numpy(float),
-        "prev_high": np.r_[np.nan, data["high"].to_numpy(float)[:-1]],
-        "prev_low": np.r_[np.nan, data["low"].to_numpy(float)[:-1]],
+        "high": high,
+        "low": low,
+        "prev_high": np.r_[np.nan, high[:-1]],
+        "prev_low": np.r_[np.nan, low[:-1]],
         "atr": atr_vec(data, cfg.atr_len),
     }
     feats["n"] = n
@@ -510,7 +528,9 @@ def build_signals(f: dict, cfg: Config) -> dict:
     # Una señal solo es válida si todos los timeframes tienen estado completo.
     valid = (
         h1["ok"] & m30["ok"] & m15["ok"] & m5["ok"]
-        & np.isfinite(h1["adx"]) & np.isfinite(h1["plus_di"]) & np.isfinite(h1["minus_di"])
+        & np.isfinite(h1["adx"]) & np.isfinite(h1["adx_prev"])
+        & np.isfinite(h1["plus_di"]) & np.isfinite(h1["minus_di"])
+        & np.isfinite(m15["atr"]) & np.isfinite(m1["atr"])
         & (np.arange(n) >= 1)
     )
 
@@ -610,34 +630,46 @@ class Strategy1Backtester:
         return abs(notional) * self.cfg.commission_bps / 10_000.0
 
     def _stop_pct_for(self, i: int, ref_price: float) -> float:
-        """Stop inicial efectivo: k*ATR(15m) acotado (o el fijo de respaldo)."""
+        """Stop inicial efectivo: k*ATR(15m) acotado o fallback fijo."""
         cfg = self.cfg
-        if cfg.atr_stop_mult > 0:
-            atr = self.sig["atr15"][i]
-            if np.isfinite(atr) and ref_price > 0:
-                pct = cfg.atr_stop_mult * atr / ref_price
-                return min(max(pct, cfg.atr_stop_min_pct), cfg.atr_stop_max_pct)
+        atr = self.sig["atr15"][i]
+        if cfg.atr_stop_mult > 0 and np.isfinite(atr) and ref_price > 0:
+            pct = cfg.atr_stop_mult * atr / ref_price
+            return min(max(pct, cfg.atr_stop_min_pct), cfg.atr_stop_max_pct)
         return cfg.stop_loss_pct
 
-    # -------------------------- ejecución --------------------------
+    def _initial_stop_price(self, side: int, entry_price: float, stop_pct: float) -> float:
+        return entry_price * (1.0 - stop_pct) if side == 1 else entry_price * (1.0 + stop_pct)
+
+    def _estimated_stop_risk_per_unit(self, side: int, entry_price: float, stop_pct: float) -> float:
+        """Riesgo por unidad hasta el stop, incluyendo comisión ida/vuelta y slippage."""
+        stop_price = self._initial_stop_price(side, entry_price, stop_pct)
+        stop_exec = self._execution_price(stop_price, -side)
+        price_loss = abs(stop_exec - entry_price)
+        fee_rate = self.cfg.commission_bps / 10_000.0
+        return price_loss + (entry_price + abs(stop_exec)) * fee_rate
 
     def _open(self, side: int, price: float, time: pd.Timestamp, stop_pct: float):
         if self.position is not None:
             return
         cfg = self.cfg
         exec_price = self._execution_price(price, side)
-
-        if stop_pct <= 0 or self.cash <= 0:
+        if stop_pct <= 0 or self.cash <= 0 or not np.isfinite(exec_price) or exec_price <= 0:
             return
-        # Tamaño por riesgo, con tope de apalancamiento.
-        qty = self.cash * cfg.risk_pct / (exec_price * stop_pct)
-        qty = min(qty, self.cash * cfg.max_leverage / exec_price)
+
+        risk_per_unit = self._estimated_stop_risk_per_unit(side, exec_price, stop_pct)
+        if risk_per_unit <= 0:
+            return
+        qty_by_risk = self.cash * cfg.risk_pct / risk_per_unit
+        qty_by_leverage = self.cash * cfg.max_leverage / exec_price
+        qty = min(qty_by_risk, qty_by_leverage)
         if qty <= 0:
             return
 
         fee = self._fee(exec_price * qty)
         self.cash -= fee
         self.position_counter += 1
+        stop_price = self._initial_stop_price(side, exec_price, stop_pct)
         self.position = Position(
             position_id=self.position_counter,
             side=side,
@@ -647,7 +679,8 @@ class Strategy1Backtester:
             entry_time=time,
             entry_fee=fee,
             stop_pct=stop_pct,
-            risk_amount=qty * exec_price * stop_pct,
+            risk_amount=qty * risk_per_unit,
+            stop_price_estimate=stop_price,
         )
 
     def _close_fraction(
@@ -678,7 +711,7 @@ class Strategy1Backtester:
         self.cash += gross - exit_fee
 
         self.trade_counter += 1
-        notional_entry = pos.entry_price * qty
+        notional_entry = pos.entry_price * qty + entry_fee_alloc
         return_pct = pnl_net / notional_entry * 100.0 if notional_entry != 0 else 0.0
 
         self.trades.append(Trade(
@@ -707,7 +740,12 @@ class Strategy1Backtester:
             if move_stop_to_entry:
                 pos.stop_at_entry = True
                 if self.cfg.trail_atr_mult > 0:
+                    # El scale-out ocurre en la apertura; la primera actualización
+                    # del trailing usa el cierre de esta vela y rige desde i+1.
                     pos.trailing = True
+                    pos.extreme = None
+                    pos.trail_level = None
+                    pos.trailing_activated_at = time
 
     def _check_stop_loss(self, i: int) -> Optional[str]:
         """
@@ -846,7 +884,7 @@ class Strategy1Backtester:
             stop_reason = self._check_stop_loss(i)
             stop_hit = stop_reason is not None
             if stop_hit and stop_reason.startswith("STOP_LOSS"):
-                cooldown_until = self.times[i] + pd.Timedelta(minutes=cfg.cooldown_min)
+                cooldown_until = self.times[i] + pd.Timedelta(minutes=1 + cfg.cooldown_min)
 
 
             # 3) Trailing con la vela ya cerrada (rige desde la siguiente).
@@ -1004,11 +1042,13 @@ def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capita
         daily = equity.set_index("timestamp")["equity"].resample("1D").last().dropna()
         rets = daily.pct_change().dropna()
         sharpe = sortino = 0.0
-        if len(rets) > 2 and rets.std() > 0:
-            sharpe = float(rets.mean() / rets.std() * math.sqrt(365))
-            downside = rets[rets < 0]
-            if len(downside) > 1 and downside.std() > 0:
-                sortino = float(rets.mean() / downside.std() * math.sqrt(365))
+        vol = rets.std(ddof=1) if len(rets) > 1 else 0.0
+        if len(rets) > 1 and np.isfinite(vol) and vol > 0:
+            sharpe = float(rets.mean() / vol * math.sqrt(365))
+        downside_sq = np.minimum(rets.to_numpy(float), 0.0) ** 2
+        downside_dev = math.sqrt(float(np.mean(downside_sq))) if len(rets) else 0.0
+        if downside_dev > 0:
+            sortino = float(rets.mean() / downside_dev * math.sqrt(365))
 
     net = final_equity - initial_capital
     return {
@@ -1162,7 +1202,11 @@ def oos_split(trades: pd.DataFrame, oos_start: str) -> Optional[dict]:
     pos = positions_from_trades(trades)
     if pos.empty:
         return None
-    cut = pd.Timestamp(oos_start, tz="UTC")
+    cut = pd.Timestamp(oos_start)
+    if cut.tzinfo is None:
+        cut = cut.tz_localize("UTC")
+    else:
+        cut = cut.tz_convert("UTC")
     return {
         "cut": str(cut),
         "before_cut": position_stats(pos[pos["entry_time"] < cut]),
@@ -1201,11 +1245,31 @@ def exit_reason_breakdown(trades: pd.DataFrame) -> dict:
     if trades.empty:
         return {}
     grouped = trades.groupby("reason", sort=False).agg(
-        legs=("trade_id", "count"), pnl_net=("pnl_net", "sum")
+        legs=("trade_id", "count"),
+        positions=("position_id", "nunique"),
+        pnl_net=("pnl_net", "sum"),
     )
     return {
-        str(reason): {"legs": int(row["legs"]), "pnl_net": float(row["pnl_net"])}
+        str(reason): {
+            "legs": int(row["legs"]),
+            "positions": int(row["positions"]),
+            "pnl_net": float(row["pnl_net"]),
+        }
         for reason, row in grouped.iterrows()
+    }
+
+
+
+def dataset_quality(data: pd.DataFrame) -> dict:
+    """Controles básicos para detectar huecos de 1m."""
+    if len(data) < 2:
+        return {"bars": int(len(data)), "gaps_gt_1m": 0, "max_gap_minutes": 0.0}
+    delta = data.index.to_series().diff().dropna().dt.total_seconds() / 60.0
+    gaps = delta[delta > 1.0]
+    return {
+        "bars": int(len(data)),
+        "gaps_gt_1m": int(len(gaps)),
+        "max_gap_minutes": float(gaps.max()) if len(gaps) else 1.0,
     }
 
 
@@ -1226,6 +1290,7 @@ def build_report(
             "bars_1m": int(len(data)),
             "start": data.index[0].isoformat(),
             "end": data.index[-1].isoformat(),
+            "quality": dataset_quality(data),
         },
         "config": asdict(cfg),
         "metrics": metrics,
@@ -1340,6 +1405,12 @@ def _jsonable(obj):
         return None if not math.isfinite(float(obj)) else float(obj)
     if isinstance(obj, np.integer):
         return int(obj)
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
     return obj
 
 
