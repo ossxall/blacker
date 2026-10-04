@@ -89,7 +89,7 @@ class Config:
     atr_stop_min_pct: float = 0.004     # tope inferior del stop (fracción)
     atr_stop_max_pct: float = 0.015     # tope superior del stop (fracción)
     trail_atr_mult: float = 2.5         # trailing tras el scale-out (0 = off)
-    cooldown_min: int = 15              # minutos sin entrar tras un stop inicial
+    cooldown_min: int = 0              # minutos sin entrar tras un stop inicial
     adx_max: float = 40.0               # techo de ADX 1H (0 = off)
     adx_rising: bool = True             # ADX 1H > ADX de la vela 1H previa
     min_ema_gap_1h_pct: float = 0.001  # |EMA20-EMA50|/EMA50 mínimo en 1H
