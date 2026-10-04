@@ -72,7 +72,7 @@ class Config:
     adx_threshold: float = 26.0
     atr_len: int = 14
 
-    scale_out_fraction: float = 0.5
+    scale_out_fraction: float = 0.1
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
