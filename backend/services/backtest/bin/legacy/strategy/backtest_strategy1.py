@@ -83,7 +83,7 @@ class Config:
     force_close_at_end: bool = True
 
     # --- parámetros de la versión improved ---
-    risk_pct: float = 0.005              # riesgo por operación (fracción del capital)
+    risk_pct: float = 0.01              # riesgo por operación (fracción del capital)
     max_leverage: float = 3.0
     atr_stop_mult: float = 3.0          # stop = k * ATR(15m)
     atr_stop_min_pct: float = 0.004     # tope inferior del stop (fracción)
