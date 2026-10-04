@@ -959,7 +959,16 @@ def plot_equity(curve: pd.DataFrame, output_path: str | Path, initial_capital: f
     dd = (equity / peak - 1.0) * 100.0
     dd_text = f" | max DD {dd.min():.2f}%" if len(dd) else ""
 
-    ax.set_title(f"{title} | {len(curve):,} cierres{dd_text}")
+    if initial_capital:
+        below_pct = (equity / initial_capital - 1.0) * 100.0
+        min_below_pct = float(np.min(below_pct))
+    else:
+        min_below_pct = 0.0
+    min_below_equity = initial_capital * (1.0 + min_below_pct / 100.0)
+    ax.axhline(min_below_equity, color="#ff7f0e", linestyle=":", linewidth=1.1,
+               label=f"Min equity bajo capital: {min_below_pct:.2f}% ({min_below_equity:,.2f})")
+
+    ax.set_title(f"{title} | {len(curve):,} cierres{dd_text} | min bajo capital {min_below_pct:.2f}%")
     ax.set_xlabel("Fecha (UTC)")
     ax.set_ylabel("Equity")
     ax.grid(True, alpha=0.3)
