@@ -90,7 +90,7 @@ class Config:
     adx_threshold: float = 25.0
     atr_len: int = 14
 
-    close_on_30m_pct: float = 90.0  # % de la posición RESTANTE a cerrar ante contra-señal 30m
+    close_on_30m_pct: float = 50.0  # % de la posición RESTANTE a cerrar ante contra-señal 30m
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
