@@ -48,6 +48,17 @@ Ejemplo:
     python backtest_strategy1_improved.py data.parquet --capital 100000 \
         --commission-bps 2 --slippage-bps 1 --oos-start 2026-01-01 \
         --output-dir ./backtest_out
+
+Salidas en disco (por defecto en ./backtest_out, o en --output-dir):
+    trades.csv        un tramo por cierre (incluye scale-out y resto)
+    report.json       reporte completo: dataset, config, métricas, por lado,
+                      por motivo de cierre y split in-sample/out-of-sample
+    metrics.json      solo métricas (compatibilidad)
+    config.json       parámetros efectivos de la corrida
+    positions.csv     una fila por posición (tramos agregados)
+    equity_curve.csv  equity reconstruida, un punto por cierre
+    equity.csv        marca a cada vela 1m (opcional: --equity-csv, es pesado)
+    equity_curve.png  gráfico de la curva de equity (--no-plot lo desactiva)
 """
 
 from __future__ import annotations
@@ -57,6 +68,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -154,6 +166,8 @@ CLI_KEYS = [
     "block_hours_utc",
 ]
 
+DEFAULT_OUTPUT_DIR = "backtest_out"
+
 
 @dataclass
 class Position:
@@ -189,6 +203,14 @@ class Trade:
     return_pct: float
     reason: str
     position_risk: float
+
+
+TRADE_COLUMNS = list(Trade.__dataclass_fields__)
+
+
+def empty_trades() -> pd.DataFrame:
+    """DataFrame de trades sin filas pero con el esquema completo."""
+    return pd.DataFrame({c: pd.Series(dtype="object") for c in TRADE_COLUMNS})
 
 
 # ---------------------------------------------------------------------------
@@ -876,7 +898,10 @@ class Strategy1Backtester:
             self._close_fraction(1.0, self.c[-1], last_ts, "END_OF_DATA")
             self._mark(last_ts, self.c[-1])
 
-        trades = pd.DataFrame([asdict(t) for t in self.trades])
+        trades = (
+            pd.DataFrame([asdict(t) for t in self.trades])
+            if self.trades else empty_trades()
+        )
         equity = pd.DataFrame({
             "timestamp": self.eq_time,
             "cash": self.eq_cash,
@@ -1132,19 +1157,117 @@ def print_report(m: dict, cfg: Config, data: pd.DataFrame):
     print("=" * 72)
 
 
-def print_oos_split(trades: pd.DataFrame, oos_start: str):
+def oos_split(trades: pd.DataFrame, oos_start: str) -> Optional[dict]:
+    """Métricas de posiciones antes y desde la fecha de corte de entrada."""
     pos = positions_from_trades(trades)
     if pos.empty:
-        return
+        return None
     cut = pd.Timestamp(oos_start, tz="UTC")
-    ins = position_stats(pos[pos["entry_time"] < cut])
-    oos = position_stats(pos[pos["entry_time"] >= cut])
+    return {
+        "cut": str(cut),
+        "before_cut": position_stats(pos[pos["entry_time"] < cut]),
+        "from_cut": position_stats(pos[pos["entry_time"] >= cut]),
+    }
+
+
+def print_oos_split(trades: pd.DataFrame, oos_start: str):
+    split = oos_split(trades, oos_start)
+    if split is None:
+        return
     print(f"\nSplit por fecha de entrada (corte {oos_start}):")
     print(f"  {'':<14}{'posiciones':>11}{'win%':>8}{'PF':>8}{'exp.R':>8}{'PnL neto':>14}")
-    for name, s in (("antes", ins), ("desde el corte", oos)):
+    for key, name in (("before_cut", "antes"), ("from_cut", "desde el corte")):
+        s = split[key]
         print(f"  {name:<14}{s['positions']:>11}{s['win_rate_pct']:>8.1f}"
               f"{_fmt(s['profit_factor'], '.2f'):>8}{_fmt(s['expectancy_r'], '.2f'):>8}"
               f"{s['net_pnl']:>14,.2f}")
+
+
+# ---------------------------------------------------------------------------
+# Reporte en disco: trades.csv + report.json
+# ---------------------------------------------------------------------------
+
+def side_stats(trades: pd.DataFrame) -> dict:
+    """Métricas separadas por lado."""
+    out = {}
+    for side in ("LONG", "SHORT"):
+        pos = positions_from_trades(trades[trades["side"] == side] if len(trades) else trades)
+        out[side] = position_stats(pos)
+    return out
+
+
+def exit_reason_breakdown(trades: pd.DataFrame) -> dict:
+    """Tramos y PnL por motivo de cierre."""
+    if trades.empty:
+        return {}
+    grouped = trades.groupby("reason", sort=False).agg(
+        legs=("trade_id", "count"), pnl_net=("pnl_net", "sum")
+    )
+    return {
+        str(reason): {"legs": int(row["legs"]), "pnl_net": float(row["pnl_net"])}
+        for reason, row in grouped.iterrows()
+    }
+
+
+def build_report(
+    cfg: Config,
+    data: pd.DataFrame,
+    trades: pd.DataFrame,
+    metrics: dict,
+    source: Optional[str] = None,
+    oos_start: Optional[str] = None,
+) -> dict:
+    """Reporte completo y serializable de la corrida."""
+    report = {
+        "strategy": "strategy1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dataset": {
+            "source": source,
+            "bars_1m": int(len(data)),
+            "start": data.index[0].isoformat(),
+            "end": data.index[-1].isoformat(),
+        },
+        "config": asdict(cfg),
+        "metrics": metrics,
+        "by_side": side_stats(trades),
+        "exit_reasons": exit_reason_breakdown(trades),
+    }
+    if oos_start:
+        report["oos_split"] = oos_split(trades, oos_start)
+    return _jsonable(report)
+
+
+def write_outputs(
+    output_dir: str | Path,
+    trades: pd.DataFrame,
+    equity: pd.DataFrame,
+    curve: pd.DataFrame,
+    report: dict,
+    write_equity_csv: bool = False,
+) -> dict[str, Path]:
+    """Escribe trades.csv, report.json y el resto de artefactos de la corrida."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    trades.to_csv(out / "trades.csv", index=False)
+    positions_from_trades(trades).to_csv(out / "positions.csv", index=False)
+    curve.to_csv(out / "equity_curve.csv", index=False)
+    if write_equity_csv:
+        equity.to_csv(out / "equity.csv", index=False)
+
+    with open(out / "report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    with open(out / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(_jsonable(report["metrics"]), f, indent=2)
+    with open(out / "config.json", "w", encoding="utf-8") as f:
+        json.dump(report["config"], f, indent=2)
+
+    written = ["trades.csv", "report.json", "metrics.json", "config.json",
+               "positions.csv", "equity_curve.csv"]
+    if write_equity_csv:
+        written.append("equity.csv")
+    print(f"[OUT] {out.resolve()} -> {', '.join(written)}", flush=True)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1293,12 @@ def parse_args():
     p.add_argument("--verbose", action="store_true", help="Imprime cada stop.")
     p.add_argument("--timestamp-is-close", action=argparse.BooleanOptionalAction, default=None,
                    help=f"Indica que el timestamp de 1m es cierre, no apertura (default: {d.timestamp_is_close}).")
-    p.add_argument("--output-dir", default=None)
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
+                   help=f"Directorio de trades.csv y report.json (default: {DEFAULT_OUTPUT_DIR}).")
+    p.add_argument("--no-output", action="store_true",
+                   help="No escribe trades.csv ni report.json.")
+    p.add_argument("--equity-csv", action="store_true",
+                   help="Escribe además equity.csv (marca por vela 1m; archivo pesado).")
     p.add_argument("--plot", default=None, metavar="PATH",
                    help="Ruta del gráfico de equity. Por defecto equity_curve.png "
                         "en --output-dir o en el directorio actual.")
@@ -1233,18 +1361,15 @@ def main():
 
     curve = equity_curve_from_trades(trades, cfg.initial_capital)
 
-    if args.output_dir:
-        out = Path(args.output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        trades.to_csv(out / "trades.csv", index=False)
-        positions_from_trades(trades).to_csv(out / "positions.csv", index=False)
-        equity.to_csv(out / "equity.csv", index=False)
-        curve.to_csv(out / "equity_curve.csv", index=False)
-        with open(out / "metrics.json", "w", encoding="utf-8") as f:
-            json.dump(_jsonable(metrics), f, indent=2)
-        with open(out / "config.json", "w", encoding="utf-8") as f:
-            json.dump(asdict(cfg), f, indent=2)
-        print(f"\nResultados guardados en: {out.resolve()}")
+    if not args.no_output:
+        report = build_report(
+            cfg, data, trades, metrics,
+            source=str(args.parquet), oos_start=args.oos_start,
+        )
+        write_outputs(
+            args.output_dir, trades, equity, curve, report,
+            write_equity_csv=args.equity_csv,
+        )
 
     if not args.no_plot:
         plot_path = args.plot or str(Path(args.output_dir or ".") / "equity_curve.png")
