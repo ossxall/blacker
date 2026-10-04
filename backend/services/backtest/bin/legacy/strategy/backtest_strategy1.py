@@ -875,10 +875,27 @@ def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capita
     if equity.empty:
         final_equity = initial_capital
         max_dd = sharpe = sortino = 0.0
+        min_equity = initial_capital
+        min_vs_capital_pct = 0.0
+        dd_peak_equity = initial_capital
+        dd_trough_equity = initial_capital
+        dd_peak_vs_capital_pct = 0.0
+        dd_trough_vs_capital_pct = 0.0
     else:
         eq = equity["equity"].astype(float)
         final_equity = float(eq.iloc[-1])
-        max_dd = float((eq / eq.cummax() - 1.0).min() * 100.0)
+        peak = eq.cummax()
+        dd = (eq / peak - 1.0) * 100.0
+        max_dd = float(dd.min())
+
+        min_equity = float(eq.min())
+        min_vs_capital_pct = float((eq / initial_capital - 1.0).min() * 100.0) if initial_capital else 0.0
+
+        trough_pos = int(dd.idxmin())
+        dd_trough_equity = float(eq.loc[trough_pos])
+        dd_peak_equity = float(peak.loc[trough_pos])
+        dd_peak_vs_capital_pct = float((dd_peak_equity / initial_capital - 1.0) * 100.0) if initial_capital else 0.0
+        dd_trough_vs_capital_pct = float((dd_trough_equity / initial_capital - 1.0) * 100.0) if initial_capital else 0.0
 
         daily = equity.set_index("timestamp")["equity"].resample("1D").last().dropna()
         rets = daily.pct_change().dropna()
@@ -896,6 +913,12 @@ def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capita
         "net_pnl": net,
         "return_pct": net / initial_capital * 100.0 if initial_capital else 0.0,
         "max_drawdown_pct": max_dd,
+        "max_dd_peak_equity": dd_peak_equity,
+        "max_dd_trough_equity": dd_trough_equity,
+        "max_dd_peak_vs_capital_pct": dd_peak_vs_capital_pct,
+        "max_dd_trough_vs_capital_pct": dd_trough_vs_capital_pct,
+        "min_equity": min_equity,
+        "min_equity_vs_capital_pct": min_vs_capital_pct,
         "return_over_maxdd": (
             (net / initial_capital * 100.0) / abs(max_dd)
             if initial_capital and max_dd < 0 else None
@@ -968,6 +991,17 @@ def plot_equity(curve: pd.DataFrame, output_path: str | Path, initial_capital: f
     ax.axhline(min_below_equity, color="#ff7f0e", linestyle=":", linewidth=1.1,
                label=f"Min equity bajo capital: {min_below_pct:.2f}% ({min_below_equity:,.2f})")
 
+    if len(dd):
+        trough_i = int(np.argmin(dd))
+        trough_equity = float(equity[trough_i])
+        peak_equity = float(peak[trough_i])
+        peak_pct = (peak_equity / initial_capital - 1.0) * 100.0 if initial_capital else 0.0
+        ax.axhline(trough_equity, color="#9467bd", linestyle="-.", linewidth=1.1,
+                   label=f"Valle max DD: {dd.min():.2f}% desde pico {peak_equity:,.2f} "
+                         f"[{peak_pct:+.2f}%] -> {trough_equity:,.2f}")
+        ax.plot(x[trough_i], trough_equity, marker="v", color="#9467bd", markersize=7,
+                zorder=4, linestyle="none")
+
     ax.set_title(f"{title} | {len(curve):,} cierres{dd_text} | min bajo capital {min_below_pct:.2f}%")
     ax.set_xlabel("Fecha (UTC)")
     ax.set_ylabel("Equity")
@@ -995,7 +1029,10 @@ def print_report(m: dict, cfg: Config, data: pd.DataFrame):
     print(f"Periodo         : {data.index[0]} -> {data.index[-1]}")
     print(f"Capital         : {m['initial_capital']:,.2f} -> {m['final_equity']:,.2f}")
     print(f"PnL neto        : {m['net_pnl']:,.2f}  ({m['return_pct']:.2f}%)")
-    print(f"Max drawdown    : {m['max_drawdown_pct']:.2f}%")
+    print(f"Max drawdown    : {m['max_drawdown_pct']:.2f}%  "
+          f"(pico {m['max_dd_peak_equity']:,.2f} [{m['max_dd_peak_vs_capital_pct']:+.2f}%] -> "
+          f"valle {m['max_dd_trough_equity']:,.2f} [{m['max_dd_trough_vs_capital_pct']:+.2f}%])")
+    print(f"Equity mínimo   : {m['min_equity']:,.2f}  ({m['min_equity_vs_capital_pct']:.2f}% vs capital inicial)")
     print(f"Retorno / MaxDD : {_fmt(m['return_over_maxdd'], '.2f')}")
     print(f"Sharpe / Sortino: {m['sharpe_daily_365']:.2f} / {m['sortino_daily_365']:.2f}")
     print(f"Posiciones      : {m['positions']:,} (tramos: {m['legs']:,})")
