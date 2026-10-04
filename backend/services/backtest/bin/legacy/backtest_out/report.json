@@ -1,6 +1,6 @@
 {
   "strategy": "strategy1",
-  "generated_at": "2026-10-04T22:19:34.406911+00:00",
+  "generated_at": "2026-10-04T22:30:17.777236+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars_1m": 3549600,
@@ -19,7 +19,7 @@
     "adx_len": 14,
     "adx_threshold": 25.0,
     "atr_len": 14,
-    "close_on_30m_pct": 50.0,
+    "close_on_30m_pct": 90.0,
     "initial_capital": 10000.0,
     "commission_bps": 0.0,
     "slippage_bps": 0.0,
