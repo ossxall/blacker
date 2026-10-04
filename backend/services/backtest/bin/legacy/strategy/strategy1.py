@@ -484,8 +484,8 @@ def build_signals(f: dict, cfg: Config) -> dict:
         bear30 = m30["ef"] < m30["es"]
 
         # Pullback: solo estructura 15m + cierre contra la EMA rápida.
-        long_pb = (m15["ef"] > m15["es"]) & (m15["close"] <= m15["ef"])
-        short_pb = (m15["ef"] < m15["es"]) & (m15["close"] >= m15["ef"])
+        long_pb = m15["ef"] > m15["es"]
+        short_pb = m15["ef"] < m15["es"]
 
         bull5 = m5["ef"] > m5["es"]
         bear5 = m5["ef"] < m5["es"]
