@@ -5,13 +5,14 @@
   "adx_len": 14,
   "adx_threshold": 25.0,
   "atr_len": 14,
+  "quantity": 1.0,
   "scale_out_fraction": 0.5,
   "initial_capital": 100000.0,
   "commission_bps": 2.0,
   "slippage_bps": 1.0,
   "stop_loss_pct": 0.006,
   "force_close_at_end": true,
-  "risk_pct": 0.005,
+  "risk_pct": 0.01,
   "max_leverage": 3.0,
   "atr_stop_mult": 2.0,
   "atr_stop_min_pct": 0.004,
@@ -22,5 +23,11 @@
   "adx_rising": true,
   "min_ema_gap_1h_pct": 0.0005,
   "min_trigger_range_atr": 0.5,
-  "block_hours_utc": ""
+  "block_hours_utc": "",
+  "dd_throttle_pct": 0.0,
+  "dd_risk_factor": 0.5,
+  "loss_streak_pause": 0,
+  "loss_pause_hours": 24.0,
+  "daily_loss_limit_pct": 0.0,
+  "max_entries_per_day": 0
 }

@@ -1,50 +1,47 @@
 #!/usr/bin/env python3
 """
-Backtesting Strategy1 — v2 (vectorizado + mejoras opcionales)
-=============================================================
+Backtesting Strategy1 — IMPROVED
+================================
 
 Dataset de entrada: OHLCV de 1 minuto en .parquet.
 
-Qué cambia respecto a la v1
----------------------------
-CORRECCIONES
-  - Los defaults del CLI ya coinciden con `Config` (ADX 25, stop 0.6%).
-  - Las métricas se calculan por POSICIÓN (scale-out + resto = 1 operación),
-    no por tramo. Se guardan `trades.csv` (tramos) y `positions.csv`.
-  - Métricas nuevas: expectancy en R, Sharpe/Sortino diario, peor racha de
-    pérdidas, split in-sample / out-of-sample (--oos-start).
+Reglas de la estrategia (Strategy1, sin cambios):
+    1H  -> tendencia: EMA20/EMA50 + ADX14 >= 25 + DI
+    30m -> confirmación: EMA20 vs EMA50
+    15m -> pullback: estructura + cierre contra EMA20
+    5m  -> setup: EMA20 vs EMA50
+    1m  -> trigger: estructura + cierre sobre/bajo EMA20 +
+           ruptura del máximo/mínimo de la vela anterior
 
-VELOCIDAD
-  - EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False, mismo
-    seed que la recursión original: primer valor, sin SMA).
-  - El índice de la última vela confirmada de cada timeframe y todas las
-    condiciones de entrada/salida se precalculan como arrays; el bucle solo
-    gestiona posición, stop y ejecución.
+Mejoras activas por defecto (todas ajustables por CLI):
+    - Tamaño por riesgo: 1% del capital por operación (apalancamiento máx 3x).
+    - Stop por volatilidad: 2.0 x ATR(14) de 15m, acotado entre 0.4% y 1.5%.
+    - Trailing del tramo restante: 2.5 x ATR(15m), activo tras el scale-out.
+    - Cooldown de 15 minutos tras un stop inicial.
+    - Filtros de entrada: ADX 1H <= 50 y subiendo, separación EMA20/EMA50 en
+      1H >= 0.05%, rango de la vela 1m >= 0.5 x ATR(1m).
 
-MEJORAS OPCIONALES (todas DESACTIVADAS con --preset baseline)
-  - Sizing por riesgo:        --risk-pct, --max-leverage
-  - Stop por volatilidad:     --atr-stop-mult (ATR 15m) con topes min/max
-  - Trailing del tramo resto: --trail-atr-mult (ATR 15m, tras el scale-out)
-  - Cooldown tras stop:       --cooldown-min
-  - Filtro de régimen ADX:    --adx-max, --adx-rising, --min-ema-gap-1h-pct
-  - Trigger 1m más robusto:   --min-trigger-range-atr
-  - Filtro horario (UTC):     --block-hours-utc "0,1,2,3"
+Salidas:
+    Stop inicial (ATR)      -> cierre total.
+    1H contra la posición   -> cierre total.
+    30m contra la posición  -> scale-out parcial (50%) y el stop del resto
+                               sube a breakeven; después rige el trailing.
 
-`--preset improved` activa un conjunto inicial de HIPÓTESIS. No está
-demostrado que mejore: valídalo con --compare y --oos-start sobre tus datos.
+Convención anti-lookahead:
+    Las señales usan solo velas cerradas y se ejecutan en la apertura de la
+    siguiente vela 1m. El trailing se actualiza al cierre de cada vela y rige
+    desde la siguiente. Si hay gap a través del stop, el fill es el open.
 
-Convención anti-lookahead (igual que la v1): las señales usan solo velas
-cerradas y se ejecutan en la apertura de la siguiente vela 1m. El trailing
-se actualiza al cierre de cada vela y rige desde la siguiente.
+Fidelidad: EMA, ADX y ATR se calculan vectorizados (ewm con adjust=False),
+equivalentes a la recursión original (seed = primer valor, sin SMA; ADX
+visible desde la vela dilen + adxlen - 2).
 
 Dependencias:  pip install "pandas>=2" pyarrow numpy
 
-Ejemplos:
-    python backtest_strategy1_v2.py data.parquet --preset baseline \
-        --commission-bps 4 --slippage-bps 1
-    python backtest_strategy1_v2.py data.parquet --compare \
-        --commission-bps 4 --slippage-bps 1 --oos-start 2025-01-01 \
-        --output-dir ./out
+Ejemplo:
+    python backtest_strategy1_improved.py data.parquet --capital 100000 \
+        --commission-bps 2 --slippage-bps 1 --oos-start 2026-01-01 \
+        --output-dir ./backtest_out
 """
 
 from __future__ import annotations
@@ -65,38 +62,6 @@ import pandas as pd
 # Configuración
 # ---------------------------------------------------------------------------
 
-# Parámetros de las mejoras. Con estos valores el motor es el baseline.
-V2_OFF = dict(
-    risk_pct=0.0,              # 0 = cantidad fija (`quantity`)
-    max_leverage=3.0,          # tope de apalancamiento con sizing por riesgo
-    atr_stop_mult=0.0,         # 0 = stop fijo `stop_loss_pct`
-    atr_stop_min_pct=0.004,    # tope inferior del stop por ATR (fracción)
-    atr_stop_max_pct=0.015,    # tope superior del stop por ATR (fracción)
-    trail_atr_mult=0.0,        # 0 = sin trailing
-    cooldown_min=0,            # minutos sin entrar tras un stop inicial
-    adx_max=0.0,               # 0 = sin techo de ADX
-    adx_rising=False,          # exigir ADX 1H > ADX de la vela 1H previa
-    min_ema_gap_1h_pct=0.0,    # |EMA20-EMA50|/EMA50 mínimo en 1H (fracción)
-    min_trigger_range_atr=0.0, # rango mínimo de la vela 1m en ATR(1m)
-    block_hours_utc="",        # horas UTC sin entradas, p.ej. "0,1,2,3"
-)
-
-# Punto de partida para probar (hipótesis, no resultados).
-IMPROVED_PRESET = dict(
-    risk_pct=0.01,
-    max_leverage=3.0,
-    atr_stop_mult=2.0,
-    atr_stop_min_pct=0.004,
-    atr_stop_max_pct=0.015,
-    trail_atr_mult=2.5,
-    cooldown_min=15,
-    adx_max=50.0,
-    adx_rising=True,
-    min_ema_gap_1h_pct=0.0005,
-    min_trigger_range_atr=0.5,
-)
-
-
 @dataclass
 class Config:
     ema_fast: int = 20
@@ -107,29 +72,29 @@ class Config:
     adx_threshold: float = 25.0
     atr_len: int = 14
 
-    quantity: float = 1.0
     scale_out_fraction: float = 0.5
 
     initial_capital: float = 10_000.0
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
 
-    stop_loss_pct: float = 0.007
+    # Stop fijo de respaldo (si no hay ATR disponible) y para el cálculo base.
+    stop_loss_pct: float = 0.005
     force_close_at_end: bool = True
 
-    # --- mejoras opcionales ---
-    risk_pct: float = 0.0
+    # --- parámetros de la versión improved ---
+    risk_pct: float = 0.005              # riesgo por operación (fracción del capital)
     max_leverage: float = 3.0
-    atr_stop_mult: float = 0.0
-    atr_stop_min_pct: float = 0.004
-    atr_stop_max_pct: float = 0.015
-    trail_atr_mult: float = 0.0
-    cooldown_min: int = 0
-    adx_max: float = 0.0
-    adx_rising: bool = False
-    min_ema_gap_1h_pct: float = 0.0
-    min_trigger_range_atr: float = 0.0
-    block_hours_utc: str = ""
+    atr_stop_mult: float = 2.0          # stop = k * ATR(15m)
+    atr_stop_min_pct: float = 0.004     # tope inferior del stop (fracción)
+    atr_stop_max_pct: float = 0.015     # tope superior del stop (fracción)
+    trail_atr_mult: float = 2.5         # trailing tras el scale-out (0 = off)
+    cooldown_min: int = 15              # minutos sin entrar tras un stop inicial
+    adx_max: float = 50.0               # techo de ADX 1H (0 = off)
+    adx_rising: bool = True             # ADX 1H > ADX de la vela 1H previa
+    min_ema_gap_1h_pct: float = 0.0005  # |EMA20-EMA50|/EMA50 mínimo en 1H
+    min_trigger_range_atr: float = 0.5  # rango mínimo de la vela 1m en ATR(1m)
+    block_hours_utc: str = ""           # horas UTC sin entradas, p.ej. "0,1,2"
 
     def __post_init__(self):
         if not (0.0 < self.scale_out_fraction < 1.0):
@@ -137,18 +102,16 @@ class Config:
                 "scale_out_fraction debe estar estrictamente entre 0 y 1 "
                 f"(recibido: {self.scale_out_fraction})."
             )
-        if self.quantity <= 0.0:
-            raise ValueError(f"quantity debe ser > 0 (recibido: {self.quantity}).")
-        if not (0.0 <= self.risk_pct <= 0.2):
-            raise ValueError("risk_pct debe estar entre 0 y 0.2.")
+        if not (0.0 < self.risk_pct <= 0.2):
+            raise ValueError("risk_pct debe estar entre 0 (excl.) y 0.2.")
         if self.max_leverage <= 0:
             raise ValueError("max_leverage debe ser > 0.")
         if self.atr_stop_mult < 0 or self.trail_atr_mult < 0:
             raise ValueError("Los multiplicadores de ATR no pueden ser negativos.")
         if self.atr_stop_min_pct > self.atr_stop_max_pct:
             raise ValueError("atr_stop_min_pct no puede superar atr_stop_max_pct.")
-        if self.risk_pct > 0 and self.stop_loss_pct <= 0 and self.atr_stop_mult <= 0:
-            raise ValueError("risk_pct > 0 requiere un stop (stop_loss_pct o atr_stop_mult).")
+        if self.stop_loss_pct <= 0 and self.atr_stop_mult <= 0:
+            raise ValueError("Se requiere un stop (stop_loss_pct o atr_stop_mult).")
         self.blocked_hours()  # valida el formato
 
     def blocked_hours(self) -> list[int]:
@@ -162,6 +125,15 @@ class Config:
         if any(h < 0 or h > 23 for h in hours):
             raise ValueError("block_hours_utc debe contener horas entre 0 y 23.")
         return hours
+
+
+# Parámetros expuestos por CLI (default None = usa el valor de Config).
+CLI_KEYS = [
+    "risk_pct", "max_leverage", "atr_stop_mult", "atr_stop_min_pct",
+    "atr_stop_max_pct", "trail_atr_mult", "cooldown_min", "adx_max",
+    "adx_rising", "min_ema_gap_1h_pct", "min_trigger_range_atr",
+    "block_hours_utc",
+]
 
 
 @dataclass
@@ -301,10 +273,7 @@ def _ns(idx: pd.DatetimeIndex) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def ema_closed(values: pd.Series, period: int) -> pd.Series:
-    """
-    EMA con seed = primer valor (sin SMA): equivale a la recursión original
-        EMA_0 = close_0 ;  EMA_t = a*close_t + (1-a)*EMA_{t-1}
-    """
+    """EMA con seed = primer valor (sin SMA)."""
     if period <= 0:
         raise ValueError("EMA period must be > 0")
     return values.ewm(alpha=2.0 / (period + 1.0), adjust=False).mean()
@@ -317,9 +286,8 @@ def _true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndar
         np.abs(high - prev_close),
         np.abs(low - prev_close),
     ])
-    # np.maximum propaga NaN: el primer TR es high-low.
     if len(tr):
-        tr[0] = high[0] - low[0]
+        tr[0] = high[0] - low[0]  # el primer TR es high-low
     return tr
 
 
@@ -334,11 +302,9 @@ def atr_vec(bars: pd.DataFrame, length: int) -> np.ndarray:
 
 def adx_vec(bars: pd.DataFrame, dilen: int = 14, adxlen: int = 14) -> pd.DataFrame:
     """
-    ADX/DI equivalente a la cadena original:
-      primer TR = high-low; primer +DM/-DM = 0; RMA desde la primera vela;
-      DI = 100*DM_RMA/TR_RMA; DX = |+DI - -DI| / (+DI + -DI);
-      ADX = RMA(100*DX) con seed 100*DX_0.
-    El valor es visible desde la vela `dilen + adxlen - 2`.
+    ADX/DI: primer TR = high-low; primer +DM/-DM = 0; RMA desde la primera
+    vela; DI = 100*DM_RMA/TR_RMA; DX = |+DI - -DI| / (+DI + -DI);
+    ADX = RMA(100*DX) con seed 100*DX_0. Visible desde dilen + adxlen - 2.
     """
     if dilen <= 0 or adxlen <= 0:
         raise ValueError("ADX lengths must be > 0")
@@ -423,8 +389,7 @@ def _map_tf(
 
 
 def build_features(data: pd.DataFrame, cfg: Config) -> dict:
-    """Indicadores por timeframe alineados a cada vela 1m (solo dependen de
-    EMA/ADX/ATR, no de los filtros), así se reutilizan entre configuraciones."""
+    """Indicadores por timeframe alineados a cada vela 1m."""
     n = len(data)
     close_ns = _ns(data.index) + 60 * 1_000_000_000
 
@@ -451,7 +416,7 @@ def build_features(data: pd.DataFrame, cfg: Config) -> dict:
 
 
 def build_signals(f: dict, cfg: Config) -> dict:
-    """Condiciones de Strategy1 como arrays booleanos (una entrada por vela 1m)."""
+    """Condiciones de Strategy1 + filtros improved como arrays booleanos."""
     n = f["n"]
     h1, m30, m15, m5, m1 = f["1h"], f["30m"], f["15m"], f["5m"], f["1m"]
 
@@ -479,7 +444,7 @@ def build_signals(f: dict, cfg: Config) -> dict:
         entry_long = bull1h & bull30 & long_pb & bull5 & bull1m
         entry_short = bear1h & bear30 & short_pb & bear5 & bear1m
 
-        # ---- filtros opcionales (solo afectan a entradas) ----
+        # ---- filtros improved (solo afectan a entradas) ----
         mask = np.ones(n, dtype=bool)
         if cfg.adx_max > 0:
             mask &= h1["adx"] <= cfg.adx_max
@@ -516,18 +481,12 @@ def build_signals(f: dict, cfg: Config) -> dict:
 # ---------------------------------------------------------------------------
 
 class Strategy1Backtester:
-    def __init__(
-        self,
-        data: pd.DataFrame,
-        config: Config,
-        features: Optional[dict] = None,
-        verbose: bool = False,
-    ):
+    def __init__(self, data: pd.DataFrame, config: Config, verbose: bool = False):
         self.data = data
         self.cfg = config
         self.verbose = verbose
 
-        feats = features if features is not None else build_features(data, config)
+        feats = build_features(data, config)
         self.sig = build_signals(feats, config)
 
         self.o = data["open"].to_numpy(float)
@@ -560,7 +519,7 @@ class Strategy1Backtester:
         return abs(notional) * self.cfg.commission_bps / 10_000.0
 
     def _stop_pct_for(self, i: int, ref_price: float) -> float:
-        """Stop inicial efectivo: fijo, o k*ATR(15m) acotado."""
+        """Stop inicial efectivo: k*ATR(15m) acotado (o el fijo de respaldo)."""
         cfg = self.cfg
         if cfg.atr_stop_mult > 0:
             atr = self.sig["atr15"][i]
@@ -571,17 +530,17 @@ class Strategy1Backtester:
 
     # -------------------------- ejecución --------------------------
 
-    def _open(self, side: int, qty: float, price: float, time: pd.Timestamp, stop_pct: float):
+    def _open(self, side: int, price: float, time: pd.Timestamp, stop_pct: float):
         if self.position is not None:
             return
         cfg = self.cfg
         exec_price = self._execution_price(price, side)
 
-        if cfg.risk_pct > 0:
-            if stop_pct <= 0 or self.cash <= 0:
-                return
-            qty = self.cash * cfg.risk_pct / (exec_price * stop_pct)
-            qty = min(qty, self.cash * cfg.max_leverage / exec_price)
+        if stop_pct <= 0 or self.cash <= 0:
+            return
+        # Tamaño por riesgo, con tope de apalancamiento.
+        qty = self.cash * cfg.risk_pct / (exec_price * stop_pct)
+        qty = min(qty, self.cash * cfg.max_leverage / exec_price)
         if qty <= 0:
             return
 
@@ -597,7 +556,7 @@ class Strategy1Backtester:
             entry_time=time,
             entry_fee=fee,
             stop_pct=stop_pct,
-            risk_amount=qty * exec_price * max(stop_pct, 0.0),
+            risk_amount=qty * exec_price * stop_pct,
         )
 
     def _close_fraction(
@@ -741,9 +700,9 @@ class Strategy1Backtester:
         bar_open, ts = self.o[i], self.times[i]
 
         if sig["action"] == "BUY":
-            self._open(1, float(sig["quantity"]), bar_open, ts, sig["stop_pct"])
+            self._open(1, bar_open, ts, sig["stop_pct"])
         elif sig["action"] == "SELL":
-            self._open(-1, float(sig["quantity"]), bar_open, ts, sig["stop_pct"])
+            self._open(-1, bar_open, ts, sig["stop_pct"])
         elif sig["action"] == "EXIT":
             self._close_fraction(
                 float(sig["fraction"]), bar_open, ts, sig["reason"],
@@ -812,12 +771,10 @@ class Strategy1Backtester:
                         }
                 elif i >= cooldown_until:
                     if entry_long[i]:
-                        new_sig = {"action": "BUY", "quantity": cfg.quantity,
-                                   "reason": "MTF_LONG",
+                        new_sig = {"action": "BUY", "reason": "MTF_LONG",
                                    "stop_pct": self._stop_pct_for(i, self.c[i])}
                     elif entry_short[i]:
-                        new_sig = {"action": "SELL", "quantity": cfg.quantity,
-                                   "reason": "MTF_SHORT",
+                        new_sig = {"action": "SELL", "reason": "MTF_SHORT",
                                    "stop_pct": self._stop_pct_for(i, self.c[i])}
             if new_sig is not None:
                 self.pending_signal = new_sig
@@ -939,6 +896,10 @@ def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capita
         "net_pnl": net,
         "return_pct": net / initial_capital * 100.0 if initial_capital else 0.0,
         "max_drawdown_pct": max_dd,
+        "return_over_maxdd": (
+            (net / initial_capital * 100.0) / abs(max_dd)
+            if initial_capital and max_dd < 0 else None
+        ),
         "sharpe_daily_365": sharpe,
         "sortino_daily_365": sortino,
         "legs": int(len(trades)),
@@ -950,14 +911,15 @@ def _fmt(v, spec=".3f"):
     return "N/A" if v is None else format(v, spec)
 
 
-def print_report(label: str, m: dict, cfg: Config, data: pd.DataFrame):
+def print_report(m: dict, cfg: Config, data: pd.DataFrame):
     print("\n" + "=" * 72)
-    print(f"STRATEGY 1 — {label}")
+    print("STRATEGY 1 — IMPROVED")
     print("=" * 72)
     print(f"Periodo         : {data.index[0]} -> {data.index[-1]}")
     print(f"Capital         : {m['initial_capital']:,.2f} -> {m['final_equity']:,.2f}")
     print(f"PnL neto        : {m['net_pnl']:,.2f}  ({m['return_pct']:.2f}%)")
     print(f"Max drawdown    : {m['max_drawdown_pct']:.2f}%")
+    print(f"Retorno / MaxDD : {_fmt(m['return_over_maxdd'], '.2f')}")
     print(f"Sharpe / Sortino: {m['sharpe_daily_365']:.2f} / {m['sortino_daily_365']:.2f}")
     print(f"Posiciones      : {m['positions']:,} (tramos: {m['legs']:,})")
     print(f"Win rate        : {m['win_rate_pct']:.2f}%  "
@@ -967,11 +929,8 @@ def print_report(label: str, m: dict, cfg: Config, data: pd.DataFrame):
     print(f"Avg PnL/posición: {m['avg_pnl']:,.4f}")
     print(f"Racha pérdidas  : {m['max_consecutive_losses']}")
     print(f"Costos          : {cfg.commission_bps} bps comisión | {cfg.slippage_bps} bps slippage")
-    sizing = (f"riesgo {cfg.risk_pct:.2%} (lev máx {cfg.max_leverage}x)"
-              if cfg.risk_pct > 0 else f"cantidad fija {cfg.quantity}")
-    stop = (f"{cfg.atr_stop_mult}xATR15m [{cfg.atr_stop_min_pct:.2%}-{cfg.atr_stop_max_pct:.2%}]"
-            if cfg.atr_stop_mult > 0 else f"fijo {cfg.stop_loss_pct:.2%}")
-    print(f"Sizing / stop   : {sizing} / {stop}")
+    print(f"Sizing / stop   : riesgo {cfg.risk_pct:.2%} (lev máx {cfg.max_leverage}x) / "
+          f"{cfg.atr_stop_mult}xATR15m [{cfg.atr_stop_min_pct:.2%}-{cfg.atr_stop_max_pct:.2%}]")
     print(f"Trailing        : {cfg.trail_atr_mult}xATR15m" if cfg.trail_atr_mult > 0
           else "Trailing        : desactivado")
     print(f"Filtros         : cooldown={cfg.cooldown_min}m adx_max={cfg.adx_max} "
@@ -989,7 +948,7 @@ def print_oos_split(trades: pd.DataFrame, oos_start: str):
     oos = position_stats(pos[pos["entry_time"] >= cut])
     print(f"\nSplit por fecha de entrada (corte {oos_start}):")
     print(f"  {'':<14}{'posiciones':>11}{'win%':>8}{'PF':>8}{'exp.R':>8}{'PnL neto':>14}")
-    for name, s in (("in-sample", ins), ("out-of-sample", oos)):
+    for name, s in (("antes", ins), ("desde el corte", oos)):
         print(f"  {name:<14}{s['positions']:>11}{s['win_rate_pct']:>8.1f}"
               f"{_fmt(s['profit_factor'], '.2f'):>8}{_fmt(s['expectancy_r'], '.2f'):>8}"
               f"{s['net_pnl']:>14,.2f}")
@@ -1002,56 +961,46 @@ def print_oos_split(trades: pd.DataFrame, oos_start: str):
 def parse_args():
     d = Config()
     p = argparse.ArgumentParser(
-        description="Backtester Strategy1 v2 sobre OHLCV 1m Parquet."
+        description="Backtester Strategy1 IMPROVED sobre OHLCV 1m Parquet."
     )
     p.add_argument("parquet", help="Ruta al dataset .parquet")
-    p.add_argument("--preset", choices=["baseline", "improved"], default="improved",
-                   help="baseline = estrategia original; improved = hipótesis v2.")
-    p.add_argument("--compare", action="store_true",
-                   help="Ejecuta baseline e improved con los mismos costos y los compara.")
     p.add_argument("--capital", type=float, default=d.initial_capital)
-    p.add_argument("--quantity", type=float, default=d.quantity)
     p.add_argument("--scale-out", type=float, default=d.scale_out_fraction)
     p.add_argument("--adx-threshold", type=float, default=d.adx_threshold)
     p.add_argument("--commission-bps", type=float, default=d.commission_bps)
     p.add_argument("--slippage-bps", type=float, default=d.slippage_bps)
     p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct,
-                   help="Stop fijo como fracción de la entrada (0.006 = 0.6%%).")
+                   help="Stop fijo de respaldo si no hay ATR (0.006 = 0.6%%).")
     p.add_argument("--no-force-close", action="store_true")
     p.add_argument("--oos-start", default=None,
-                   help="Fecha (YYYY-MM-DD) para separar in-sample / out-of-sample.")
+                   help="Fecha (YYYY-MM-DD) para separar el reporte antes/después.")
     p.add_argument("--verbose", action="store_true", help="Imprime cada stop.")
     p.add_argument("--output-dir", default=None)
 
-    # Parámetros de mejoras: default None = "usa lo que dicte el preset".
-    for key, off in V2_OFF.items():
+    # Parámetros improved: default None = usa el valor de Config.
+    for key in CLI_KEYS:
         flag = "--" + key.replace("_", "-")
-        if isinstance(off, bool):
-            p.add_argument(flag, action=argparse.BooleanOptionalAction, default=None)
+        default_value = getattr(d, key)
+        if isinstance(default_value, bool):
+            p.add_argument(flag, action=argparse.BooleanOptionalAction, default=None,
+                           help=f"(default: {default_value})")
         else:
-            p.add_argument(flag, type=type(off), default=None)
+            p.add_argument(flag, type=type(default_value), default=None,
+                           help=f"(default: {default_value!r})")
     return p.parse_args()
 
 
-def make_config(args, preset: str, apply_overrides: bool = True) -> Config:
-    v2 = dict(V2_OFF)
-    if preset == "improved":
-        v2.update(IMPROVED_PRESET)
-    if apply_overrides:
-        for key in V2_OFF:
-            val = getattr(args, key)
-            if val is not None:
-                v2[key] = val
+def make_config(args) -> Config:
+    overrides = {k: getattr(args, k) for k in CLI_KEYS if getattr(args, k) is not None}
     return Config(
         initial_capital=args.capital,
-        quantity=args.quantity,
         scale_out_fraction=args.scale_out,
         adx_threshold=args.adx_threshold,
         commission_bps=args.commission_bps,
         slippage_bps=args.slippage_bps,
         stop_loss_pct=args.stop_loss_pct,
         force_close_at_end=not args.no_force_close,
-        **v2,
+        **overrides,
     )
 
 
@@ -1065,72 +1014,33 @@ def _jsonable(obj):
     return obj
 
 
-def run_one(label, data, cfg, features, args, out_dir: Optional[Path]) -> dict:
-    engine = Strategy1Backtester(data, cfg, features=features, verbose=args.verbose)
-    trades, equity = engine.run()
-    metrics = calculate_metrics(trades, equity, cfg.initial_capital)
-    print_report(label, metrics, cfg, data)
-    if args.oos_start:
-        print_oos_split(trades, args.oos_start)
-
-    if out_dir is not None:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        trades.to_csv(out_dir / "trades.csv", index=False)
-        positions_from_trades(trades).to_csv(out_dir / "positions.csv", index=False)
-        equity.to_csv(out_dir / "equity.csv", index=False)
-        with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
-            json.dump(_jsonable(metrics), f, indent=2)
-        with open(out_dir / "config.json", "w", encoding="utf-8") as f:
-            json.dump(asdict(cfg), f, indent=2)
-        print(f"Resultados guardados en: {out_dir.resolve()}")
-    return metrics
-
-
-def print_comparison(base: dict, imp: dict):
-    rows = [
-        ("Retorno %", "return_pct", ".2f"),
-        ("Max drawdown %", "max_drawdown_pct", ".2f"),
-        ("Sharpe", "sharpe_daily_365", ".2f"),
-        ("Sortino", "sortino_daily_365", ".2f"),
-        ("Posiciones", "positions", "d"),
-        ("Win rate %", "win_rate_pct", ".1f"),
-        ("Profit factor", "profit_factor", ".2f"),
-        ("Expectancy R", "expectancy_r", ".3f"),
-        ("Racha pérdidas", "max_consecutive_losses", "d"),
-    ]
-    print("\n" + "=" * 72)
-    print(f"{'COMPARACIÓN':<20}{'baseline':>16}{'improved':>16}")
-    print("-" * 72)
-    for name, key, spec in rows:
-        print(f"{name:<20}{_fmt(base[key], spec):>16}{_fmt(imp[key], spec):>16}")
-    print("=" * 72)
-    print("Nota: el baseline usa cantidad fija y el improved sizing por riesgo, así que "
-          "retorno y drawdown no son directamente comparables; compara PF y expectancy en R.")
-
-
 def main():
     args = parse_args()
+    cfg = make_config(args)
+
     data = load_parquet(args.parquet)
     if len(data) < 100:
         raise ValueError("El dataset tiene muy pocas velas 1m para este backtest.")
 
-    out_root = Path(args.output_dir) if args.output_dir else None
+    engine = Strategy1Backtester(data, cfg, verbose=args.verbose)
+    trades, equity = engine.run()
+    metrics = calculate_metrics(trades, equity, cfg.initial_capital)
 
-    base_cfg = make_config(args, "baseline", apply_overrides=not args.compare)
-    t0 = time.perf_counter()
-    features = build_features(data, base_cfg)
-    print(f"[FEATURES] Indicadores precalculados en {time.perf_counter() - t0:.2f}s", flush=True)
+    print_report(metrics, cfg, data)
+    if args.oos_start:
+        print_oos_split(trades, args.oos_start)
 
-    if args.compare:
-        imp_cfg = make_config(args, "improved")
-        m_base = run_one("BASELINE", data, base_cfg, features, args,
-                         out_root / "baseline" if out_root else None)
-        m_imp = run_one("IMPROVED", data, imp_cfg, features, args,
-                        out_root / "improved" if out_root else None)
-        print_comparison(m_base, m_imp)
-    else:
-        cfg = make_config(args, args.preset)
-        run_one(args.preset.upper(), data, cfg, features, args, out_root)
+    if args.output_dir:
+        out = Path(args.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        trades.to_csv(out / "trades.csv", index=False)
+        positions_from_trades(trades).to_csv(out / "positions.csv", index=False)
+        equity.to_csv(out / "equity.csv", index=False)
+        with open(out / "metrics.json", "w", encoding="utf-8") as f:
+            json.dump(_jsonable(metrics), f, indent=2)
+        with open(out / "config.json", "w", encoding="utf-8") as f:
+            json.dump(asdict(cfg), f, indent=2)
+        print(f"\nResultados guardados en: {out.resolve()}")
 
 
 if __name__ == "__main__":
