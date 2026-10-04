@@ -22,5 +22,9 @@
   "min_ema_gap_1h_pct": 0.001,
   "min_trigger_range_atr": 0.5,
   "block_hours_utc": "",
-  "timestamp_is_close": false
+  "timestamp_is_close": false,
+  "exit_rsi_enabled": true,
+  "exit_rsi_len": 14,
+  "exit_rsi_long": 70.0,
+  "exit_rsi_short": 30.0
 }
