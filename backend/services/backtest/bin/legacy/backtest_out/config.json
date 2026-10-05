@@ -13,7 +13,7 @@
   "force_close_at_end": true,
   "risk_pct": 0.01,
   "max_leverage": 1.0,
-  "atr_stop_mult": 3.0,
+  "atr_stop_mult": 0.0,
   "atr_stop_min_pct": 0.004,
   "atr_stop_max_pct": 0.015,
   "cooldown_min": 0,

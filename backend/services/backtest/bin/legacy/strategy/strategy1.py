@@ -120,7 +120,7 @@ class Config:
     risk_pct: float = 0.01
     max_leverage: float = 1.0
 
-    atr_stop_mult: float = 3.0
+    atr_stop_mult: float = 0.0
     atr_stop_min_pct: float = 0.004
     atr_stop_max_pct: float = 0.015
 
