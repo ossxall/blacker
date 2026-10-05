@@ -147,7 +147,7 @@ class Config:
     exit_rsi_long: float = 100.0
 
     # SHORT: salida si RSI <= nivel
-    exit_rsi_short: float = 30.0
+    exit_rsi_short: float = 32.0
 
     def __post_init__(self):
 
