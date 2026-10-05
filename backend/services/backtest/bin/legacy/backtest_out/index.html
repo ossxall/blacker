@@ -477,7 +477,7 @@
                         <thead>
                             <tr>
                                 <th>Mes</th>
-                                <th>PNL Total</th>
+                                <th>PNL Total ($)</th>
                                 <th>Trades</th>
                                 <th>W/L</th>
                                 <th>Win Rate</th>
@@ -827,7 +827,7 @@
                                 <th>Precio E</th>
                                 <th>Precio S</th>
                                 <th>Qty</th>
-                                <th>PNL Neto</th>
+                                <th>PNL Neto ($)</th>
                                 <th>Return %</th>
                                 <th>Razón</th>
                             </tr>
@@ -853,11 +853,10 @@
                                 <th>Side</th>
                                 <th>Apertura</th>
                                 <th>Cierre</th>
-                                <th>Qty</th>
-                                <th>Riesgo</th>
-                                <th>Max Favorable</th>
-                                <th>Max Adverso</th>
-                                <th>PNL Neto</th>
+                                <th>Riesgo ($)</th>
+                                <th>Legs</th>
+                                <th>Razón</th>
+                                <th>PNL Neto ($)</th>
                             </tr>
                         </thead>
                         <tbody></tbody>
@@ -894,7 +893,7 @@
                         <thead>
                             <tr>
                                 <th>Mes</th>
-                                <th>PNL Total</th>
+                                <th>PNL Total ($)</th>
                                 <th>Trades</th>
                                 <th>W/L</th>
                                 <th>Win Rate</th>
@@ -2051,11 +2050,10 @@
                         <td><span class="tag ${cols[1] === 'LONG' ? 'tag-long' : 'tag-short'}">${cols[1]}</span></td>
                         <td style="font-size: 11px; white-space: nowrap;">${formatDateTime(cols[2])}</td>
                         <td style="font-size: 11px; white-space: nowrap;">${formatDateTime(cols[3])}</td>
-                        <td>${parseFloat(cols[4]).toFixed(4)}</td>
-                        <td>${parseFloat(cols[5]).toFixed(2)}</td>
-                        <td class="positive">${parseFloat(cols[6]).toFixed(2)}</td>
-                        <td class="negative">${parseFloat(cols[7]).toFixed(2)}</td>
-                        <td class="${parseFloat(cols[8]) >= 0 ? 'positive' : 'negative'}">${parseFloat(cols[8]) >= 0 ? '+' : ''}${parseFloat(cols[8]).toFixed(2)}</td>
+                        <td>${parseFloat(cols[6]).toFixed(2)}</td>
+                        <td>${parseFloat(cols[7])}</td>
+                        <td>${cols[8]}</td>
+                        <td class="${parseFloat(cols[4]) >= 0 ? 'positive' : 'negative'}">${parseFloat(cols[4]) >= 0 ? '+' : ''}${parseFloat(cols[4]).toFixed(2)}</td>
                     `;
                     positionsTableBody.appendChild(row);
                 }
