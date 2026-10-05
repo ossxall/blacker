@@ -1,6 +1,6 @@
 {
   "strategy": "strategy1",
-  "generated_at": "2026-10-04T23:36:15.450085+00:00",
+  "generated_at": "2026-10-05T00:04:24.391243+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars_1m": 3549600,
