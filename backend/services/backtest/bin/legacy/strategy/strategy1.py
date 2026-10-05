@@ -126,7 +126,7 @@ class Config:
 
     cooldown_min: int = 0
 
-    adx_max: float = 40.0
+    adx_max: float = 38.0
     adx_rising: bool = True
 
     min_ema_gap_1h_pct: float = 0.001
