@@ -103,7 +103,7 @@ class Config:
 
     atr_len: int = 14
 
-    close_on_30m_pct: float = 50.0
+    close_on_30m_pct: float = 90.0
 
     initial_capital: float = 10_000.0
 
