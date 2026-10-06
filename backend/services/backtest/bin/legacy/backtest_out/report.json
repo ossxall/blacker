@@ -1,6 +1,6 @@
 {
   "strategy": "strategy1",
-  "generated_at": "2026-10-05T02:30:48.013941+00:00",
+  "generated_at": "2026-10-06T00:40:27.372494+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars_1m": 3549600,
@@ -54,6 +54,11 @@
     "max_dd_trough_vs_capital_pct": 121.91691494962646,
     "min_equity": 9890.142127483712,
     "min_equity_vs_capital_pct": -1.0985787251628798,
+    "min_equity_static": 9890.142127483712,
+    "min_equity_static_pct": -1.0985787251628798,
+    "drawdown_static_pct": -1.0985787251628798,
+    "drawdown_static_peak": 10000.0,
+    "drawdown_static_trough": 9890.142127483712,
     "return_over_maxdd": 33.556163311119505,
     "sharpe_daily_365": 1.4378730530419401,
     "sortino_daily_365": 2.8627583646436854,

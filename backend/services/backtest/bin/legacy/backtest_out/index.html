@@ -377,6 +377,13 @@
                 <div class="kpi-label">Max Drawdown</div>
                 <div class="kpi-value negative" id="max-dd"></div>
                 <div class="kpi-subvalue" id="dd-peak-trough"></div>
+                <div class="kpi-subvalue" id="dd-static" style="margin-top:4px;"></div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Min Equity</div>
+                <div class="kpi-value neutral" id="min-equity"></div>
+                <div class="kpi-subvalue" id="min-equity-pct"></div>
+                <div class="kpi-subvalue" id="min-equity-static" style="margin-top:4px;"></div>
             </div>
             <div class="kpi">
                 <div class="kpi-label">Sharpe (Daily 365)</div>
@@ -1928,6 +1935,9 @@
                 document.getElementById('max-dd').textContent = `${metrics.max_drawdown_pct.toFixed(2)}%`;
                 document.getElementById('dd-peak-trough').textContent = 
                     `${formatCurrency(metrics.max_dd_peak_equity)} → ${formatCurrency(metrics.max_dd_trough_equity)}`;
+                if (metrics.drawdown_static_pct !== undefined) {
+                    document.getElementById('dd-static').textContent = `DD estático (vs cap): ${metrics.drawdown_static_pct.toFixed(2)}% (${formatCurrency(metrics.drawdown_static_trough)})`;
+                }
                 document.getElementById('sharpe').textContent = metrics.sharpe_daily_365.toFixed(3);
                 document.getElementById('sortino').textContent = metrics.sortino_daily_365.toFixed(3);
                 document.getElementById('win-rate').textContent = `${metrics.win_rate_pct.toFixed(2)}%`;
@@ -1937,6 +1947,15 @@
                 document.getElementById('expectancy').textContent = 
                     `Expectancy: ${metrics.expectancy_r.toFixed(4)} R | Max Consecutivas: ${metrics.max_consecutive_losses}`;
                 
+                if (metrics.min_equity !== undefined) {
+                    document.getElementById('min-equity').textContent = formatCurrency(metrics.min_equity);
+                }
+                if (metrics.min_equity_vs_capital_pct !== undefined) {
+                    document.getElementById('min-equity-pct').textContent = `${metrics.min_equity_vs_capital_pct.toFixed(2)}% vs cap`;
+                }
+                if (metrics.min_equity_static_pct !== undefined) {
+                    document.getElementById('min-equity-static').textContent = `Min equity (estático): ${metrics.min_equity_static_pct.toFixed(2)}%`;
+                }
                 // Color coding
                 if (metrics.return_pct >= 0) document.getElementById('return-pct').classList.add('positive');
                 else document.getElementById('return-pct').classList.add('negative');

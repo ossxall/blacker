@@ -2667,6 +2667,18 @@ def calculate_metrics(
 
         dd_trough_vs_capital_pct = 0.0
 
+        min_equity_static = (
+            initial_capital
+        )
+        min_equity_static_pct = 0.0
+        drawdown_static_pct = 0.0
+        drawdown_static_peak = (
+            initial_capital
+        )
+        drawdown_static_trough = (
+            initial_capital
+        )
+
     else:
 
         eq = equity[
@@ -2703,6 +2715,28 @@ def calculate_metrics(
             if initial_capital
             else 0.0
         )
+
+        if initial_capital > 0:
+            rel_vs_cap = (
+                eq / initial_capital - 1.0
+            )
+            drawdown_static_pct = float(
+                rel_vs_cap.min() * 100.0
+            )
+            min_equity_static = float(eq.min())
+            min_equity_static_pct = drawdown_static_pct
+            drawdown_static_trough = min_equity_static
+            drawdown_static_peak = float(
+                initial_capital
+            )
+        else:
+            drawdown_static_pct = 0.0
+            drawdown_static_peak = float(
+                initial_capital
+            )
+            drawdown_static_trough = float(eq.min())
+            min_equity_static = float(eq.min())
+            min_equity_static_pct = 0.0
 
         trough_pos = int(
             dd.idxmin()
@@ -2848,6 +2882,18 @@ def calculate_metrics(
         "min_equity_vs_capital_pct": (
             min_vs_capital_pct
         ),
+
+        "min_equity_static": min_equity_static,
+        "min_equity_static_pct": min_equity_static_pct,
+        "drawdown_static_pct": drawdown_static_pct,
+        "drawdown_static_peak": drawdown_static_peak,
+        "drawdown_static_trough": drawdown_static_trough,
+
+        "min_equity_static": min_equity_static,
+        "min_equity_static_pct": min_equity_static_pct,
+        "drawdown_static_pct": drawdown_static_pct,
+        "drawdown_static_peak": drawdown_static_peak,
+        "drawdown_static_trough": drawdown_static_trough,
 
         "return_over_maxdd": (
             (
@@ -3265,6 +3311,15 @@ def print_report(
         f"{m['max_dd_trough_equity']:,.2f} "
         f"[{m['max_dd_trough_vs_capital_pct']:+.2f}%])"
     )
+    if "drawdown_static_pct" in m:
+        print(
+            f"DD estático     : "
+            f"{m['drawdown_static_pct']:.2f}% "
+            f"(pico "
+            f"{m['drawdown_static_peak']:,.2f} "
+            f"-> valle "
+            f"{m['drawdown_static_trough']:,.2f})"
+        )
 
     print(
         f"Equity mínimo   : "
@@ -3272,6 +3327,13 @@ def print_report(
         f"({m['min_equity_vs_capital_pct']:.2f}% "
         f"vs capital inicial)"
     )
+    if "min_equity_static" in m:
+        print(
+            f"Min equity (est): "
+            f"{m['min_equity_static']:,.2f} "
+            f"({m['min_equity_static_pct']:.2f}% "
+            f"vs capital inicial)"
+        )
 
     print(
         f"Retorno / MaxDD : "
