@@ -126,7 +126,7 @@ class Config:
 
     cooldown_min: int = 0
 
-    adx_max: float = 38.0
+    adx_max: float = 40.0
     adx_rising: bool = True
 
     min_ema_gap_1h_pct: float = 0.001
@@ -144,7 +144,7 @@ class Config:
     exit_rsi_len: int = 14
 
     # LONG: salida si RSI >= nivel
-    exit_rsi_long: float = 100.0
+    exit_rsi_long: float = 70.0
 
     # SHORT: salida si RSI <= nivel
     exit_rsi_short: float = 32.0

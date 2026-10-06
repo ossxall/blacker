@@ -17,7 +17,7 @@
   "atr_stop_min_pct": 0.004,
   "atr_stop_max_pct": 0.015,
   "cooldown_min": 0,
-  "adx_max": 38.0,
+  "adx_max": 40.0,
   "adx_rising": true,
   "min_ema_gap_1h_pct": 0.001,
   "min_trigger_range_atr": 0.5,
@@ -25,6 +25,6 @@
   "timestamp_is_close": false,
   "exit_rsi_enabled": true,
   "exit_rsi_len": 14,
-  "exit_rsi_long": 100.0,
+  "exit_rsi_long": 70.0,
   "exit_rsi_short": 32.0
 }
