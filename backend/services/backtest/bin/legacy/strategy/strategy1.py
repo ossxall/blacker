@@ -103,7 +103,7 @@ class Config:
 
     atr_len: int = 14
 
-    close_on_30m_pct: float = 90.0
+    close_on_30m_pct: float = 25.0
 
     initial_capital: float = 10_000.0
 
@@ -111,7 +111,7 @@ class Config:
     slippage_bps: float = 0.0
 
     # Stop fijo de respaldo.
-    stop_loss_pct: float = 0.005
+    stop_loss_pct: float = 0.006
 
     force_close_at_end: bool = True
 
@@ -120,9 +120,9 @@ class Config:
     risk_pct: float = 0.01
     max_leverage: float = 1.0
 
-    atr_stop_mult: float = 3.0
-    atr_stop_min_pct: float = 0.004
-    atr_stop_max_pct: float = 0.015
+    atr_stop_mult: float = 0.0
+    atr_stop_min_pct: float = 0.000
+    atr_stop_max_pct: float = 0.000
 
     cooldown_min: int = 0
 
@@ -144,7 +144,7 @@ class Config:
     exit_rsi_len: int = 14
 
     # LONG: salida si RSI >= nivel
-    exit_rsi_long: float = 70.0
+    exit_rsi_long: float = 100.0
 
     # SHORT: salida si RSI <= nivel
     exit_rsi_short: float = 32.0
