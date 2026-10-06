@@ -99,7 +99,7 @@ class Config:
 
     adx_dilen: int = 14
     adx_len: int = 14
-    adx_threshold: float = 25.0
+    adx_threshold: float = 23.0
 
     atr_len: int = 14
 

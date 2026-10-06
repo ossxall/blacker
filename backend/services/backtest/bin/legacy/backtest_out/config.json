@@ -3,7 +3,7 @@
   "ema_slow": 55,
   "adx_dilen": 14,
   "adx_len": 14,
-  "adx_threshold": 25.0,
+  "adx_threshold": 23.0,
   "atr_len": 14,
   "close_on_30m_pct": 90.0,
   "initial_capital": 10000.0,
