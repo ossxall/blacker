@@ -13,7 +13,8 @@ Reglas:
     SALIDA -> cruce contrario (la posición se revierte).
     SALIDA ADICIONAL -> reversión del ADX calculado en 5m: cuando el
         ADX deja de subir tras un pico por encima de `key_level`, se
-        cierra la posición y se queda plano hasta el próximo cruce.
+        cierra la posición (total o parcial según `adx_exit_pct`).
+        Funciona igual para LONG y SHORT.
 
 La entrada sigue siendo SOLO el cruce de EMAs. No hay RSI ni ATR.
 
@@ -85,11 +86,13 @@ class Config:
     stop_loss_pct: float = 0.0
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
+    # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
     adx_exit_enabled: bool = True
     adx_timeframe: str = "5min"
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
+    adx_exit_pct: float = 50.0
 
     force_close_at_end: bool = True
 
@@ -137,6 +140,11 @@ class Config:
 
             if self.adx_key_level < 0:
                 raise ValueError("adx_key_level no puede ser negativo.")
+
+            if not (0.0 < self.adx_exit_pct <= 100.0):
+                raise ValueError(
+                    "adx_exit_pct debe estar entre 0 (excl.) y 100."
+                )
 
         if not self.allow_long and not self.allow_short:
             raise ValueError(
@@ -1548,8 +1556,8 @@ class Strategy2Backtester:
         # Objetivo pendiente de ejecutar: +1 LONG, -1 SHORT.
         self.pending_target: Optional[int] = None
 
-        # Salida pendiente de ejecutar (motivo) por reversión del ADX.
-        self.pending_exit: Optional[str] = None
+        # Salida pendiente de ejecutar por reversión del ADX: (motivo, %).
+        self.pending_exit: Optional[tuple[str, float]] = None
 
         self.trades: list[Trade] = []
 
@@ -1956,6 +1964,14 @@ class Strategy2Backtester:
 
         adx_reason = f"ADX_{adx_minutes}M_REVERSAL"
 
+        adx_exit_pct = float(cfg.adx_exit_pct)
+
+        adx_exit_reason = (
+            adx_reason
+            if adx_exit_pct >= 100.0
+            else f"{adx_reason}_{adx_exit_pct:g}%"
+        )
+
         started = time.perf_counter()
 
         last_log = -10
@@ -1975,18 +1991,20 @@ class Strategy2Backtester:
 
             if self.pending_exit is not None:
 
+                exit_reason, exit_pct = self.pending_exit
+
                 if self.verbose and self.position is not None:
                     print(
-                        f"[ADX] {self.times[i]} | EXIT | "
-                        f"{self.pending_exit}",
+                        f"[ADX] {self.times[i]} | EXIT "
+                        f"{exit_pct:g}% | {exit_reason}",
                         flush=True,
                     )
 
                 self.close_position(
-                    100.0,
+                    exit_pct,
                     self.o[i],
                     self.times[i],
-                    self.pending_exit,
+                    exit_reason,
                 )
 
                 self.pending_exit = None
@@ -2036,7 +2054,7 @@ class Strategy2Backtester:
                     and self.adx_exit[i]
                 ):
 
-                    new_exit = adx_reason
+                    new_exit = (adx_exit_reason, adx_exit_pct)
 
             if new_target is not None:
                 self.pending_target = new_target
@@ -2233,6 +2251,16 @@ def parse_args():
     )
 
     p.add_argument(
+        "--adx-exit-pct",
+        type=float,
+        default=d.adx_exit_pct,
+        help=(
+            "Porcentaje de la posición a cerrar en cada reversión "
+            "del ADX (100 = cierre total; <100 = salida parcial)."
+        ),
+    )
+
+    p.add_argument(
         "--no-long",
         action="store_true",
         help="Deshabilita entradas LONG.",
@@ -2322,6 +2350,7 @@ def make_config(args) -> Config:
         adx_dilen=args.adx_dilen,
         adx_adxlen=args.adx_adxlen,
         adx_key_level=args.adx_key_level,
+        adx_exit_pct=args.adx_exit_pct,
         force_close_at_end=not args.no_force_close,
         timestamp_is_close=(
             Config().timestamp_is_close
@@ -2408,6 +2437,7 @@ def main():
                 f"[ADX] {cfg.adx_timeframe} "
                 f"ADX({cfg.adx_dilen}/{cfg.adx_adxlen}) "
                 f"key_level={cfg.adx_key_level:g} | "
+                f"exit={cfg.adx_exit_pct:g}% | "
                 f"reversiones={int(adx_exit.sum()):,}",
                 flush=True,
             )
