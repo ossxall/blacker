@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-07T03:58:41.686307+00:00",
+  "generated_at": "2026-10-07T04:54:22.009808+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -29,74 +29,78 @@
     "adx_dilen": 14,
     "adx_adxlen": 14,
     "adx_key_level": 23.0,
-    "adx_exit_pct": 50.0,
+    "adx_exit_pct": 100.0,
+    "rsi_exit_enabled": true,
+    "rsi_len": 14,
+    "rsi_exit_level": 32.0,
+    "rsi_exit_pct": 100.0,
     "force_close_at_end": true,
     "timestamp_is_close": false
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 28362.13806575704,
-    "net_pnl": 18362.138065756975,
-    "return_pct": 183.6213806575704,
-    "max_drawdown_pct": -32.49937747647341,
-    "max_dd_peak_equity": 18248.032857856706,
-    "max_dd_trough_equity": 12317.535777350957,
-    "max_dd_peak_vs_capital_pct": 82.48032857856707,
-    "max_dd_trough_vs_capital_pct": 23.175357773509564,
-    "min_equity": 9130.105307966205,
-    "min_equity_vs_capital_pct": -8.698946920337946,
-    "return_over_maxdd": 5.6499968588781595,
-    "sharpe_daily_365": 0.8350536266061478,
-    "sortino_daily_365": 1.3224110176926263,
-    "legs": 5207,
+    "final_equity": 22053.781611972598,
+    "net_pnl": 12053.78161197261,
+    "return_pct": 120.53781611972599,
+    "max_drawdown_pct": -19.68138126958443,
+    "max_dd_peak_equity": 12653.97493815242,
+    "max_dd_trough_equity": 10163.497884816981,
+    "max_dd_peak_vs_capital_pct": 26.539749381524192,
+    "max_dd_trough_vs_capital_pct": 1.6349788481698102,
+    "min_equity": 9205.934122280458,
+    "min_equity_vs_capital_pct": -7.94065877719542,
+    "return_over_maxdd": 6.124459176348811,
+    "sharpe_daily_365": 0.8224946692607447,
+    "sortino_daily_365": 1.2860164326956458,
+    "legs": 663,
     "positions": 663,
-    "wins": 309,
-    "losses": 354,
-    "win_rate_pct": 46.60633484162896,
-    "profit_factor": 1.2512225614139334,
-    "avg_pnl": 27.695532527536916,
+    "wins": 343,
+    "losses": 320,
+    "win_rate_pct": 51.734539969834096,
+    "profit_factor": 1.2739697959515202,
+    "avg_pnl": 18.180666081406653,
     "expectancy_r": null,
-    "max_consecutive_losses": 10
+    "max_consecutive_losses": 8
   },
   "by_side": {
     "LONG": {
       "positions": 331,
-      "wins": 157,
-      "losses": 174,
-      "win_rate_pct": 47.43202416918429,
-      "profit_factor": 1.2986241586269256,
-      "net_pnl": 11303.35848501506,
-      "avg_pnl": 34.14911929007571,
+      "wins": 155,
+      "losses": 176,
+      "win_rate_pct": 46.82779456193353,
+      "profit_factor": 1.2557219855038628,
+      "net_pnl": 6721.033765092465,
+      "avg_pnl": 20.305237961004426,
       "expectancy_r": null,
-      "max_consecutive_losses": 8
+      "max_consecutive_losses": 6
     },
     "SHORT": {
       "positions": 332,
-      "wins": 152,
-      "losses": 180,
-      "win_rate_pct": 45.78313253012048,
-      "profit_factor": 1.2003077938987,
-      "net_pnl": 7058.779580741917,
-      "avg_pnl": 21.261384279343122,
+      "wins": 188,
+      "losses": 144,
+      "win_rate_pct": 56.62650602409639,
+      "profit_factor": 1.3010441369717456,
+      "net_pnl": 5332.747846880146,
+      "avg_pnl": 16.062493514699238,
       "expectancy_r": null,
-      "max_consecutive_losses": 8
+      "max_consecutive_losses": 7
     }
   },
   "exit_reasons": {
     "EMA_CROSS_EXIT": {
-      "legs": 656,
-      "positions": 656,
-      "pnl_net": -51103.98297136072
+      "legs": 93,
+      "positions": 93,
+      "pnl_net": -19570.513324547584
     },
-    "ADX_5M_REVERSAL_50%": {
-      "legs": 4550,
-      "positions": 557,
-      "pnl_net": 69467.29420601539
+    "ADX_5M_REVERSAL": {
+      "legs": 446,
+      "positions": 446,
+      "pnl_net": 15217.607985001448
     },
-    "END_OF_DATA": {
-      "legs": 1,
-      "positions": 1,
-      "pnl_net": -1.1731688976967445
+    "RSI14_32_EXIT": {
+      "legs": 124,
+      "positions": 124,
+      "pnl_net": 16406.686951518746
     }
   }
 }
