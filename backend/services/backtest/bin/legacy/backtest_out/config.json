@@ -15,11 +15,11 @@
   "adx_dilen": 14,
   "adx_adxlen": 14,
   "adx_key_level": 23.0,
-  "adx_exit_pct": 100.0,
+  "adx_exit_pct": 50.0,
   "rsi_exit_enabled": true,
   "rsi_len": 14,
   "rsi_exit_level": 32.0,
-  "rsi_exit_pct": 100.0,
+  "rsi_exit_pct": 50.0,
   "force_close_at_end": true,
   "timestamp_is_close": false
 }
