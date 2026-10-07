@@ -6,14 +6,16 @@ Backtesting Strategy2 — EMA CROSS 55/200 (30m)
 
 Estrategia básica de cruce de medias sobre velas de 30 minutos.
 
-Reglas (SOLO cruce de EMAs):
+Reglas:
 
     LONG  -> EMA55 cruza AL ALZA a EMA200 (golden cross).
     SHORT -> EMA55 cruza A LA BAJA a EMA200 (death cross).
     SALIDA -> cruce contrario (la posición se revierte).
+    SALIDA ADICIONAL -> reversión del ADX calculado en 5m: cuando el
+        ADX deja de subir tras un pico por encima de `key_level`, se
+        cierra la posición y se queda plano hasta el próximo cruce.
 
-No hay RSI, ADX, ATR ni filtros multi-timeframe: la única condición
-de entrada y de salida es el cruce de EMAs.
+La entrada sigue siendo SOLO el cruce de EMAs. No hay RSI ni ATR.
 
 Convención anti-lookahead:
 
@@ -82,6 +84,13 @@ class Config:
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
     stop_loss_pct: float = 0.0
 
+    # Salida por reversión del ADX en un timeframe menor (ej. 5m).
+    adx_exit_enabled: bool = True
+    adx_timeframe: str = "5min"
+    adx_dilen: int = 14
+    adx_adxlen: int = 14
+    adx_key_level: float = 23.0
+
     force_close_at_end: bool = True
 
     timestamp_is_close: bool = False
@@ -115,6 +124,19 @@ class Config:
 
         if self.stop_loss_pct < 0:
             raise ValueError("stop_loss_pct no puede ser negativo.")
+
+        if self.adx_exit_enabled:
+
+            if self.adx_dilen <= 0 or self.adx_adxlen <= 0:
+                raise ValueError(
+                    "adx_dilen y adx_adxlen deben ser > 0."
+                )
+
+            if pd.Timedelta(self.adx_timeframe) <= pd.Timedelta(0):
+                raise ValueError("adx_timeframe debe ser > 0.")
+
+            if self.adx_key_level < 0:
+                raise ValueError("adx_key_level no puede ser negativo.")
 
         if not self.allow_long and not self.allow_short:
             raise ValueError(
@@ -477,6 +499,246 @@ def build_features(
         "cross_down": cross_down,
         "valid": valid,
     }
+
+
+def _true_range(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+) -> np.ndarray:
+
+    prev_close = np.r_[
+        np.nan,
+        close[:-1],
+    ]
+
+    tr = np.maximum.reduce([
+        high - low,
+        np.abs(high - prev_close),
+        np.abs(low - prev_close),
+    ])
+
+    if len(tr):
+        tr[0] = high[0] - low[0]
+
+    return tr
+
+
+def adx_vec(
+    bars: pd.DataFrame,
+    dilen: int = 14,
+    adxlen: int = 14,
+) -> pd.DataFrame:
+
+    """ADX/DI de Wilder (misma implementación que strategy1)."""
+
+    if dilen <= 0 or adxlen <= 0:
+        raise ValueError("ADX lengths must be > 0")
+
+    n = len(bars)
+
+    out = pd.DataFrame(
+        {
+            "adx": np.nan,
+            "plus_di": np.nan,
+            "minus_di": np.nan,
+        },
+        index=bars.index,
+    )
+
+    if n == 0:
+        return out
+
+    high = bars["high"].to_numpy(float)
+    low = bars["low"].to_numpy(float)
+    close = bars["close"].to_numpy(float)
+
+    up = np.r_[
+        0.0,
+        high[1:] - high[:-1],
+    ]
+
+    down = np.r_[
+        0.0,
+        low[:-1] - low[1:],
+    ]
+
+    plus_dm = np.where(
+        (up > down) & (up > 0),
+        up,
+        0.0,
+    )
+
+    minus_dm = np.where(
+        (down > up) & (down > 0),
+        down,
+        0.0,
+    )
+
+    tr = _true_range(high, low, close)
+
+    a_di = 1.0 / dilen
+
+    tr_rma = pd.Series(tr).ewm(
+        alpha=a_di,
+        adjust=False,
+    ).mean().to_numpy()
+
+    p_rma = pd.Series(plus_dm).ewm(
+        alpha=a_di,
+        adjust=False,
+    ).mean().to_numpy()
+
+    m_rma = pd.Series(minus_dm).ewm(
+        alpha=a_di,
+        adjust=False,
+    ).mean().to_numpy()
+
+    safe_tr = np.where(tr_rma != 0, tr_rma, 1.0)
+
+    plus_di = np.where(
+        tr_rma != 0,
+        100.0 * p_rma / safe_tr,
+        0.0,
+    )
+
+    minus_di = np.where(
+        tr_rma != 0,
+        100.0 * m_rma / safe_tr,
+        0.0,
+    )
+
+    summ = plus_di + minus_di
+
+    dx = np.abs(plus_di - minus_di) / np.where(
+        summ != 0,
+        summ,
+        1.0,
+    )
+
+    adx = pd.Series(100.0 * dx).ewm(
+        alpha=1.0 / adxlen,
+        adjust=False,
+    ).mean().to_numpy()
+
+    visible_from = dilen + adxlen - 2
+
+    if visible_from < n:
+
+        out.iloc[visible_from:, 0] = adx[visible_from:]
+        out.iloc[visible_from:, 1] = plus_di[visible_from:]
+        out.iloc[visible_from:, 2] = minus_di[visible_from:]
+
+    return out
+
+
+def adx_reversal_flags(
+    adx: np.ndarray,
+    key_level: float,
+) -> np.ndarray:
+
+    """
+    Marca la vela donde el ADX revierte.
+
+    Es la misma regla que usa la clase `ADX` (strategy/ADX/ADX.py):
+    el ADX gira a la baja justo después de un pico por encima de
+    `key_level`.
+    """
+
+    adx = np.asarray(adx, dtype=float)
+
+    flags = np.zeros(len(adx), dtype=bool)
+
+    if len(adx) < 3:
+        return flags
+
+    a0 = adx[:-2]
+    a1 = adx[1:-1]
+    a2 = adx[2:]
+
+    with np.errstate(invalid="ignore"):
+
+        rule1 = a2 < a1
+        rule2 = a1 > a0
+        rule3 = a1 > key_level
+
+    flags[2:] = rule1 & rule2 & rule3
+
+    return flags
+
+
+def _source_minutes(data: pd.DataFrame) -> float:
+
+    minutes = float(
+        data.index
+        .to_series()
+        .diff()
+        .dropna()
+        .dt.total_seconds()
+        .median()
+        / 60.0
+    )
+
+    if not np.isfinite(minutes) or minutes <= 0:
+        return 1.0
+
+    return minutes
+
+
+def build_5m_adx_exit(
+    raw: pd.DataFrame,
+    bars: pd.DataFrame,
+    cfg: Config,
+) -> Optional[np.ndarray]:
+
+    """
+    Reversiones del ADX en `cfg.adx_timeframe` alineadas a las velas
+    de la estrategia.
+
+    Para cada vela de la estrategia se toma la última vela de
+    `adx_timeframe` ya cerrada en su cierre, sin lookahead. Devuelve
+    `None` si el dataset de origen es más grueso que `adx_timeframe`.
+    """
+
+    if not cfg.adx_exit_enabled or len(bars) == 0:
+        return None
+
+    target = pd.Timedelta(cfg.adx_timeframe)
+
+    source_minutes = _source_minutes(raw)
+
+    if pd.Timedelta(minutes=source_minutes) >= target:
+        return None
+
+    bars_low = resample_ohlcv(
+        raw,
+        cfg.adx_timeframe,
+        source_minutes,
+    )
+
+    if len(bars_low) < cfg.adx_dilen + cfg.adx_adxlen + 2:
+        return None
+
+    adx = adx_vec(
+        bars_low,
+        cfg.adx_dilen,
+        cfg.adx_adxlen,
+    )["adx"].to_numpy(float)
+
+    flags = adx_reversal_flags(adx, cfg.adx_key_level)
+
+    low_end = (bars_low.index + target).asi8
+    bar_close = (bars.index + pd.Timedelta(cfg.timeframe)).asi8
+
+    pos = np.searchsorted(low_end, bar_close, side="right") - 1
+
+    out = np.zeros(len(bars), dtype=bool)
+
+    ok = pos >= 0
+
+    out[ok] = flags[pos[ok]]
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1258,11 +1520,17 @@ class Strategy2Backtester:
         data: pd.DataFrame,
         config: Config,
         verbose: bool = False,
+        adx_exit: Optional[np.ndarray] = None,
     ):
 
         self.data = data
         self.cfg = config
         self.verbose = verbose
+
+        if adx_exit is None or len(adx_exit) != len(data):
+            adx_exit = np.zeros(len(data), dtype=bool)
+
+        self.adx_exit = np.asarray(adx_exit, dtype=bool)
 
         self.sig = build_features(data, config)
 
@@ -1279,6 +1547,9 @@ class Strategy2Backtester:
 
         # Objetivo pendiente de ejecutar: +1 LONG, -1 SHORT.
         self.pending_target: Optional[int] = None
+
+        # Salida pendiente de ejecutar (motivo) por reversión del ADX.
+        self.pending_exit: Optional[str] = None
 
         self.trades: list[Trade] = []
 
@@ -1678,6 +1949,13 @@ class Strategy2Backtester:
         cross_down = sig["cross_down"]
         valid = sig["valid"]
 
+        adx_minutes = int(
+            pd.Timedelta(cfg.adx_timeframe)
+            / pd.Timedelta(minutes=1)
+        )
+
+        adx_reason = f"ADX_{adx_minutes}M_REVERSAL"
+
         started = time.perf_counter()
 
         last_log = -10
@@ -1695,6 +1973,24 @@ class Strategy2Backtester:
                 self._execute_target(i, self.pending_target)
                 self.pending_target = None
 
+            if self.pending_exit is not None:
+
+                if self.verbose and self.position is not None:
+                    print(
+                        f"[ADX] {self.times[i]} | EXIT | "
+                        f"{self.pending_exit}",
+                        flush=True,
+                    )
+
+                self.close_position(
+                    100.0,
+                    self.o[i],
+                    self.times[i],
+                    self.pending_exit,
+                )
+
+                self.pending_exit = None
+
             # -------------------------------------------------------
             # 2) Stop intrabar (si está habilitado).
             # -------------------------------------------------------
@@ -1709,6 +2005,7 @@ class Strategy2Backtester:
             # -------------------------------------------------------
 
             new_target = None
+            new_exit = None
 
             if not stop_hit and valid[i]:
 
@@ -1731,8 +2028,21 @@ class Strategy2Backtester:
                     if current != target:
                         new_target = target
 
+                # Salida por reversión del ADX del timeframe menor:
+                # solo si no hay un cruce contrario que ya revertiría.
+                if (
+                    new_target is None
+                    and self.position is not None
+                    and self.adx_exit[i]
+                ):
+
+                    new_exit = adx_reason
+
             if new_target is not None:
                 self.pending_target = new_target
+
+            elif new_exit is not None:
+                self.pending_exit = new_exit
 
             # -------------------------------------------------------
             # Equity
@@ -1892,6 +2202,37 @@ def parse_args():
     )
 
     p.add_argument(
+        "--no-adx-exit",
+        action="store_true",
+        help="Deshabilita la salida por reversión del ADX 5m.",
+    )
+
+    p.add_argument(
+        "--adx-timeframe",
+        default=d.adx_timeframe,
+        help="Timeframe del ADX de salida (default: 5min).",
+    )
+
+    p.add_argument(
+        "--adx-dilen",
+        type=int,
+        default=d.adx_dilen,
+    )
+
+    p.add_argument(
+        "--adx-adxlen",
+        type=int,
+        default=d.adx_adxlen,
+    )
+
+    p.add_argument(
+        "--adx-key-level",
+        type=float,
+        default=d.adx_key_level,
+        help="Nivel del pico de ADX que habilita la reversión.",
+    )
+
+    p.add_argument(
         "--no-long",
         action="store_true",
         help="Deshabilita entradas LONG.",
@@ -1976,6 +2317,11 @@ def make_config(args) -> Config:
         risk_pct=args.risk_pct,
         max_leverage=args.max_leverage,
         stop_loss_pct=args.stop_loss_pct,
+        adx_exit_enabled=not args.no_adx_exit,
+        adx_timeframe=args.adx_timeframe,
+        adx_dilen=args.adx_dilen,
+        adx_adxlen=args.adx_adxlen,
+        adx_key_level=args.adx_key_level,
         force_close_at_end=not args.no_force_close,
         timestamp_is_close=(
             Config().timestamp_is_close
@@ -2043,10 +2389,34 @@ def main():
             f"para EMA{cfg.ema_slow} en {cfg.timeframe}."
         )
 
+    adx_exit = build_5m_adx_exit(raw, data, cfg)
+
+    if cfg.adx_exit_enabled:
+
+        if adx_exit is None:
+
+            print(
+                f"[ADX] salida por ADX {cfg.adx_timeframe} "
+                "deshabilitada: dataset de origen más grueso "
+                "que el timeframe del ADX.",
+                flush=True,
+            )
+
+        else:
+
+            print(
+                f"[ADX] {cfg.adx_timeframe} "
+                f"ADX({cfg.adx_dilen}/{cfg.adx_adxlen}) "
+                f"key_level={cfg.adx_key_level:g} | "
+                f"reversiones={int(adx_exit.sum()):,}",
+                flush=True,
+            )
+
     engine = Strategy2Backtester(
         data,
         cfg,
         verbose=args.verbose,
+        adx_exit=adx_exit,
     )
 
     trades, equity = engine.run()
