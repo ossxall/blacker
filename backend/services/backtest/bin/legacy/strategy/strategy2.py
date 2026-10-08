@@ -87,7 +87,7 @@ class Config:
     max_leverage: float = 1.0
 
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
-    stop_loss_pct: float = 0.0
+    stop_loss_pct: float = 0.03
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.

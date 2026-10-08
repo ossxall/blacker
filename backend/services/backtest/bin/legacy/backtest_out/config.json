@@ -9,7 +9,7 @@
   "slippage_bps": 0.0,
   "risk_pct": 0.01,
   "max_leverage": 1.0,
-  "stop_loss_pct": 0.0,
+  "stop_loss_pct": 0.03,
   "adx_exit_enabled": true,
   "adx_timeframe": "5min",
   "adx_dilen": 14,
