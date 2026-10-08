@@ -11,7 +11,7 @@
   "max_leverage": 1.0,
   "stop_loss_pct": 0.0,
   "adx_exit_enabled": true,
-  "adx_timeframe": "30min",
+  "adx_timeframe": "15min",
   "adx_dilen": 14,
   "adx_adxlen": 14,
   "adx_key_level": 23.0,
