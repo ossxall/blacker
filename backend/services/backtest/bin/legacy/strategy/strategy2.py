@@ -72,7 +72,7 @@ class Config:
     ema_slow: int = 200
 
     # Timeframe de la estrategia.
-    timeframe: str = "30min"
+    timeframe: str = "4h"
 
     # Lados habilitados.
     allow_long: bool = True
@@ -92,11 +92,11 @@ class Config:
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
     adx_exit_enabled: bool = True
-    adx_timeframe: str = "5min"
+    adx_timeframe: str = "15min"
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 25.0
+    adx_exit_pct: float = 50.0
 
     # Salida parcial por RSI en el timeframe de la estrategia (30m).
     # Solo SHORT: cruce a la baja de `rsi_exit_level`.
