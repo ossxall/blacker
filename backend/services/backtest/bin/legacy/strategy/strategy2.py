@@ -87,7 +87,7 @@ class Config:
     max_leverage: float = 1.0
 
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
-    stop_loss_pct: float = 0.03
+    stop_loss_pct: float = 0.00
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
@@ -96,14 +96,14 @@ class Config:
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 50.0
+    adx_exit_pct: float = 25.0
 
     # Salida parcial por RSI en el timeframe de la estrategia (30m).
     # Solo SHORT: cruce a la baja de `rsi_exit_level`.
     rsi_exit_enabled: bool = True
     rsi_len: int = 14
     rsi_exit_level: float = 32.0
-    rsi_exit_pct: float = 50.0
+    rsi_exit_pct: float = 100.0
 
     force_close_at_end: bool = True
 
