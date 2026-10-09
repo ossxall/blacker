@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-08T04:42:41.943945+00:00",
+  "generated_at": "2026-10-09T03:47:53.050899+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -29,78 +29,78 @@
     "adx_dilen": 14,
     "adx_adxlen": 14,
     "adx_key_level": 23.0,
-    "adx_exit_pct": 10.0,
+    "adx_exit_pct": 100.0,
     "rsi_exit_enabled": true,
     "rsi_len": 14,
     "rsi_exit_level": 32.0,
-    "rsi_exit_pct": 100.0,
+    "rsi_exit_pct": 50.0,
     "force_close_at_end": true,
     "timestamp_is_close": false
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 73074.29552957698,
-    "net_pnl": 63074.2955295771,
-    "return_pct": 630.7429552957698,
-    "max_drawdown_pct": -41.17989072363131,
-    "max_dd_peak_equity": 31018.051629705606,
-    "max_dd_trough_equity": 18244.8518639933,
-    "max_dd_peak_vs_capital_pct": 210.18051629705607,
-    "max_dd_trough_vs_capital_pct": 82.44851863993298,
-    "min_equity": 9281.678084080599,
-    "min_equity_vs_capital_pct": -7.18321915919401,
-    "return_over_maxdd": 15.316770982440087,
-    "sharpe_daily_365": 1.2260523161551116,
-    "sortino_daily_365": 1.8709288215863709,
-    "legs": 3495,
+    "final_equity": 21232.506365278026,
+    "net_pnl": 11232.506365278043,
+    "return_pct": 112.32506365278026,
+    "max_drawdown_pct": -19.988554451249385,
+    "max_dd_peak_equity": 14453.490463746959,
+    "max_dd_trough_equity": 11564.44665229476,
+    "max_dd_peak_vs_capital_pct": 44.53490463746959,
+    "max_dd_trough_vs_capital_pct": 15.644466522947598,
+    "min_equity": 9175.073402870596,
+    "min_equity_vs_capital_pct": -8.24926597129404,
+    "return_over_maxdd": 5.619469078003256,
+    "sharpe_daily_365": 0.7658464843198919,
+    "sortino_daily_365": 1.2166560078923057,
+    "legs": 885,
     "positions": 663,
-    "wins": 350,
-    "losses": 313,
-    "win_rate_pct": 52.79034690799397,
-    "profit_factor": 1.3476899807347151,
-    "avg_pnl": 95.13468405667739,
+    "wins": 323,
+    "losses": 340,
+    "win_rate_pct": 48.717948717948715,
+    "profit_factor": 1.2451555344002292,
+    "avg_pnl": 16.941940219122237,
     "expectancy_r": null,
-    "max_consecutive_losses": 7
+    "max_consecutive_losses": 8
   },
   "by_side": {
     "LONG": {
       "positions": 331,
-      "wins": 129,
-      "losses": 202,
-      "win_rate_pct": 38.972809667673715,
-      "profit_factor": 1.2780265363568875,
-      "net_pnl": 34713.92049115074,
-      "avg_pnl": 104.87589272250979,
+      "wins": 155,
+      "losses": 176,
+      "win_rate_pct": 46.82779456193353,
+      "profit_factor": 1.2580491362952853,
+      "net_pnl": 6758.517976422165,
+      "avg_pnl": 20.41848331245367,
       "expectancy_r": null,
-      "max_consecutive_losses": 12
+      "max_consecutive_losses": 6
     },
     "SHORT": {
       "positions": 332,
-      "wins": 221,
-      "losses": 111,
-      "win_rate_pct": 66.56626506024097,
-      "profit_factor": 1.5014983141416327,
-      "net_pnl": 28360.375038426362,
-      "avg_pnl": 85.4228163808023,
+      "wins": 168,
+      "losses": 164,
+      "win_rate_pct": 50.602409638554214,
+      "profit_factor": 1.2279500037636042,
+      "net_pnl": 4473.988388855878,
+      "avg_pnl": 13.475868641132163,
       "expectancy_r": null,
-      "max_consecutive_losses": 4
+      "max_consecutive_losses": 10
     }
   },
   "exit_reasons": {
     "EMA_CROSS_EXIT": {
-      "legs": 427,
-      "positions": 427,
-      "pnl_net": -146674.7300725208
+      "legs": 106,
+      "positions": 106,
+      "pnl_net": -20983.710231292513
     },
-    "ADX_5M_REVERSAL_10%": {
-      "legs": 2832,
-      "positions": 446,
-      "pnl_net": 126821.92293171426
+    "ADX_5M_REVERSAL": {
+      "legs": 557,
+      "positions": 557,
+      "pnl_net": 18319.116484660197
     },
-    "RSI14_32_EXIT": {
-      "legs": 236,
-      "positions": 236,
-      "pnl_net": 82927.10267038364
+    "RSI14_32_EXIT_50%": {
+      "legs": 222,
+      "positions": 124,
+      "pnl_net": 13897.100111910358
     }
   }
 }

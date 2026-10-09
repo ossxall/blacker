@@ -91,19 +91,19 @@ class Config:
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
-    adx_exit_enabled: bool = False
+    adx_exit_enabled: bool = True
     adx_timeframe: str = "5min"
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 10.0
+    adx_exit_pct: float = 100.0
 
     # Salida parcial por RSI en el timeframe de la estrategia (30m).
     # Solo SHORT: cruce a la baja de `rsi_exit_level`.
-    rsi_exit_enabled: bool = False
+    rsi_exit_enabled: bool = True
     rsi_len: int = 14
     rsi_exit_level: float = 32.0
-    rsi_exit_pct: float = 100.0
+    rsi_exit_pct: float = 50.0
 
     force_close_at_end: bool = True
 
@@ -2389,11 +2389,13 @@ def parse_args():
     )
 
     p.add_argument(
-        "--no-rsi-exit",
-        action="store_true",
+        "--rsi-exit",
+        action=argparse.BooleanOptionalAction,
+        default=d.rsi_exit_enabled,
         help=(
-            "Deshabilita la salida parcial por RSI "
-            "(solo SHORT)."
+            "Salida parcial por RSI (solo SHORT). "
+            "Default: %(default)s. "
+            "Usa --no-rsi-exit para deshabilitarla."
         ),
     )
 
@@ -2551,7 +2553,7 @@ def make_config(args) -> Config:
         adx_adxlen=args.adx_adxlen,
         adx_key_level=args.adx_key_level,
         adx_exit_pct=args.adx_exit_pct,
-        rsi_exit_enabled=not args.no_rsi_exit,
+        rsi_exit_enabled=args.rsi_exit,
         rsi_len=args.rsi_len,
         rsi_exit_level=args.rsi_exit_level,
         rsi_exit_pct=args.rsi_exit_pct,
