@@ -115,7 +115,7 @@ class Config:
     # estrategia: el gap |EMAfast-EMAslow|/EMAslow cae por debajo de
     # `ema_weakening_gap_pct`.
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_gap_pct: float = 0.0001
+    ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 50.0
 
     force_close_at_end: bool = True
