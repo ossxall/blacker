@@ -102,7 +102,7 @@ class Config:
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 50.0
+    adx_exit_pct: float = 100.0
 
     # Salida parcial por RSI en el timeframe de la estrategia (30m).
     # Solo SHORT: cruce a la baja de `rsi_exit_level`.
