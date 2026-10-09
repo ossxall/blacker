@@ -1,21 +1,21 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-09T03:47:53.050899+00:00",
+  "generated_at": "2026-10-09T03:57:56.270692+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
-    "bars": 118320,
+    "bars": 709920,
     "start": "2020-01-01T00:00:00+00:00",
-    "end": "2026-09-30T23:30:00+00:00",
+    "end": "2026-09-30T23:55:00+00:00",
     "quality": {
-      "bars": 118320,
+      "bars": 709920,
       "gaps_gt_1bar": 0,
-      "max_gap_minutes": 30.0
+      "max_gap_minutes": 5.0
     }
   },
   "config": {
     "ema_fast": 55,
     "ema_slow": 200,
-    "timeframe": "30min",
+    "timeframe": "5min",
     "allow_long": true,
     "allow_short": true,
     "initial_capital": 10000.0,
@@ -25,7 +25,7 @@
     "max_leverage": 1.0,
     "stop_loss_pct": 0.0,
     "adx_exit_enabled": true,
-    "adx_timeframe": "5min",
+    "adx_timeframe": "1min",
     "adx_dilen": 14,
     "adx_adxlen": 14,
     "adx_key_level": 23.0,
@@ -34,73 +34,81 @@
     "rsi_len": 14,
     "rsi_exit_level": 32.0,
     "rsi_exit_pct": 50.0,
+    "ema_weakening_exit_enabled": true,
+    "ema_weakening_gap_pct": 0.001,
+    "ema_weakening_exit_pct": 50.0,
     "force_close_at_end": true,
     "timestamp_is_close": false
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 21232.506365278026,
-    "net_pnl": 11232.506365278043,
-    "return_pct": 112.32506365278026,
-    "max_drawdown_pct": -19.988554451249385,
-    "max_dd_peak_equity": 14453.490463746959,
-    "max_dd_trough_equity": 11564.44665229476,
-    "max_dd_peak_vs_capital_pct": 44.53490463746959,
-    "max_dd_trough_vs_capital_pct": 15.644466522947598,
-    "min_equity": 9175.073402870596,
-    "min_equity_vs_capital_pct": -8.24926597129404,
-    "return_over_maxdd": 5.619469078003256,
-    "sharpe_daily_365": 0.7658464843198919,
-    "sortino_daily_365": 1.2166560078923057,
-    "legs": 885,
-    "positions": 663,
-    "wins": 323,
-    "losses": 340,
-    "win_rate_pct": 48.717948717948715,
-    "profit_factor": 1.2451555344002292,
-    "avg_pnl": 16.941940219122237,
+    "final_equity": 77098.94412709215,
+    "net_pnl": 67098.9441270919,
+    "return_pct": 670.9894412709216,
+    "max_drawdown_pct": -54.82261635654064,
+    "max_dd_peak_equity": 34214.64357641979,
+    "max_dd_trough_equity": 15457.28079076139,
+    "max_dd_peak_vs_capital_pct": 242.1464357641979,
+    "max_dd_trough_vs_capital_pct": 54.57280790761389,
+    "min_equity": 8131.543023642615,
+    "min_equity_vs_capital_pct": -18.684569763573855,
+    "return_over_maxdd": 12.239281629813512,
+    "sharpe_daily_365": 0.9295060952845295,
+    "sortino_daily_365": 1.4273192485222566,
+    "legs": 14692,
+    "positions": 4226,
+    "wins": 1647,
+    "losses": 2579,
+    "win_rate_pct": 38.9730241362991,
+    "profit_factor": 1.1118967404862445,
+    "avg_pnl": 15.877648870584927,
     "expectancy_r": null,
-    "max_consecutive_losses": 8
+    "max_consecutive_losses": 13
   },
   "by_side": {
     "LONG": {
-      "positions": 331,
-      "wins": 155,
-      "losses": 176,
-      "win_rate_pct": 46.82779456193353,
-      "profit_factor": 1.2580491362952853,
-      "net_pnl": 6758.517976422165,
-      "avg_pnl": 20.41848331245367,
+      "positions": 2113,
+      "wins": 617,
+      "losses": 1496,
+      "win_rate_pct": 29.200189304306672,
+      "profit_factor": 1.1381364119649775,
+      "net_pnl": 52351.90046203704,
+      "avg_pnl": 24.77610054994654,
       "expectancy_r": null,
-      "max_consecutive_losses": 6
+      "max_consecutive_losses": 16
     },
     "SHORT": {
-      "positions": 332,
-      "wins": 168,
-      "losses": 164,
-      "win_rate_pct": 50.602409638554214,
-      "profit_factor": 1.2279500037636042,
-      "net_pnl": 4473.988388855878,
-      "avg_pnl": 13.475868641132163,
+      "positions": 2113,
+      "wins": 1030,
+      "losses": 1083,
+      "win_rate_pct": 48.74585896829153,
+      "profit_factor": 1.066830432546224,
+      "net_pnl": 14747.043665054853,
+      "avg_pnl": 6.979197191223309,
       "expectancy_r": null,
       "max_consecutive_losses": 10
     }
   },
   "exit_reasons": {
     "EMA_CROSS_EXIT": {
-      "legs": 106,
-      "positions": 106,
-      "pnl_net": -20983.710231292513
+      "legs": 4223,
+      "positions": 4223,
+      "pnl_net": -241163.5063584178
     },
-    "ADX_5M_REVERSAL": {
-      "legs": 557,
-      "positions": 557,
-      "pnl_net": 18319.116484660197
+    "EMA_WEAKENING_5MIN_50%": {
+      "legs": 3920,
+      "positions": 3061,
+      "pnl_net": 45821.51597281031
     },
     "RSI14_32_EXIT_50%": {
-      "legs": 222,
-      "positions": 124,
-      "pnl_net": 13897.100111910358
+      "legs": 6548,
+      "positions": 1335,
+      "pnl_net": 262306.6281264741
+    },
+    "END_OF_DATA": {
+      "legs": 1,
+      "positions": 1,
+      "pnl_net": 134.3063862253036
     }
   }
 }
