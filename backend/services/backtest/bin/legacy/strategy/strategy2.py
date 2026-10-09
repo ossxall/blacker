@@ -78,7 +78,7 @@ class Config:
     ema_slow: int = 200
 
     # Timeframe de la estrategia.
-    timeframe: str = "5min"
+    timeframe: str = "30min"
 
     # Lados habilitados.
     allow_long: bool = True
@@ -93,20 +93,20 @@ class Config:
     max_leverage: float = 1.0
 
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
-    stop_loss_pct: float = 0.00
+    stop_loss_pct: float = 0.01
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
     adx_exit_enabled: bool = True
-    adx_timeframe: str = "1min"
+    adx_timeframe: str = "1d"
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 100.0
+    adx_exit_pct: float = 50.0
 
     # Salida parcial por RSI en el timeframe de la estrategia (30m).
     # Solo SHORT: cruce a la baja de `rsi_exit_level`.
-    rsi_exit_enabled: bool = True
+    rsi_exit_enabled: bool = False
     rsi_len: int = 14
     rsi_exit_level: float = 32.0
     rsi_exit_pct: float = 50.0
@@ -114,8 +114,8 @@ class Config:
     # Salida parcial por debilitamiento del timeframe de la
     # estrategia: el gap |EMAfast-EMAslow|/EMAslow cae por debajo de
     # `ema_weakening_gap_pct`.
-    ema_weakening_exit_enabled: bool = True
-    ema_weakening_gap_pct: float = 0.001
+    ema_weakening_exit_enabled: bool = False
+    ema_weakening_gap_pct: float = 0.0005
     ema_weakening_exit_pct: float = 50.0
 
     force_close_at_end: bool = True
