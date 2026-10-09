@@ -20,8 +20,8 @@
   "rsi_len": 14,
   "rsi_exit_level": 32.0,
   "rsi_exit_pct": 50.0,
-  "ema_weakening_exit_enabled": false,
-  "ema_weakening_gap_pct": 0.0005,
+  "ema_weakening_exit_enabled": true,
+  "ema_weakening_gap_pct": 0.0001,
   "ema_weakening_exit_pct": 50.0,
   "force_close_at_end": true,
   "timestamp_is_close": false

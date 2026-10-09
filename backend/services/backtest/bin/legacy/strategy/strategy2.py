@@ -114,8 +114,8 @@ class Config:
     # Salida parcial por debilitamiento del timeframe de la
     # estrategia: el gap |EMAfast-EMAslow|/EMAslow cae por debajo de
     # `ema_weakening_gap_pct`.
-    ema_weakening_exit_enabled: bool = False
-    ema_weakening_gap_pct: float = 0.0005
+    ema_weakening_exit_enabled: bool = True
+    ema_weakening_gap_pct: float = 0.0001
     ema_weakening_exit_pct: float = 50.0
 
     force_close_at_end: bool = True
