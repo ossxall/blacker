@@ -106,7 +106,7 @@ class Config:
 
     # Salida parcial por RSI en el timeframe de la estrategia (30m).
     # Solo SHORT: cruce a la baja de `rsi_exit_level`.
-    rsi_exit_enabled: bool = False
+    rsi_exit_enabled: bool = True
     rsi_len: int = 14
     rsi_exit_level: float = 32.0
     rsi_exit_pct: float = 50.0
