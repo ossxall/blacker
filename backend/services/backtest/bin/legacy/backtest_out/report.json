@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-10T04:00:27.705141+00:00",
+  "generated_at": "2026-10-10T04:04:27.299331+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -29,7 +29,7 @@
     "adx_dilen": 14,
     "adx_adxlen": 14,
     "adx_key_level": 23.0,
-    "adx_exit_pct": 50.0,
+    "adx_exit_pct": 100.0,
     "ema_weakening_exit_enabled": true,
     "ema_weakening_timeframe": "20min",
     "ema_weakening_gap_pct": 0.001,
@@ -39,27 +39,27 @@
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 99480.42060307566,
-    "net_pnl": 89480.4206030756,
-    "return_pct": 894.8042060307566,
-    "max_drawdown_pct": -30.20469331028619,
-    "max_dd_peak_equity": 22341.446453575885,
-    "max_dd_trough_equity": 15593.281071191479,
-    "max_dd_peak_vs_capital_pct": 123.41446453575884,
-    "max_dd_trough_vs_capital_pct": 55.93281071191478,
+    "final_equity": 104383.0393213271,
+    "net_pnl": 94383.03932132703,
+    "return_pct": 943.830393213271,
+    "max_drawdown_pct": -29.877756033046722,
+    "max_dd_peak_equity": 22454.317742210755,
+    "max_dd_trough_equity": 15745.4714683079,
+    "max_dd_peak_vs_capital_pct": 124.54317742210756,
+    "max_dd_trough_vs_capital_pct": 57.45471468307901,
     "min_equity": 9516.61182308683,
     "min_equity_vs_capital_pct": -4.833881769131699,
-    "return_over_maxdd": 29.624674445081407,
-    "sharpe_daily_365": 1.210647594709631,
-    "sortino_daily_365": 2.3361659221085813,
-    "legs": 3671,
+    "return_over_maxdd": 31.589734924180178,
+    "sharpe_daily_365": 1.2328057650233757,
+    "sortino_daily_365": 2.3801699988381824,
+    "legs": 835,
     "positions": 652,
-    "wins": 161,
-    "losses": 491,
-    "win_rate_pct": 24.69325153374233,
-    "profit_factor": 1.619149485345744,
-    "avg_pnl": 137.2399089004227,
-    "expectancy_r": 0.4267803416779312,
+    "wins": 164,
+    "losses": 488,
+    "win_rate_pct": 25.153374233128833,
+    "profit_factor": 1.6391253550617364,
+    "avg_pnl": 144.75926276277153,
+    "expectancy_r": 0.43409814602007646,
     "max_consecutive_losses": 19
   },
   "by_side": {
@@ -68,44 +68,44 @@
       "wins": 87,
       "losses": 238,
       "win_rate_pct": 26.769230769230766,
-      "profit_factor": 1.886568193887425,
-      "net_pnl": 63958.922211804,
-      "avg_pnl": 196.7966837286277,
-      "expectancy_r": 0.6290633622526188,
+      "profit_factor": 1.9095522970951981,
+      "net_pnl": 66796.22183727182,
+      "avg_pnl": 205.52683642237483,
+      "expectancy_r": 0.6344140140031581,
       "max_consecutive_losses": 12
     },
     "SHORT": {
       "positions": 327,
-      "wins": 74,
-      "losses": 253,
-      "win_rate_pct": 22.629969418960243,
-      "profit_factor": 1.3526073162151613,
-      "net_pnl": 25521.498391271583,
-      "avg_pnl": 78.04739569196202,
-      "expectancy_r": 0.22573452612204892,
-      "max_consecutive_losses": 29
+      "wins": 77,
+      "losses": 250,
+      "win_rate_pct": 23.547400611620795,
+      "profit_factor": 1.3716059685538133,
+      "net_pnl": 27586.817484055224,
+      "avg_pnl": 84.36335622035237,
+      "expectancy_r": 0.23500745154147842,
+      "max_consecutive_losses": 20
     }
   },
   "exit_reasons": {
     "EMA_CROSS_EXIT": {
-      "legs": 130,
-      "positions": 130,
-      "pnl_net": 51441.45628476076
+      "legs": 120,
+      "positions": 120,
+      "pnl_net": 52792.97838653615
     },
     "STOP_LOSS_1.00%": {
-      "legs": 468,
-      "positions": 468,
-      "pnl_net": -136016.18303879723
+      "legs": 423,
+      "positions": 423,
+      "pnl_net": -138961.21372218747
     },
     "EMA_WEAKENING_20MIN_50%": {
-      "legs": 195,
-      "positions": 123,
-      "pnl_net": 127513.16170617366
+      "legs": 183,
+      "positions": 118,
+      "pnl_net": 131020.44339147887
     },
-    "ADX_1440M_REVERSAL_50%": {
-      "legs": 2878,
+    "ADX_1440M_REVERSAL": {
+      "legs": 109,
       "positions": 109,
-      "pnl_net": 46541.98565093842
+      "pnl_net": 49530.83126549948
     }
   }
 }

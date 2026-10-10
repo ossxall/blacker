@@ -15,7 +15,7 @@
   "adx_dilen": 14,
   "adx_adxlen": 14,
   "adx_key_level": 23.0,
-  "adx_exit_pct": 50.0,
+  "adx_exit_pct": 100.0,
   "ema_weakening_exit_enabled": true,
   "ema_weakening_timeframe": "20min",
   "ema_weakening_gap_pct": 0.001,

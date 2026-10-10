@@ -98,7 +98,7 @@ class Config:
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 50.0
+    adx_exit_pct: float = 100.0
 
     # Salida parcial por debilitamiento: el gap
     # |EMAfast-EMAslow|/EMAslow cae por debajo de
