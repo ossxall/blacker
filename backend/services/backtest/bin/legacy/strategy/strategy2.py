@@ -120,7 +120,7 @@ class Config:
     # calculan en ese timeframe y la señal se alinea a las velas de
     # la estrategia.
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_timeframe: str = "5min"
+    ema_weakening_timeframe: str = "3min"
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 100.0
 
