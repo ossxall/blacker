@@ -93,7 +93,7 @@ class Config:
     max_leverage: float = 1.0
 
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
-    stop_loss_pct: float = 0.01
+    stop_loss_pct: float = 0.009
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
@@ -120,7 +120,7 @@ class Config:
     # calculan en ese timeframe y la señal se alinea a las velas de
     # la estrategia.
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_timeframe: str = "3min"
+    ema_weakening_timeframe: str = "2min"
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 100.0
 
