@@ -19,12 +19,12 @@ Reglas:
         estrategia (30m), cuando el RSI cruza A LA BAJA el nivel
         `rsi_exit_level` (32) se cierra el % `rsi_exit_pct` del
         SHORT abierto. No aplica a LONG.
-    SALIDA POR DEBILITAMIENTO DEL 30m -> cuando el gap entre la EMA
-        rápida y la EMA lenta del timeframe de la estrategia cae por
-        debajo de `ema_weakening_gap_pct` (las EMAs se acercan y la
-        tendencia pierde fuerza) se cierra el %
-        `ema_weakening_exit_pct` de la posición. Aplica a LONG y
-        SHORT.
+        SALIDA POR DEBILITAMIENTO -> cuando el gap entre la EMA
+        rápida y la EMA lenta (en `ema_weakening_timeframe`, que por
+        defecto es 15min) cae por debajo de
+        `ema_weakening_gap_pct` (las EMAs se acercan y la tendencia
+        pierde fuerza) se cierra el % `ema_weakening_exit_pct` de la
+        posición. Aplica a LONG y SHORT.
 
 La entrada sigue siendo SOLO el cruce de EMAs. No hay ATR.
 
@@ -111,10 +111,16 @@ class Config:
     rsi_exit_level: float = 32.0
     rsi_exit_pct: float = 50.0
 
-    # Salida parcial por debilitamiento del timeframe de la
-    # estrategia: el gap |EMAfast-EMAslow|/EMAslow cae por debajo de
+    # Salida parcial por debilitamiento: el gap
+    # |EMAfast-EMAslow|/EMAslow cae por debajo de
     # `ema_weakening_gap_pct`.
+    # `ema_weakening_timeframe` es configurable: por defecto se usan
+    # velas de 15min; si se deja vacío se usa el timeframe de la
+    # estrategia; si se indica otro (p.ej. "4h", "1d") las EMAs se
+    # calculan en ese timeframe y la señal se alinea a las velas de
+    # la estrategia.
     ema_weakening_exit_enabled: bool = True
+    ema_weakening_timeframe: str = "15min"
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 50.0
 
@@ -186,6 +192,14 @@ class Config:
                 )
 
         if self.ema_weakening_exit_enabled:
+
+            if self.ema_weakening_timeframe and (
+                pd.Timedelta(self.ema_weakening_timeframe)
+                <= pd.Timedelta(0)
+            ):
+                raise ValueError(
+                    "ema_weakening_timeframe debe ser > 0."
+                )
 
             if self.ema_weakening_gap_pct <= 0:
                 raise ValueError(
@@ -934,6 +948,89 @@ def build_rsi_exit(
     return rsi_exit_flags(rsi, cfg.rsi_exit_level)
 
 
+def _ema_weakening_flags_for_bars(
+    bars: pd.DataFrame,
+    cfg: Config,
+) -> np.ndarray:
+
+    """Calcula las flags de debilitamiento sobre `bars` ya remuestreados."""
+
+    ef = ema_closed(bars["close"], cfg.ema_fast).to_numpy(float)
+    es = ema_closed(bars["close"], cfg.ema_slow).to_numpy(float)
+
+    return ema_weakening_flags(
+        ef,
+        es,
+        cfg.ema_weakening_gap_pct,
+    )
+
+
+def build_ema_weakening_exit(
+    raw: pd.DataFrame,
+    bars: pd.DataFrame,
+    cfg: Config,
+) -> Optional[np.ndarray]:
+
+    """
+    Señales de debilitamiento en `ema_weakening_timeframe` alineadas
+    a las velas de la estrategia.
+
+    - `ema_weakening_timeframe` vacío o igual al de la estrategia:
+      se calculan las flags directamente sobre `bars` (1:1).
+    - `ema_weakening_timeframe` más grueso: se remuestrea `raw`,
+      se calculan las EMAs ahí y, para cada vela de la estrategia,
+      se toma la última vela de debilitamiento ya cerrada en su
+      cierre (sin lookahead).
+    - `ema_weakening_timeframe` más fino que el dataset de origen:
+      no es posible; se cae al timeframe de la estrategia.
+
+    Devuelve `None` si está deshabilitado o no hay datos suficientes.
+    """
+
+    if not cfg.ema_weakening_exit_enabled or len(bars) == 0:
+        return None
+
+    if cfg.ema_weakening_gap_pct <= 0:
+        return None
+
+    tf = cfg.ema_weakening_timeframe or cfg.timeframe
+
+    # Señal alineada 1:1 con las velas de la estrategia.
+    if not cfg.ema_weakening_timeframe or (
+        pd.Timedelta(tf) == pd.Timedelta(cfg.timeframe)
+    ):
+        return _ema_weakening_flags_for_bars(bars, cfg)
+
+    target = pd.Timedelta(tf)
+
+    source_minutes = _source_minutes(raw)
+
+    # No se puede remuestrear por debajo del origen: usamos el
+    # timeframe de la estrategia.
+    if pd.Timedelta(minutes=source_minutes) >= target:
+        return _ema_weakening_flags_for_bars(bars, cfg)
+
+    bars_low = resample_ohlcv(raw, tf, source_minutes)
+
+    if len(bars_low) < cfg.ema_slow + 2:
+        return None
+
+    flags = _ema_weakening_flags_for_bars(bars_low, cfg)
+
+    low_end = (bars_low.index + target).asi8
+    bar_close = (bars.index + pd.Timedelta(cfg.timeframe)).asi8
+
+    pos = np.searchsorted(low_end, bar_close, side="right") - 1
+
+    out = np.zeros(len(bars), dtype=bool)
+
+    ok = pos >= 0
+
+    out[ok] = flags[pos[ok]]
+
+    return out
+
+
 
 # ---------------------------------------------------------------------------
 # Reporte / métricas (mismo contrato que strategy1)
@@ -1462,9 +1559,13 @@ def print_report(
 
     if cfg.ema_weakening_exit_enabled:
 
+        weakening_tf = (
+            cfg.ema_weakening_timeframe or cfg.timeframe
+        )
+
         print(
             f"Weakening exit  : "
-            f"gap EMAs {cfg.timeframe} < "
+            f"gap EMAs {weakening_tf} < "
             f"{cfg.ema_weakening_gap_pct:.4%} -> "
             f"cierra {cfg.ema_weakening_exit_pct:g}%"
         )
@@ -1734,6 +1835,7 @@ class Strategy2Backtester:
         verbose: bool = False,
         adx_exit: Optional[np.ndarray] = None,
         rsi_exit: Optional[np.ndarray] = None,
+        weak_exit: Optional[np.ndarray] = None,
     ):
 
         self.data = data
@@ -1752,17 +1854,21 @@ class Strategy2Backtester:
 
         self.sig = build_features(data, config)
 
-        if (
-            config.ema_weakening_exit_enabled
-            and config.ema_weakening_gap_pct > 0
-        ):
-            self.weak_exit = ema_weakening_flags(
-                self.sig["ef"],
-                self.sig["es"],
-                config.ema_weakening_gap_pct,
-            )
-        else:
-            self.weak_exit = np.zeros(len(data), dtype=bool)
+        if weak_exit is None or len(weak_exit) != len(data):
+
+            if (
+                config.ema_weakening_exit_enabled
+                and config.ema_weakening_gap_pct > 0
+            ):
+                weak_exit = ema_weakening_flags(
+                    self.sig["ef"],
+                    self.sig["es"],
+                    config.ema_weakening_gap_pct,
+                )
+            else:
+                weak_exit = np.zeros(len(data), dtype=bool)
+
+        self.weak_exit = np.asarray(weak_exit, dtype=bool)
 
         self.o = data["open"].to_numpy(float)
         self.h = data["high"].to_numpy(float)
@@ -2206,8 +2312,12 @@ class Strategy2Backtester:
             else f"{rsi_reason}_{rsi_exit_pct:g}%"
         )
 
+        weakening_tf = (
+            cfg.ema_weakening_timeframe or cfg.timeframe
+        )
+
         weakening_reason = (
-            f"EMA_WEAKENING_{cfg.timeframe.upper()}"
+            f"EMA_WEAKENING_{weakening_tf.upper()}"
         )
 
         weakening_exit_pct = float(
@@ -2294,8 +2404,8 @@ class Strategy2Backtester:
                     if current != target:
                         new_target = target
 
-                # Salidas parciales (debilitamiento 30m / ADX 5m /
-                # RSI 30m): solo si no hay un cruce contrario que ya
+                # Salidas parciales (debilitamiento / ADX / RSI):
+                # solo si no hay un cruce contrario que ya
                 # revertiría.
                 if (
                     new_target is None
@@ -2562,6 +2672,16 @@ def parse_args():
     )
 
     p.add_argument(
+        "--ema-weakening-timeframe",
+        default=d.ema_weakening_timeframe,
+        help=(
+            "Timeframe donde se calculan las EMAs de la salida por "
+            "debilitamiento. Vacío = el de la estrategia; p.ej. "
+            "'15min', '4h', '1d' (default: 15min)."
+        ),
+    )
+
+    p.add_argument(
         "--ema-weakening-exit-pct",
         type=float,
         default=d.ema_weakening_exit_pct,
@@ -2703,6 +2823,7 @@ def make_config(args) -> Config:
         rsi_exit_level=args.rsi_exit_level,
         rsi_exit_pct=args.rsi_exit_pct,
         ema_weakening_exit_enabled=args.ema_weakening_exit,
+        ema_weakening_timeframe=args.ema_weakening_timeframe,
         ema_weakening_gap_pct=args.ema_weakening_gap_pct,
         ema_weakening_exit_pct=args.ema_weakening_exit_pct,
         force_close_at_end=not args.no_force_close,
@@ -2817,12 +2938,39 @@ def main():
                 flush=True,
             )
 
+    weak_exit = build_ema_weakening_exit(raw, data, cfg)
+
+    if cfg.ema_weakening_exit_enabled:
+
+        weakening_tf = (
+            cfg.ema_weakening_timeframe or cfg.timeframe
+        )
+
+        if weak_exit is None:
+
+            print(
+                "[WEAKENING] salida por debilitamiento deshabilitada: "
+                "hay muy pocas velas en el timeframe indicado.",
+                flush=True,
+            )
+
+        else:
+
+            print(
+                f"[WEAKENING] gap EMAs en {weakening_tf} | "
+                f"umbral={cfg.ema_weakening_gap_pct:.4%} | "
+                f"exit={cfg.ema_weakening_exit_pct:g}% | "
+                f"señales={int(weak_exit.sum()):,}",
+                flush=True,
+            )
+
     engine = Strategy2Backtester(
         data,
         cfg,
         verbose=args.verbose,
         adx_exit=adx_exit,
         rsi_exit=rsi_exit,
+        weak_exit=weak_exit,
     )
 
     trades, equity = engine.run()

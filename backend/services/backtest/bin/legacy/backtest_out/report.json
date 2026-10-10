@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-09T04:33:30.984255+00:00",
+  "generated_at": "2026-10-10T02:32:11.693843+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -35,6 +35,7 @@
     "rsi_exit_level": 32.0,
     "rsi_exit_pct": 50.0,
     "ema_weakening_exit_enabled": true,
+    "ema_weakening_timeframe": "15min",
     "ema_weakening_gap_pct": 0.001,
     "ema_weakening_exit_pct": 50.0,
     "force_close_at_end": true,
@@ -42,50 +43,50 @@
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 111527.03969922193,
-    "net_pnl": 101527.03969922199,
-    "return_pct": 1015.2703969922193,
-    "max_drawdown_pct": -21.91792588520024,
-    "max_dd_peak_equity": 52163.848018031626,
-    "max_dd_trough_equity": 40730.61447057096,
-    "max_dd_peak_vs_capital_pct": 421.6384801803162,
-    "max_dd_trough_vs_capital_pct": 307.30614470570964,
-    "min_equity": 9732.675187570754,
-    "min_equity_vs_capital_pct": -2.67324812429246,
-    "return_over_maxdd": 46.32146318542695,
-    "sharpe_daily_365": 1.5094781993310018,
-    "sortino_daily_365": 2.864828485153843,
-    "legs": 1411,
+    "final_equity": 55817.584843094184,
+    "net_pnl": 45817.58484309417,
+    "return_pct": 458.1758484309418,
+    "max_drawdown_pct": -20.435524449205435,
+    "max_dd_peak_equity": 31460.72910247885,
+    "max_dd_trough_equity": 25031.564114843495,
+    "max_dd_peak_vs_capital_pct": 214.60729102478848,
+    "max_dd_trough_vs_capital_pct": 150.31564114843493,
+    "min_equity": 9643.925248184496,
+    "min_equity_vs_capital_pct": -3.5607475181550385,
+    "return_over_maxdd": 22.420557376434566,
+    "sharpe_daily_365": 1.2284076803901571,
+    "sortino_daily_365": 2.247975232103176,
+    "legs": 1482,
     "positions": 652,
-    "wins": 211,
-    "losses": 441,
-    "win_rate_pct": 32.36196319018405,
-    "profit_factor": 1.6317425544851947,
-    "avg_pnl": 155.71631855708895,
-    "expectancy_r": 0.4498742305446409,
+    "wins": 219,
+    "losses": 433,
+    "win_rate_pct": 33.58895705521473,
+    "profit_factor": 1.5030666327453104,
+    "avg_pnl": 70.27236939124873,
+    "expectancy_r": 0.3050562306787302,
     "max_consecutive_losses": 12
   },
   "by_side": {
     "LONG": {
       "positions": 325,
-      "wins": 83,
-      "losses": 242,
-      "win_rate_pct": 25.538461538461537,
-      "profit_factor": 1.9258539572574225,
-      "net_pnl": 89415.93855153877,
-      "avg_pnl": 275.12596477396545,
-      "expectancy_r": 0.8435622611547433,
+      "wins": 87,
+      "losses": 238,
+      "win_rate_pct": 26.769230769230766,
+      "profit_factor": 1.7181134877389088,
+      "net_pnl": 38924.70709680597,
+      "avg_pnl": 119.76832952863376,
+      "expectancy_r": 0.544621694672481,
       "max_consecutive_losses": 12
     },
     "SHORT": {
       "positions": 327,
-      "wins": 128,
-      "losses": 199,
-      "win_rate_pct": 39.14373088685015,
-      "profit_factor": 1.1888441183906187,
-      "net_pnl": 12111.101147683221,
-      "avg_pnl": 37.037006567838596,
-      "expectancy_r": 0.058594077797597205,
+      "wins": 132,
+      "losses": 195,
+      "win_rate_pct": 40.36697247706422,
+      "profit_factor": 1.1869383927293116,
+      "net_pnl": 6892.877746288197,
+      "avg_pnl": 21.079136838801826,
+      "expectancy_r": 0.06695599888065987,
       "max_consecutive_losses": 8
     }
   },
@@ -93,27 +94,27 @@
     "EMA_CROSS_EXIT": {
       "legs": 120,
       "positions": 120,
-      "pnl_net": 42101.23365093404
+      "pnl_net": 20333.18257534774
     },
     "STOP_LOSS_1.00%": {
       "legs": 423,
       "positions": 423,
-      "pnl_net": -156917.15693452992
+      "pnl_net": -89604.24013748574
     },
     "RSI14_32_EXIT_50%": {
-      "legs": 632,
+      "legs": 630,
       "positions": 151,
-      "pnl_net": 78535.80258217055
+      "pnl_net": 44293.547467894205
     },
-    "EMA_WEAKENING_30MIN_50%": {
-      "legs": 127,
-      "positions": 107,
-      "pnl_net": 55796.475772470345
+    "EMA_WEAKENING_15MIN_50%": {
+      "legs": 200,
+      "positions": 120,
+      "pnl_net": 45543.63417651814
     },
     "ADX_1440M_REVERSAL": {
       "legs": 109,
       "positions": 109,
-      "pnl_net": 82010.684628177
+      "pnl_net": 25251.46076081983
     }
   }
 }
