@@ -98,7 +98,7 @@ class Config:
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
     adx_exit_enabled: bool = True
-    adx_timeframe: str = "1d"
+    adx_timeframe: str = "1D"
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
@@ -120,9 +120,9 @@ class Config:
     # calculan en ese timeframe y la señal se alinea a las velas de
     # la estrategia.
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_timeframe: str = "15min"
+    ema_weakening_timeframe: str = "30min"
     ema_weakening_gap_pct: float = 0.001
-    ema_weakening_exit_pct: float = 50.0
+    ema_weakening_exit_pct: float = 100.0
 
     force_close_at_end: bool = True
 
