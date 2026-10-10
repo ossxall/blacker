@@ -15,11 +15,7 @@ Reglas:
         ADX deja de subir tras un pico por encima de `key_level`, se
         cierra la posición (total o parcial según `adx_exit_pct`).
         Funciona igual para LONG y SHORT.
-    SALIDA PARCIAL RSI (solo SHORT) -> en el timeframe de la
-        estrategia (30m), cuando el RSI cruza A LA BAJA el nivel
-        `rsi_exit_level` (32) se cierra el % `rsi_exit_pct` del
-        SHORT abierto. No aplica a LONG.
-        SALIDA POR DEBILITAMIENTO -> cuando el gap entre la EMA
+    SALIDA POR DEBILITAMIENTO -> cuando el gap entre la EMA
         rápida y la EMA lenta (en `ema_weakening_timeframe`, que por
         defecto es 15min) cae por debajo de
         `ema_weakening_gap_pct` (las EMAs se acercan y la tendencia
@@ -78,7 +74,7 @@ class Config:
     ema_slow: int = 200
 
     # Timeframe de la estrategia.
-    timeframe: str = "5min"
+    timeframe: str = "30min"
 
     # Lados habilitados.
     allow_long: bool = True
@@ -93,7 +89,7 @@ class Config:
     max_leverage: float = 1.0
 
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
-    stop_loss_pct: float = 0.009
+    stop_loss_pct: float = 0.01
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
@@ -102,14 +98,7 @@ class Config:
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
-    adx_exit_pct: float = 100.0
-
-    # Salida parcial por RSI en el timeframe de la estrategia (30m).
-    # Solo SHORT: cruce a la baja de `rsi_exit_level`.
-    rsi_exit_enabled: bool = True
-    rsi_len: int = 14
-    rsi_exit_level: float = 32.0
-    rsi_exit_pct: float = 100.0
+    adx_exit_pct: float = 50.0
 
     # Salida parcial por debilitamiento: el gap
     # |EMAfast-EMAslow|/EMAslow cae por debajo de
@@ -120,7 +109,7 @@ class Config:
     # calculan en ese timeframe y la señal se alinea a las velas de
     # la estrategia.
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_timeframe: str = "2min"
+    ema_weakening_timeframe: str = "15min"
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 100.0
 
@@ -174,21 +163,6 @@ class Config:
             if not (0.0 < self.adx_exit_pct <= 100.0):
                 raise ValueError(
                     "adx_exit_pct debe estar entre 0 (excl.) y 100."
-                )
-
-        if self.rsi_exit_enabled:
-
-            if self.rsi_len <= 0:
-                raise ValueError("rsi_len debe ser > 0.")
-
-            if not (0.0 < self.rsi_exit_level < 100.0):
-                raise ValueError(
-                    "rsi_exit_level debe estar entre 0 y 100."
-                )
-
-            if not (0.0 < self.rsi_exit_pct <= 100.0):
-                raise ValueError(
-                    "rsi_exit_pct debe estar entre 0 (excl.) y 100."
                 )
 
         if self.ema_weakening_exit_enabled:
@@ -539,51 +513,6 @@ def ema_closed(
     ).mean()
 
 
-def rsi_vec(
-    close: pd.Series,
-    length: int = 14,
-) -> pd.Series:
-
-    """RSI de Wilder (smoothing alpha = 1/length)."""
-
-    if length <= 0:
-        raise ValueError("RSI length must be > 0")
-
-    delta = close.diff()
-
-    gain = delta.clip(lower=0.0)
-    loss = (-delta).clip(lower=0.0)
-
-    avg_gain = gain.ewm(
-        alpha=1.0 / length,
-        adjust=False,
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1.0 / length,
-        adjust=False,
-    ).mean()
-
-    zero_loss = avg_loss.to_numpy() == 0.0
-    zero_gain = avg_gain.to_numpy() == 0.0
-
-    safe_loss = np.where(zero_loss, 1.0, avg_loss.to_numpy())
-
-    with np.errstate(invalid="ignore"):
-        rs = avg_gain.to_numpy() / safe_loss
-        rsi = 100.0 - 100.0 / (1.0 + rs)
-
-    rsi = np.where(zero_loss & ~zero_gain, 100.0, rsi)
-    rsi = np.where(zero_loss & zero_gain, 50.0, rsi)
-
-    out = pd.Series(rsi, index=close.index, dtype=float)
-
-    out.iloc[:length] = np.nan
-
-    return out
-
-
-
 def build_features(
     bars: pd.DataFrame,
     cfg: Config,
@@ -786,35 +715,6 @@ def adx_reversal_flags(
     return flags
 
 
-def rsi_exit_flags(
-    rsi: np.ndarray,
-    level: float,
-) -> np.ndarray:
-
-    """
-    Marca la vela donde el RSI cruza A LA BAJA `level`.
-
-    Se usa como take-profit parcial de SHORT: el RSI entra en la
-    zona de sobreventa y se reduce la posición.
-    """
-
-    rsi = np.asarray(rsi, dtype=float)
-
-    flags = np.zeros(len(rsi), dtype=bool)
-
-    if len(rsi) < 2:
-        return flags
-
-    prev = rsi[:-1]
-    cur = rsi[1:]
-
-    with np.errstate(invalid="ignore"):
-
-        flags[1:] = (prev > level) & (cur <= level)
-
-    return flags
-
-
 def ema_weakening_flags(
     ef: np.ndarray,
     es: np.ndarray,
@@ -925,27 +825,6 @@ def build_5m_adx_exit(
     out[ok] = flags[pos[ok]]
 
     return out
-
-
-def build_rsi_exit(
-    bars: pd.DataFrame,
-    cfg: Config,
-) -> Optional[np.ndarray]:
-
-    """
-    Cruces a la baja del RSI en el timeframe de la estrategia (30m),
-    alineados 1:1 con las velas. Devuelve `None` si está deshabilitado.
-    """
-
-    if not cfg.rsi_exit_enabled or len(bars) == 0:
-        return None
-
-    rsi = rsi_vec(
-        bars["close"],
-        cfg.rsi_len,
-    ).to_numpy(float)
-
-    return rsi_exit_flags(rsi, cfg.rsi_exit_level)
 
 
 def _ema_weakening_flags_for_bars(
@@ -1548,15 +1427,6 @@ def print_report(
         f"{'SHORT' if cfg.allow_short else ''}"
     )
 
-    if cfg.rsi_exit_enabled:
-
-        print(
-            f"RSI exit        : "
-            f"RSI({cfg.rsi_len}) cruza <= {cfg.rsi_exit_level:g} "
-            f"en {cfg.timeframe} -> "
-            f"cierra {cfg.rsi_exit_pct:g}% (solo SHORT)"
-        )
-
     if cfg.ema_weakening_exit_enabled:
 
         weakening_tf = (
@@ -1834,7 +1704,6 @@ class Strategy2Backtester:
         config: Config,
         verbose: bool = False,
         adx_exit: Optional[np.ndarray] = None,
-        rsi_exit: Optional[np.ndarray] = None,
         weak_exit: Optional[np.ndarray] = None,
     ):
 
@@ -1846,11 +1715,6 @@ class Strategy2Backtester:
             adx_exit = np.zeros(len(data), dtype=bool)
 
         self.adx_exit = np.asarray(adx_exit, dtype=bool)
-
-        if rsi_exit is None or len(rsi_exit) != len(data):
-            rsi_exit = np.zeros(len(data), dtype=bool)
-
-        self.rsi_exit = np.asarray(rsi_exit, dtype=bool)
 
         self.sig = build_features(data, config)
 
@@ -1884,7 +1748,7 @@ class Strategy2Backtester:
         # Objetivo pendiente de ejecutar: +1 LONG, -1 SHORT.
         self.pending_target: Optional[int] = None
 
-        # Salida pendiente de ejecutar (ADX o RSI): (motivo, %).
+        # Salida pendiente de ejecutar (ADX o debilitamiento): (motivo, %).
         self.pending_exit: Optional[tuple[str, float]] = None
 
         self.trades: list[Trade] = []
@@ -2300,18 +2164,6 @@ class Strategy2Backtester:
             else f"{adx_reason}_{adx_exit_pct:g}%"
         )
 
-        rsi_reason = (
-            f"RSI{cfg.rsi_len}_{cfg.rsi_exit_level:g}_EXIT"
-        )
-
-        rsi_exit_pct = float(cfg.rsi_exit_pct)
-
-        rsi_exit_reason = (
-            rsi_reason
-            if rsi_exit_pct >= 100.0
-            else f"{rsi_reason}_{rsi_exit_pct:g}%"
-        )
-
         weakening_tf = (
             cfg.ema_weakening_timeframe or cfg.timeframe
         )
@@ -2404,7 +2256,7 @@ class Strategy2Backtester:
                     if current != target:
                         new_target = target
 
-                # Salidas parciales (debilitamiento / ADX / RSI):
+                # Salidas parciales (debilitamiento / ADX):
                 # solo si no hay un cruce contrario que ya
                 # revertiría.
                 if (
@@ -2426,19 +2278,6 @@ class Strategy2Backtester:
                 ):
 
                     new_exit = (adx_exit_reason, adx_exit_pct)
-
-                # Salida parcial por RSI en el timeframe de la
-                # estrategia (30m): SOLO cuando la posición es SHORT
-                # y el RSI cruza a la baja el nivel (sobreventa).
-                if (
-                    new_exit is None
-                    and new_target is None
-                    and self.position is not None
-                    and self.position.side == -1
-                    and self.rsi_exit[i]
-                ):
-
-                    new_exit = (rsi_exit_reason, rsi_exit_pct)
 
             if new_target is not None:
                 self.pending_target = new_target
@@ -2607,45 +2446,6 @@ def parse_args():
         "--no-adx-exit",
         action="store_true",
         help="Deshabilita la salida por reversión del ADX 5m.",
-    )
-
-    p.add_argument(
-        "--rsi-exit",
-        action=argparse.BooleanOptionalAction,
-        default=d.rsi_exit_enabled,
-        help=(
-            "Salida parcial por RSI (solo SHORT). "
-            "Default: %(default)s. "
-            "Usa --no-rsi-exit para deshabilitarla."
-        ),
-    )
-
-    p.add_argument(
-        "--rsi-len",
-        type=int,
-        default=d.rsi_len,
-        help="Periodo del RSI de salida (default: 14).",
-    )
-
-    p.add_argument(
-        "--rsi-exit-level",
-        type=float,
-        default=d.rsi_exit_level,
-        help=(
-            "Nivel del RSI que dispara la salida parcial del "
-            "SHORT (default: 32)."
-        ),
-    )
-
-    p.add_argument(
-        "--rsi-exit-pct",
-        type=float,
-        default=d.rsi_exit_pct,
-        help=(
-            "Porcentaje del SHORT a cerrar en cada cruce del RSI "
-            "por debajo del nivel (100 = cierre total; "
-            "<100 = salida parcial; default: 50)."
-        ),
     )
 
     p.add_argument(
@@ -2818,10 +2618,6 @@ def make_config(args) -> Config:
         adx_adxlen=args.adx_adxlen,
         adx_key_level=args.adx_key_level,
         adx_exit_pct=args.adx_exit_pct,
-        rsi_exit_enabled=args.rsi_exit,
-        rsi_len=args.rsi_len,
-        rsi_exit_level=args.rsi_exit_level,
-        rsi_exit_pct=args.rsi_exit_pct,
         ema_weakening_exit_enabled=args.ema_weakening_exit,
         ema_weakening_timeframe=args.ema_weakening_timeframe,
         ema_weakening_gap_pct=args.ema_weakening_gap_pct,
@@ -2917,27 +2713,6 @@ def main():
                 flush=True,
             )
 
-    rsi_exit = build_rsi_exit(data, cfg)
-
-    if cfg.rsi_exit_enabled:
-
-        if rsi_exit is None:
-
-            print(
-                "[RSI] salida por RSI deshabilitada.",
-                flush=True,
-            )
-
-        else:
-
-            print(
-                f"[RSI] RSI({cfg.rsi_len}) {cfg.timeframe} | "
-                f"nivel={cfg.rsi_exit_level:g} | "
-                f"exit={cfg.rsi_exit_pct:g}% SOLO SHORT | "
-                f"cruces={int(rsi_exit.sum()):,}",
-                flush=True,
-            )
-
     weak_exit = build_ema_weakening_exit(raw, data, cfg)
 
     if cfg.ema_weakening_exit_enabled:
@@ -2969,7 +2744,6 @@ def main():
         cfg,
         verbose=args.verbose,
         adx_exit=adx_exit,
-        rsi_exit=rsi_exit,
         weak_exit=weak_exit,
     )
 
