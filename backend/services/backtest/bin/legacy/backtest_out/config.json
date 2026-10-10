@@ -19,7 +19,7 @@
   "rsi_exit_enabled": true,
   "rsi_len": 14,
   "rsi_exit_level": 32.0,
-  "rsi_exit_pct": 50.0,
+  "rsi_exit_pct": 100.0,
   "ema_weakening_exit_enabled": true,
   "ema_weakening_timeframe": "30min",
   "ema_weakening_gap_pct": 0.001,

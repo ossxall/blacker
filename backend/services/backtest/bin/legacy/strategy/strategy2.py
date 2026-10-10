@@ -109,7 +109,7 @@ class Config:
     rsi_exit_enabled: bool = True
     rsi_len: int = 14
     rsi_exit_level: float = 32.0
-    rsi_exit_pct: float = 50.0
+    rsi_exit_pct: float = 100.0
 
     # Salida parcial por debilitamiento: el gap
     # |EMAfast-EMAslow|/EMAslow cae por debajo de
