@@ -10,7 +10,7 @@
   "risk_pct": 0.01,
   "max_leverage": 1.0,
   "stop_loss_pct": 0.01,
-  "adx_exit_enabled": true,
+  "adx_exit_enabled": false,
   "adx_timeframe": "1D",
   "adx_dilen": 14,
   "adx_adxlen": 14,

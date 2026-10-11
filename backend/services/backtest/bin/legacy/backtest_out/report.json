@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-11T02:35:31.530963+00:00",
+  "generated_at": "2026-10-11T02:47:06.216553+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -24,7 +24,7 @@
     "risk_pct": 0.01,
     "max_leverage": 1.0,
     "stop_loss_pct": 0.01,
-    "adx_exit_enabled": true,
+    "adx_exit_enabled": false,
     "adx_timeframe": "1D",
     "adx_dilen": 14,
     "adx_adxlen": 14,
@@ -39,73 +39,68 @@
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 113195.68695302916,
-    "net_pnl": 103195.68695302929,
-    "return_pct": 1031.9568695302917,
-    "max_drawdown_pct": -27.01556914087284,
-    "max_dd_peak_equity": 21619.250266466795,
-    "max_dd_trough_equity": 15778.686762991121,
-    "max_dd_peak_vs_capital_pct": 116.19250266466796,
-    "max_dd_trough_vs_capital_pct": 57.78686762991121,
+    "final_equity": 104001.09116819862,
+    "net_pnl": 94001.09116819866,
+    "return_pct": 940.010911681986,
+    "max_drawdown_pct": -27.556152083439233,
+    "max_dd_peak_equity": 19334.04615345475,
+    "max_dd_trough_equity": 14006.326991526426,
+    "max_dd_peak_vs_capital_pct": 93.34046153454752,
+    "max_dd_trough_vs_capital_pct": 40.06326991526426,
     "min_equity": 9595.277006361834,
     "min_equity_vs_capital_pct": -4.047229936381669,
-    "return_over_maxdd": 38.19859815461027,
-    "sharpe_daily_365": 1.28239363990609,
-    "sortino_daily_365": 2.583114178576208,
-    "legs": 3197,
+    "return_over_maxdd": 34.11256073909232,
+    "sharpe_daily_365": 1.170569160224461,
+    "sortino_daily_365": 2.2747901374119466,
+    "legs": 653,
     "positions": 653,
-    "wins": 177,
-    "losses": 476,
-    "win_rate_pct": 27.105666156202147,
-    "profit_factor": 1.6680661367976142,
-    "avg_pnl": 158.03321126038176,
-    "expectancy_r": 0.439837887263258,
-    "max_consecutive_losses": 13
+    "wins": 139,
+    "losses": 514,
+    "win_rate_pct": 21.286370597243494,
+    "profit_factor": 1.5277560361145135,
+    "avg_pnl": 143.9526664137805,
+    "expectancy_r": 0.43917397159713584,
+    "max_consecutive_losses": 16
   },
   "by_side": {
     "LONG": {
       "positions": 326,
-      "wins": 94,
-      "losses": 232,
-      "win_rate_pct": 28.834355828220858,
-      "profit_factor": 1.9189165366628802,
-      "net_pnl": 70687.23393492184,
-      "avg_pnl": 216.83200593534306,
-      "expectancy_r": 0.5930449001742567,
-      "max_consecutive_losses": 12
+      "wins": 76,
+      "losses": 250,
+      "win_rate_pct": 23.31288343558282,
+      "profit_factor": 1.7428790832317762,
+      "net_pnl": 65827.15919730098,
+      "avg_pnl": 201.92380121871466,
+      "expectancy_r": 0.6307744116176472,
+      "max_consecutive_losses": 14
     },
     "SHORT": {
       "positions": 327,
-      "wins": 83,
-      "losses": 244,
-      "win_rate_pct": 25.382262996941897,
-      "profit_factor": 1.4192219755292739,
-      "net_pnl": 32508.45301810746,
-      "avg_pnl": 99.41422941317266,
-      "expectancy_r": 0.2870993973275224,
+      "wins": 63,
+      "losses": 264,
+      "win_rate_pct": 19.26605504587156,
+      "profit_factor": 1.314779165371836,
+      "net_pnl": 28173.93197089767,
+      "avg_pnl": 86.15881336665954,
+      "expectancy_r": 0.2481594656439654,
       "max_consecutive_losses": 21
     }
   },
   "exit_reasons": {
     "EMA_CROSS_EXIT": {
-      "legs": 53,
-      "positions": 53,
-      "pnl_net": 9394.914343707102
+      "legs": 56,
+      "positions": 56,
+      "pnl_net": 14574.237148922584
     },
     "EMA_WEAKENING_20MIN": {
-      "legs": 133,
-      "positions": 133,
-      "pnl_net": 193883.06270497138
+      "legs": 162,
+      "positions": 162,
+      "pnl_net": 244042.95118314755
     },
     "STOP_LOSS_1.00%": {
-      "legs": 422,
-      "positions": 422,
-      "pnl_net": -140644.11056135636
-    },
-    "ADX_1440M_REVERSAL_50%": {
-      "legs": 2589,
-      "positions": 98,
-      "pnl_net": 40561.82046570716
+      "legs": 435,
+      "positions": 435,
+      "pnl_net": -164616.09716387148
     }
   }
 }

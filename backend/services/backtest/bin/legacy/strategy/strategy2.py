@@ -93,7 +93,7 @@ class Config:
 
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
-    adx_exit_enabled: bool = True
+    adx_exit_enabled: bool = False
     adx_timeframe: str = "1D"
     adx_dilen: int = 14
     adx_adxlen: int = 14
@@ -2443,9 +2443,13 @@ def parse_args():
     )
 
     p.add_argument(
-        "--no-adx-exit",
-        action="store_true",
-        help="Deshabilita la salida por reversión del ADX 5m.",
+        "--adx-exit",
+        action=argparse.BooleanOptionalAction,
+        default=d.adx_exit_enabled,
+        help=(
+            "Habilita la salida por reversión del ADX 5m. "
+            "Default: %(default)s. Usa --adx-exit para habilitarla."
+        ),
     )
 
     p.add_argument(
@@ -2612,7 +2616,7 @@ def make_config(args) -> Config:
         risk_pct=args.risk_pct,
         max_leverage=args.max_leverage,
         stop_loss_pct=args.stop_loss_pct,
-        adx_exit_enabled=not args.no_adx_exit,
+        adx_exit_enabled=args.adx_exit,
         adx_timeframe=args.adx_timeframe,
         adx_dilen=args.adx_dilen,
         adx_adxlen=args.adx_adxlen,
