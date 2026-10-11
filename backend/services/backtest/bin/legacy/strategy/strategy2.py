@@ -21,6 +21,12 @@ Reglas:
         `ema_weakening_gap_pct` (las EMAs se acercan y la tendencia
         pierde fuerza) se cierra el % `ema_weakening_exit_pct` de la
         posición. Aplica a LONG y SHORT.
+    FILTRO DE ENTRADA (opcional) -> `confirm_bars`: la vela del cruce
+        debe permanecer `confirm_bars` velas consecutivas del mismo
+        lado antes de entrar (evita whipsaw). `entry_adx_enabled`:
+        solo entra si el ADX del timeframe de la estrategia supera
+        `entry_adx_min` (mercado en tendencia). Ambos aplican a LONG y
+        SHORT y son independientes del ADX de salida.
 
 Convención anti-lookahead:
 
@@ -89,6 +95,19 @@ class Config:
     # Stop opcional. 0 => deshabilitado (solo EMACROSS).
     stop_loss_pct: float = 0.01
 
+    # Confirmación de entrada: nº de velas consecutivas que deben
+    # mantenerse en la dirección del cruce antes de entrar. 0 =
+    # entrar en el propio cruce (comportamiento original). Filtrar
+    # cruces que se revierten de inmediato (whipsaw).
+    confirm_bars: int = 0
+
+    # Filtro de entrada por ADX en el timeframe de la estrategia:
+    # solo se entra si el ADX supera `entry_adx_min` (mercado con
+    # tendencia). Aplica a LONG y SHORT.
+    entry_adx_enabled: bool = False
+    entry_adx_len: int = 14
+    entry_adx_min: float = 20.0
+
     # Salida por reversión del ADX en un timeframe menor (ej. 5m).
     # adx_exit_pct = 100 -> cierre total; < 100 -> salida parcial.
     adx_exit_enabled: bool = True
@@ -144,6 +163,17 @@ class Config:
 
         if self.stop_loss_pct < 0:
             raise ValueError("stop_loss_pct no puede ser negativo.")
+
+        if self.confirm_bars < 0:
+            raise ValueError("confirm_bars no puede ser negativo.")
+
+        if self.entry_adx_enabled:
+
+            if self.entry_adx_len <= 0:
+                raise ValueError("entry_adx_len debe ser > 0.")
+
+            if self.entry_adx_min < 0:
+                raise ValueError("entry_adx_min no puede ser negativo.")
 
         if self.adx_exit_enabled:
 
@@ -513,6 +543,36 @@ def ema_closed(
     ).mean()
 
 
+def confirmed_crosses(
+    cross: np.ndarray,
+    side_ok: np.ndarray,
+    confirm_bars: int,
+) -> np.ndarray:
+
+    """
+    Retrasa cada cruce `confirm_bars` velas, manteniéndolo solo si
+    durante ese tramo la condición `side_ok` se cumple en todas las
+    velas (la tendencia se sostiene). Evita entradas por whipsaw.
+    """
+
+    cross = np.asarray(cross, dtype=bool)
+    side_ok = np.asarray(side_ok, dtype=bool)
+
+    out = np.zeros(len(cross), dtype=bool)
+
+    if confirm_bars <= 0:
+        return cross.copy()
+
+    for j in np.where(cross)[0]:
+
+        c = j + confirm_bars
+
+        if c < len(cross) and side_ok[j:c + 1].all():
+            out[c] = True
+
+    return out
+
+
 def build_features(
     bars: pd.DataFrame,
     cfg: Config,
@@ -539,6 +599,33 @@ def build_features(
         & np.isfinite(prev_ef)
         & np.isfinite(prev_es)
     )
+
+    if cfg.confirm_bars > 0:
+
+        cross_up = confirmed_crosses(
+            cross_up,
+            ef > es,
+            cfg.confirm_bars,
+        )
+
+        cross_down = confirmed_crosses(
+            cross_down,
+            ef < es,
+            cfg.confirm_bars,
+        )
+
+    if cfg.entry_adx_enabled:
+
+        a = adx_vec(
+            bars,
+            cfg.entry_adx_len,
+            cfg.entry_adx_len,
+        )["adx"].to_numpy(float)
+
+        trend_ok = np.nan_to_num(a, nan=0.0) >= cfg.entry_adx_min
+
+        cross_up = cross_up & trend_ok
+        cross_down = cross_down & trend_ok
 
     return {
         "ef": ef,
@@ -2450,6 +2537,40 @@ def parse_args():
     )
 
     p.add_argument(
+        "--confirm-bars",
+        type=int,
+        default=d.confirm_bars,
+        help=(
+            "Nº de velas que el cruce debe mantenerse antes de "
+            "entrar (0 = entrar en el cruce). Filtra whipsaw."
+        ),
+    )
+
+    p.add_argument(
+        "--entry-adx-filter",
+        action=argparse.BooleanOptionalAction,
+        default=d.entry_adx_enabled,
+        help=(
+            "Filtro de entrada: solo entra si el ADX del timeframe de "
+            "la estrategia supera --entry-adx-min. Default: "
+            "%(default)s."
+        ),
+    )
+
+    p.add_argument(
+        "--entry-adx-len",
+        type=int,
+        default=d.entry_adx_len,
+    )
+
+    p.add_argument(
+        "--entry-adx-min",
+        type=float,
+        default=d.entry_adx_min,
+        help="Nivel mínimo de ADX para permitir entradas.",
+    )
+
+    p.add_argument(
         "--adx-exit",
         action=argparse.BooleanOptionalAction,
         default=d.adx_exit_enabled,
@@ -2623,6 +2744,10 @@ def make_config(args) -> Config:
         risk_pct=args.risk_pct,
         max_leverage=args.max_leverage,
         stop_loss_pct=args.stop_loss_pct,
+        confirm_bars=args.confirm_bars,
+        entry_adx_enabled=args.entry_adx_filter,
+        entry_adx_len=args.entry_adx_len,
+        entry_adx_min=args.entry_adx_min,
         adx_exit_enabled=args.adx_exit,
         adx_timeframe=args.adx_timeframe,
         adx_dilen=args.adx_dilen,
