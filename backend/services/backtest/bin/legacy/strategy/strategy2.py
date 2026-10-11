@@ -128,7 +128,7 @@ class Config:
     ema_weakening_exit_enabled: bool = True
     ema_weakening_timeframe: str = "20min"
     ema_weakening_gap_pct: float = 0.001
-    ema_weakening_exit_pct: float = 100.0
+    ema_weakening_exit_pct: float = 50.0
 
     force_close_at_end: bool = True
 
@@ -1745,6 +1745,9 @@ def write_outputs(
     with open(out / "report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    # Diff contra el metrics.json previo (si existe) antes de sobrescribirlo.
+    write_metrics_delta(out, report["metrics"])
+
     with open(out / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(_jsonable(report["metrics"]), f, indent=2)
 
@@ -1755,6 +1758,7 @@ def write_outputs(
         "trades.csv",
         "report.json",
         "metrics.json",
+        "metrics_delta.json",
         "config.json",
         "positions.csv",
         "equity_curve.csv",
@@ -1769,6 +1773,140 @@ def write_outputs(
     )
 
     return out
+
+
+def _is_number(value) -> bool:
+
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    )
+
+
+def compute_metrics_delta(previous: dict, current: dict) -> dict:
+
+    """
+    Compara el metrics.json previo con el actual y devuelve, por cada
+    clave, el valor anterior, el actual y su variación.
+    """
+
+    delta = {}
+
+    for key in sorted(set(previous) | set(current)):
+
+        prev_val = previous.get(key)
+        curr_val = current.get(key)
+
+        entry = {
+            "previous": prev_val,
+            "current": curr_val,
+        }
+
+        if _is_number(prev_val) and _is_number(curr_val):
+
+            abs_delta = curr_val - prev_val
+
+            entry["delta"] = abs_delta
+
+            entry["delta_pct"] = (
+                abs_delta / abs(prev_val) * 100.0
+                if prev_val
+                else None
+            )
+
+            entry["changed"] = abs_delta != 0
+
+        else:
+
+            entry["delta"] = None
+            entry["delta_pct"] = None
+            entry["changed"] = prev_val != curr_val
+
+        delta[key] = entry
+
+    return delta
+
+
+def write_metrics_delta(
+    output_dir: str | Path,
+    metrics: dict,
+) -> Path:
+
+    """
+    Genera metrics_delta.json comparando el metrics.json previo (si
+    existe en el directorio de salida) con las métricas actuales.
+    """
+
+    out = Path(output_dir)
+
+    current = _jsonable(metrics)
+
+    previous_path = out / "metrics.json"
+
+    previous = None
+    previous_mtime = None
+
+    if previous_path.exists():
+
+        try:
+
+            previous_mtime = datetime.fromtimestamp(
+                previous_path.stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat()
+
+            previous = json.loads(
+                previous_path.read_text(encoding="utf-8")
+            )
+
+        except (json.JSONDecodeError, OSError) as exc:
+
+            print(
+                f"[DELTA] No se pudo leer el metrics.json previo: {exc}",
+                flush=True,
+            )
+
+            previous = None
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "previous_available": previous is not None,
+        "previous_metrics_mtime": previous_mtime,
+        "delta": (
+            compute_metrics_delta(previous, current)
+            if previous is not None
+            else {}
+        ),
+    }
+
+    delta_path = out / "metrics_delta.json"
+
+    with open(delta_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    if previous is None:
+
+        print(
+            "[DELTA] Sin metrics.json previo: "
+            "metrics_delta.json creado sin diferencias.",
+            flush=True,
+        )
+
+    else:
+
+        changed = sum(
+            1
+            for entry in payload["delta"].values()
+            if entry.get("changed")
+        )
+
+        print(
+            f"[DELTA] metrics_delta.json generado "
+            f"({changed} métricas cambiadas).",
+            flush=True,
+        )
+
+    return delta_path
 
 
 # ---------------------------------------------------------------------------
