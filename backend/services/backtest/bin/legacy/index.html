@@ -599,6 +599,19 @@
             </div>
         </section>
         
+        <!-- Monthly Equity Curves -->
+        <section class="grid" style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">Curvas de Equity por Mes</div>
+                        <div class="card-subtitle">Evolución del capital dentro de cada mes del backtest</div>
+                    </div>
+                </div>
+                <div id="monthly-equity-grid" class="grid grid-3"></div>
+            </div>
+        </section>
+        
 <section class="grid" style="margin-bottom: 24px;">
             <div class="card">
                 <div class="card-header">
@@ -920,6 +933,9 @@
 
                 // Tablas mensuales (últimos 24 meses) e histórico completo.
                 renderMonthlyTables(equityData, metrics.initial_capital);
+
+                // Curva de equity individual para cada mes.
+                renderMonthlyEquityCharts(equityData, metrics.initial_capital);
                 
                 new Chart(document.getElementById('equityChart'), {
                     type: 'line',
@@ -1106,6 +1122,111 @@
                 historyBody.innerHTML = months
                     .map(monthlyRowHtml)
                     .join('');
+            }
+        }
+
+        function renderMonthlyEquityCharts(equityData, initialCapital) {
+            const container = document.getElementById('monthly-equity-grid');
+            if (!container) return;
+
+            container.innerHTML = '';
+
+            const byMonth = new Map();
+            for (const row of equityData) {
+                if (!(row.x instanceof Date) || isNaN(row.x)) continue;
+                const key = monthKey(row.x);
+                if (!byMonth.has(key)) byMonth.set(key, []);
+                byMonth.get(key).push(row);
+            }
+
+            const months = [...byMonth.keys()].sort();
+            if (!months.length) {
+                container.innerHTML = '<div class="muted" style="padding: 12px;">Sin datos mensuales disponibles.</div>';
+                return;
+            }
+
+            let runningEquity = initialCapital;
+
+            for (const key of months) {
+                const rows = byMonth.get(key).slice().sort((a, b) => a.x - b.x);
+                const startEquity = runningEquity;
+                const endEquity = rows[rows.length - 1].y;
+                const retorno = startEquity ? (endEquity / startEquity - 1) * 100 : 0;
+                const positive = endEquity >= startEquity;
+
+                const series = [{ x: rows[0].x, y: startEquity }].concat(
+                    rows.map(r => ({ x: r.x, y: r.y }))
+                );
+
+                const wrapper = document.createElement('div');
+                wrapper.className = 'card';
+                wrapper.style.padding = '16px';
+                wrapper.innerHTML = `
+                    <div class="card-header" style="margin-bottom: 12px; padding-bottom: 8px;">
+                        <div>
+                            <div class="card-title" style="font-size: 14px;">${key}</div>
+                            <div class="card-subtitle">${rows.length} trades · <span class="${positive ? 'positive' : 'negative'}">${positive ? '+' : ''}${retorno.toFixed(2)}%</span></div>
+                        </div>
+                    </div>
+                    <div class="chart-container" style="height: 220px;">
+                        <canvas></canvas>
+                    </div>`;
+                container.appendChild(wrapper);
+
+                new Chart(wrapper.querySelector('canvas'), {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: 'Equity ($)',
+                            data: series,
+                            borderColor: positive ? 'rgba(34, 197, 94, 1)' : 'rgba(239, 68, 68, 1)',
+                            backgroundColor: positive ? 'rgba(34, 197, 94, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                            borderWidth: 2,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5,
+                            fill: true
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                                titleColor: 'var(--text-primary)',
+                                bodyColor: 'var(--text-secondary)',
+                                borderColor: 'var(--border)',
+                                borderWidth: 1,
+                                callbacks: {
+                                    title: (context) => new Date(context[0].parsed.x).toLocaleString('es-ES'),
+                                    label: (context) => `Equity: $${context.parsed.y.toFixed(2)}`
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: {
+                                    displayFormats: {
+                                        day: 'dd/MM',
+                                        hour: 'dd/MM HH:mm'
+                                    }
+                                },
+                                ticks: { color: 'rgb(203, 213, 225)', maxTicksLimit: 5 },
+                                grid: { color: 'rgba(148, 163, 184, 0.15)' }
+                            },
+                            y: {
+                                ticks: { color: 'rgb(203, 213, 225)', maxTicksLimit: 5, callback: v => '$' + v.toFixed(0) },
+                                grid: { color: 'rgba(148, 163, 184, 0.15)' }
+                            }
+                        }
+                    }
+                });
+
+                runningEquity = endEquity;
             }
         }
 
