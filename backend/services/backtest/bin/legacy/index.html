@@ -931,6 +931,25 @@
                     }
                 }
 
+                // Curva de mínimos: línea curva suave que pasa por debajo de
+                // cada mínimo local, desde el primer mínimo hasta el último.
+                const minWindow = Math.max(5, Math.round(equityData.length / 30));
+                const localMinima = [];
+                for (let i = 0; i < equityData.length; i++) {
+                    const lo = Math.max(0, i - minWindow);
+                    const hi = Math.min(equityData.length - 1, i + minWindow);
+                    const y = equityData[i].y;
+                    let isMin = true;
+                    for (let j = lo; j <= hi; j++) {
+                        if (equityData[j].y < y) { isMin = false; break; }
+                    }
+                    if (isMin) localMinima.push(equityData[i]);
+                }
+
+                const equityYs = equityData.map((d) => d.y);
+                const minPad = (Math.max(...equityYs) - Math.min(...equityYs)) * 0.01;
+                const equityMinData = localMinima.map((d) => ({ x: d.x, y: d.y - minPad }));
+
                 // Tablas mensuales (últimos 24 meses) e histórico completo.
                 renderMonthlyTables(equityData, metrics.initial_capital);
 
@@ -950,6 +969,19 @@
                             pointRadius: 0,
                             pointHoverRadius: 6,
                             fill: true
+                        },
+                        {
+                            label: 'Curva de mínimos',
+                            data: equityMinData,
+                            borderColor: 'rgba(253, 224, 71, 1)',
+                            backgroundColor: 'transparent',
+                            borderWidth: 2,
+                            cubicInterpolationMode: 'monotone',
+                            tension: 0.4,
+                            pointRadius: 2,
+                            pointBackgroundColor: 'rgba(253, 224, 71, 1)',
+                            pointHoverRadius: 6,
+                            fill: false
                         }]
                     },
                     options: {
@@ -960,7 +992,10 @@
                             intersect: false
                         },
                         plugins: {
-                            legend: { display: false },
+                            legend: {
+                                display: true,
+                                labels: { color: 'rgb(203, 213, 225)', usePointStyle: true, boxWidth: 12 }
+                            },
                             title: { display: false },
                             tooltip: {
                                 backgroundColor: 'rgba(15, 23, 42, 0.95)',
@@ -973,6 +1008,9 @@
                                         return new Date(context[0].parsed.x).toLocaleString('es-ES');
                                     },
                                     label: (context) => {
+                                        if (context.datasetIndex === 1) {
+                                            return `Curva de mínimos: $${context.parsed.y.toFixed(2)}`;
+                                        }
                                         const data = equityData[context.dataIndex];
                                         return [
                                             `Equity: $${context.parsed.y.toFixed(2)}`,
