@@ -115,7 +115,7 @@ class Config:
     # calculan en ese timeframe y la señal se alinea a las velas de
     # la estrategia.
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_timeframe: str = "1D"
+    ema_weakening_timeframe: str = "20min"
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 100.0
 
@@ -124,8 +124,8 @@ class Config:
     # `ema_early_entry_gap_pct` se anticipa el cruce, en la dirección
     # hacia la que convergen las EMAs. Mismas reglas de timeframe que
     # el debilitamiento (vacío = timeframe de la estrategia).
-    ema_early_entry_enabled: bool = True
-    ema_early_entry_timeframe: str = "1D"
+    ema_early_entry_enabled: bool = False
+    ema_early_entry_timeframe: str = "25min"
     ema_early_entry_gap_pct: float = 0.001
 
     force_close_at_end: bool = True
