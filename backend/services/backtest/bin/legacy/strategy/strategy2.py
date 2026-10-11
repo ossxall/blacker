@@ -21,13 +21,6 @@ Reglas:
         `ema_weakening_gap_pct` (las EMAs se acercan y la tendencia
         pierde fuerza) se cierra el % `ema_weakening_exit_pct` de la
         posición. Aplica a LONG y SHORT.
-    ENTRADA TEMPRANA (inverso del debilitamiento) -> cuando el gap
-        entre EMAs (en `ema_early_entry_timeframe`) cae por debajo de
-        `ema_early_entry_gap_pct`, se anticipa el cruce:
-            EMA rápida < EMA lenta  -> LONG temprano
-            EMA rápida > EMA lenta  -> SHORT temprano
-        El cruce real tiene prioridad. Si hay una posición contraria,
-        la entrada temprana la revierte.
 
 Convención anti-lookahead:
 
@@ -49,7 +42,6 @@ Ejemplo:
         --capital 100000 \
         --commission-bps 2 \
         --slippage-bps 1 \
-        --ema-early-entry \
         --output-dir ./backtest_out
 """
 
@@ -118,15 +110,6 @@ class Config:
     ema_weakening_timeframe: str = "20min"
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 100.0
-
-    # Entrada temprana (inverso del debilitamiento): cuando el gap
-    # |EMAfast-EMAslow|/EMAslow cae por debajo de
-    # `ema_early_entry_gap_pct` se anticipa el cruce, en la dirección
-    # hacia la que convergen las EMAs. Mismas reglas de timeframe que
-    # el debilitamiento (vacío = timeframe de la estrategia).
-    ema_early_entry_enabled: bool = False
-    ema_early_entry_timeframe: str = "25min"
-    ema_early_entry_gap_pct: float = 0.001
 
     force_close_at_end: bool = True
 
@@ -201,21 +184,6 @@ class Config:
                     "0 (excl.) y 100."
                 )
 
-        if self.ema_early_entry_enabled:
-
-            if self.ema_early_entry_timeframe and (
-                pd.Timedelta(self.ema_early_entry_timeframe)
-                <= pd.Timedelta(0)
-            ):
-                raise ValueError(
-                    "ema_early_entry_timeframe debe ser > 0."
-                )
-
-            if self.ema_early_entry_gap_pct <= 0:
-                raise ValueError(
-                    "ema_early_entry_gap_pct debe ser > 0."
-                )
-
         if not self.allow_long and not self.allow_short:
             raise ValueError(
                 "Debe habilitarse al menos un lado (long o short)."
@@ -225,7 +193,6 @@ class Config:
 DEFAULT_OUTPUT_DIR = "backtest_out"
 
 CROSS_REASON = "EMA_CROSS_EXIT"
-EARLY_REASON = "EMA_EARLY_ENTRY_REVERSE"
 
 
 # ---------------------------------------------------------------------------
@@ -786,50 +753,6 @@ def ema_weakening_flags(
     return flags
 
 
-def ema_early_entry_flags(
-    ef: np.ndarray,
-    es: np.ndarray,
-    gap_pct: float,
-) -> np.ndarray:
-
-    """
-    Inverso de `ema_weakening_flags`: entrada temprana.
-
-    Se dispara en la misma vela en que el gap |ef-es|/es se comprime
-    por debajo de `gap_pct` (de gap > umbral a gap <= umbral), pero en
-    lugar de cerrar se anticipa el cruce en la dirección en que
-    convergen las EMAs:
-
-        +1 (LONG)  -> EMA rápida por debajo de la lenta (sube hacia ella)
-        -1 (SHORT) -> EMA rápida por encima de la lenta (baja hacia ella)
-         0         -> sin señal
-    """
-
-    ef = np.asarray(ef, dtype=float)
-    es = np.asarray(es, dtype=float)
-
-    out = np.zeros(len(ef), dtype=np.int8)
-
-    if len(ef) < 2 or gap_pct <= 0:
-        return out
-
-    with np.errstate(invalid="ignore", divide="ignore"):
-
-        gap = np.abs(ef - es) / es
-
-        direction = np.sign(es - ef)
-
-        trig = (gap[:-1] > gap_pct) & (gap[1:] <= gap_pct)
-
-    out[1:] = np.where(
-        trig,
-        np.nan_to_num(direction[1:], nan=0.0),
-        0.0,
-    ).astype(np.int8)
-
-    return out
-
-
 def _source_minutes(data: pd.DataFrame) -> float:
 
     minutes = float(
@@ -921,23 +844,6 @@ def _ema_weakening_flags_for_bars(
     )
 
 
-def _ema_early_entry_flags_for_bars(
-    bars: pd.DataFrame,
-    cfg: Config,
-) -> np.ndarray:
-
-    """Calcula las señales de entrada temprana sobre `bars`."""
-
-    ef = ema_closed(bars["close"], cfg.ema_fast).to_numpy(float)
-    es = ema_closed(bars["close"], cfg.ema_slow).to_numpy(float)
-
-    return ema_early_entry_flags(
-        ef,
-        es,
-        cfg.ema_early_entry_gap_pct,
-    )
-
-
 def build_ema_weakening_exit(
     raw: pd.DataFrame,
     bars: pd.DataFrame,
@@ -996,65 +902,6 @@ def build_ema_weakening_exit(
     pos = np.searchsorted(low_end, bar_close, side="right") - 1
 
     out = np.zeros(len(bars), dtype=bool)
-
-    ok = pos >= 0
-
-    out[ok] = flags[pos[ok]]
-
-    return out
-
-
-def build_ema_early_entry(
-    raw: pd.DataFrame,
-    bars: pd.DataFrame,
-    cfg: Config,
-) -> Optional[np.ndarray]:
-
-    """
-    Señales de entrada temprana en `ema_early_entry_timeframe`
-    alineadas a las velas de la estrategia (+1 LONG / -1 SHORT / 0).
-
-    Misma lógica de timeframes que `build_ema_weakening_exit`:
-    vacío o igual al de la estrategia -> 1:1; más grueso -> se
-    remuestrea `raw` y se toma la última vela cerrada (sin
-    lookahead); más fino que el origen -> se usa el de la estrategia.
-
-    Devuelve `None` si está deshabilitado o no hay datos suficientes.
-    """
-
-    if not cfg.ema_early_entry_enabled or len(bars) == 0:
-        return None
-
-    if cfg.ema_early_entry_gap_pct <= 0:
-        return None
-
-    tf = cfg.ema_early_entry_timeframe or cfg.timeframe
-
-    if not cfg.ema_early_entry_timeframe or (
-        pd.Timedelta(tf) == pd.Timedelta(cfg.timeframe)
-    ):
-        return _ema_early_entry_flags_for_bars(bars, cfg)
-
-    target = pd.Timedelta(tf)
-
-    source_minutes = _source_minutes(raw)
-
-    if pd.Timedelta(minutes=source_minutes) >= target:
-        return _ema_early_entry_flags_for_bars(bars, cfg)
-
-    bars_low = resample_ohlcv(raw, tf, source_minutes)
-
-    if len(bars_low) < cfg.ema_slow + 2:
-        return None
-
-    flags = _ema_early_entry_flags_for_bars(bars_low, cfg)
-
-    low_end = (bars_low.index + target).asi8
-    bar_close = (bars.index + pd.Timedelta(cfg.timeframe)).asi8
-
-    pos = np.searchsorted(low_end, bar_close, side="right") - 1
-
-    out = np.zeros(len(bars), dtype=np.int8)
 
     ok = pos >= 0
 
@@ -1592,19 +1439,6 @@ def print_report(
             f"cierra {cfg.ema_weakening_exit_pct:g}%"
         )
 
-    if cfg.ema_early_entry_enabled:
-
-        early_tf = (
-            cfg.ema_early_entry_timeframe or cfg.timeframe
-        )
-
-        print(
-            f"Early entry     : "
-            f"gap EMAs {early_tf} < "
-            f"{cfg.ema_early_entry_gap_pct:.4%} -> "
-            f"entra anticipando el cruce"
-        )
-
     print("=" * 72)
 
 
@@ -1870,7 +1704,6 @@ class Strategy2Backtester:
         verbose: bool = False,
         adx_exit: Optional[np.ndarray] = None,
         weak_exit: Optional[np.ndarray] = None,
-        early_entry: Optional[np.ndarray] = None,
     ):
 
         self.data = data
@@ -1900,23 +1733,6 @@ class Strategy2Backtester:
 
         self.weak_exit = np.asarray(weak_exit, dtype=bool)
 
-        if early_entry is None or len(early_entry) != len(data):
-
-            if (
-                config.ema_early_entry_enabled
-                and config.ema_early_entry_gap_pct > 0
-                and not config.ema_early_entry_timeframe
-            ):
-                early_entry = ema_early_entry_flags(
-                    self.sig["ef"],
-                    self.sig["es"],
-                    config.ema_early_entry_gap_pct,
-                )
-            else:
-                early_entry = np.zeros(len(data), dtype=np.int8)
-
-        self.early_entry = np.asarray(early_entry, dtype=np.int8)
-
         self.o = data["open"].to_numpy(float)
         self.h = data["high"].to_numpy(float)
         self.l = data["low"].to_numpy(float)
@@ -1930,10 +1746,6 @@ class Strategy2Backtester:
 
         # Objetivo pendiente de ejecutar: +1 LONG, -1 SHORT.
         self.pending_target: Optional[int] = None
-
-        # Motivo con el que se cierra una posición contraria al
-        # ejecutar el objetivo (cruce real o entrada temprana).
-        self.pending_target_reason: str = CROSS_REASON
 
         # Salida pendiente de ejecutar (ADX o debilitamiento): (motivo, %).
         self.pending_exit: Optional[tuple[str, float]] = None
@@ -2252,7 +2064,6 @@ class Strategy2Backtester:
         self,
         i: int,
         target: int,
-        reason: str = CROSS_REASON,
     ):
 
         bar_open = self.o[i]
@@ -2268,10 +2079,10 @@ class Strategy2Backtester:
                 100.0,
                 bar_open,
                 ts,
-                reason,
+                CROSS_REASON,
             )
 
-        # Abrir en la dirección del cruce / entrada temprana.
+        # Abrir en la dirección del cruce.
         if self.position is None:
             self._open(
                 target,
@@ -2391,11 +2202,9 @@ class Strategy2Backtester:
                 self._execute_target(
                     i,
                     self.pending_target,
-                    self.pending_target_reason,
                 )
 
                 self.pending_target = None
-                self.pending_target_reason = CROSS_REASON
 
             if self.pending_exit is not None:
 
@@ -2426,13 +2235,12 @@ class Strategy2Backtester:
             stop_hit = stop_reason is not None
 
             # -------------------------------------------------------
-            # 3) Señal de cruce (o entrada temprana) al cierre de
-            #    esta vela. Se ejecuta en la próxima apertura.
+            # 3) Señal de cruce al cierre de esta vela. Se ejecuta
+            #    en la próxima apertura.
             # -------------------------------------------------------
 
             new_target = None
             new_exit = None
-            new_reason = CROSS_REASON
 
             if not stop_hit and valid[i]:
 
@@ -2444,18 +2252,6 @@ class Strategy2Backtester:
 
                 elif cross_down[i] and cfg.allow_short:
                     target = -1
-
-                # Entrada temprana: inverso del debilitamiento.
-                if target is None and cfg.ema_early_entry_enabled:
-
-                    e = int(self.early_entry[i])
-
-                    if (
-                        (e == 1 and cfg.allow_long)
-                        or (e == -1 and cfg.allow_short)
-                    ):
-                        target = e
-                        new_reason = EARLY_REASON
 
                 if target is not None:
 
@@ -2469,8 +2265,7 @@ class Strategy2Backtester:
                         new_target = target
 
                 # Salidas parciales (debilitamiento / ADX):
-                # solo si no hay un cruce / entrada que ya
-                # revertiría.
+                # solo si no hay un cruce que ya revertiría.
                 if (
                     new_target is None
                     and self.position is not None
@@ -2493,7 +2288,6 @@ class Strategy2Backtester:
 
             if new_target is not None:
                 self.pending_target = new_target
-                self.pending_target_reason = new_reason
 
             elif new_exit is not None:
                 self.pending_exit = new_exit
@@ -2710,39 +2504,6 @@ def parse_args():
     )
 
     p.add_argument(
-        "--ema-early-entry",
-        action=argparse.BooleanOptionalAction,
-        default=d.ema_early_entry_enabled,
-        help=(
-            "Entrada temprana (inverso del debilitamiento): abre "
-            "cuando el gap entre EMAs se comprime por debajo del "
-            "umbral, anticipando el cruce. Default: %(default)s. "
-            "Usa --no-ema-early-entry para deshabilitarla."
-        ),
-    )
-
-    p.add_argument(
-        "--ema-early-entry-gap-pct",
-        type=float,
-        default=d.ema_early_entry_gap_pct,
-        help=(
-            "Umbral del gap |EMAfast-EMAslow|/EMAslow por debajo "
-            "del cual se dispara la entrada temprana "
-            "(default: 0.002 = 0.2%%)."
-        ),
-    )
-
-    p.add_argument(
-        "--ema-early-entry-timeframe",
-        default=d.ema_early_entry_timeframe,
-        help=(
-            "Timeframe donde se calculan las EMAs de la entrada "
-            "temprana. Vacío = el de la estrategia; p.ej. '15min', "
-            "'4h' (default: 20min)."
-        ),
-    )
-
-    p.add_argument(
         "--adx-timeframe",
         default=d.adx_timeframe,
         help="Timeframe del ADX de salida (default: 1D).",
@@ -2872,9 +2633,6 @@ def make_config(args) -> Config:
         ema_weakening_timeframe=args.ema_weakening_timeframe,
         ema_weakening_gap_pct=args.ema_weakening_gap_pct,
         ema_weakening_exit_pct=args.ema_weakening_exit_pct,
-        ema_early_entry_enabled=args.ema_early_entry,
-        ema_early_entry_timeframe=args.ema_early_entry_timeframe,
-        ema_early_entry_gap_pct=args.ema_early_entry_gap_pct,
         force_close_at_end=not args.no_force_close,
         timestamp_is_close=(
             Config().timestamp_is_close
@@ -2992,41 +2750,12 @@ def main():
                 flush=True,
             )
 
-    early_entry = build_ema_early_entry(raw, data, cfg)
-
-    if cfg.ema_early_entry_enabled:
-
-        early_tf = (
-            cfg.ema_early_entry_timeframe or cfg.timeframe
-        )
-
-        if early_entry is None:
-
-            print(
-                "[EARLY] entrada temprana deshabilitada: "
-                "hay muy pocas velas en el timeframe indicado.",
-                flush=True,
-            )
-
-        else:
-
-            n_long = int((early_entry == 1).sum())
-            n_short = int((early_entry == -1).sum())
-
-            print(
-                f"[EARLY] gap EMAs en {early_tf} | "
-                f"umbral={cfg.ema_early_entry_gap_pct:.4%} | "
-                f"señales LONG={n_long:,} SHORT={n_short:,}",
-                flush=True,
-            )
-
     engine = Strategy2Backtester(
         data,
         cfg,
         verbose=args.verbose,
         adx_exit=adx_exit,
         weak_exit=weak_exit,
-        early_entry=early_entry,
     )
 
     trades, equity = engine.run()
