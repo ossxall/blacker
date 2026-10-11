@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2",
-  "generated_at": "2026-10-10T04:11:31.335571+00:00",
+  "generated_at": "2026-10-11T02:35:31.530963+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -29,7 +29,7 @@
     "adx_dilen": 14,
     "adx_adxlen": 14,
     "adx_key_level": 23.0,
-    "adx_exit_pct": 100.0,
+    "adx_exit_pct": 50.0,
     "ema_weakening_exit_enabled": true,
     "ema_weakening_timeframe": "20min",
     "ema_weakening_gap_pct": 0.002,
@@ -39,27 +39,27 @@
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 118478.65412931789,
-    "net_pnl": 108478.65412931782,
-    "return_pct": 1084.786541293179,
-    "max_drawdown_pct": -26.81494104481279,
-    "max_dd_peak_equity": 21791.415103511677,
-    "max_dd_trough_equity": 15948.05999067459,
-    "max_dd_peak_vs_capital_pct": 117.91415103511676,
-    "max_dd_trough_vs_capital_pct": 59.4805999067459,
+    "final_equity": 113195.68695302916,
+    "net_pnl": 103195.68695302929,
+    "return_pct": 1031.9568695302917,
+    "max_drawdown_pct": -27.01556914087284,
+    "max_dd_peak_equity": 21619.250266466795,
+    "max_dd_trough_equity": 15778.686762991121,
+    "max_dd_peak_vs_capital_pct": 116.19250266466796,
+    "max_dd_trough_vs_capital_pct": 57.78686762991121,
     "min_equity": 9595.277006361834,
     "min_equity_vs_capital_pct": -4.047229936381669,
-    "return_over_maxdd": 40.454556266981804,
-    "sharpe_daily_365": 1.3035902565073574,
-    "sortino_daily_365": 2.6267152835815666,
-    "legs": 653,
+    "return_over_maxdd": 38.19859815461027,
+    "sharpe_daily_365": 1.28239363990609,
+    "sortino_daily_365": 2.583114178576208,
+    "legs": 3197,
     "positions": 653,
-    "wins": 180,
-    "losses": 473,
-    "win_rate_pct": 27.565084226646245,
-    "profit_factor": 1.688494703792028,
-    "avg_pnl": 166.1235132148818,
-    "expectancy_r": 0.4467800835822271,
+    "wins": 177,
+    "losses": 476,
+    "win_rate_pct": 27.105666156202147,
+    "profit_factor": 1.6680661367976142,
+    "avg_pnl": 158.03321126038176,
+    "expectancy_r": 0.439837887263258,
     "max_consecutive_losses": 13
   },
   "by_side": {
@@ -68,44 +68,44 @@
       "wins": 94,
       "losses": 232,
       "win_rate_pct": 28.834355828220858,
-      "profit_factor": 1.948020413374989,
-      "net_pnl": 74008.00905416107,
-      "avg_pnl": 227.01843268147567,
-      "expectancy_r": 0.5996763981424685,
+      "profit_factor": 1.9189165366628802,
+      "net_pnl": 70687.23393492184,
+      "avg_pnl": 216.83200593534306,
+      "expectancy_r": 0.5930449001742567,
       "max_consecutive_losses": 12
     },
     "SHORT": {
       "positions": 327,
-      "wins": 86,
-      "losses": 241,
-      "win_rate_pct": 26.299694189602445,
-      "profit_factor": 1.4336293957388337,
-      "net_pnl": 34470.645075156746,
-      "avg_pnl": 105.4148167435986,
-      "expectancy_r": 0.29435134184938705,
-      "max_consecutive_losses": 13
+      "wins": 83,
+      "losses": 244,
+      "win_rate_pct": 25.382262996941897,
+      "profit_factor": 1.4192219755292739,
+      "net_pnl": 32508.45301810746,
+      "avg_pnl": 99.41422941317266,
+      "expectancy_r": 0.2870993973275224,
+      "max_consecutive_losses": 21
     }
   },
   "exit_reasons": {
     "EMA_CROSS_EXIT": {
-      "legs": 50,
-      "positions": 50,
-      "pnl_net": 9682.60027520626
+      "legs": 53,
+      "positions": 53,
+      "pnl_net": 9394.914343707102
     },
     "EMA_WEAKENING_20MIN": {
-      "legs": 126,
-      "positions": 126,
-      "pnl_net": 199230.6866580525
+      "legs": 133,
+      "positions": 133,
+      "pnl_net": 193883.06270497138
     },
     "STOP_LOSS_1.00%": {
-      "legs": 379,
-      "positions": 379,
-      "pnl_net": -143469.89063152028
+      "legs": 422,
+      "positions": 422,
+      "pnl_net": -140644.11056135636
     },
-    "ADX_1440M_REVERSAL": {
-      "legs": 98,
+    "ADX_1440M_REVERSAL_50%": {
+      "legs": 2589,
       "positions": 98,
-      "pnl_net": 43035.25782757936
+      "pnl_net": 40561.82046570716
     }
   }
 }
