@@ -99,12 +99,12 @@ class Config:
     # mantenerse en la dirección del cruce antes de entrar. 0 =
     # entrar en el propio cruce (comportamiento original). Filtrar
     # cruces que se revierten de inmediato (whipsaw).
-    confirm_bars: int = 0
+    confirm_bars: int = 4
 
     # Filtro de entrada por ADX en el timeframe de la estrategia:
     # solo se entra si el ADX supera `entry_adx_min` (mercado con
     # tendencia). Aplica a LONG y SHORT.
-    entry_adx_enabled: bool = False
+    entry_adx_enabled: bool = True
     entry_adx_len: int = 14
     entry_adx_min: float = 20.0
 
