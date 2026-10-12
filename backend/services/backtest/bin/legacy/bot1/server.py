@@ -9,6 +9,9 @@ No conoce la estrategia: el bot le entrega DataFrames ya calculados con
     GET /series/<timeframe>     un timeframe (p. ej. /series/5m)
     ?limit=N                    solo las últimas N velas (por defecto 500;
                                 `limit=0` devuelve todo el histórico)
+
+La respuesta incluye `trades`: las ENTRY/EXIT del backtest de la estrategia
+(`time` en epoch ms), para superponerlas en cualquier timeframe.
 """
 from __future__ import annotations
 
@@ -51,7 +54,7 @@ def frame_to_columnar(frame: pd.DataFrame, limit: int) -> dict:
     """DataFrame indexado por tiempo -> {"t": [...], "series": {col: [...]}}."""
     if limit > 0:
         frame = frame.tail(limit)
-    times = (frame.index.asi8 // 10**6).tolist()
+    times = frame.index.as_unit("ms").asi8.tolist()  # epoch ms, sea cual sea la unidad
     return {
         "bars": len(frame),
         "first_bar_time": times[0] if times else None,
@@ -78,12 +81,15 @@ class SeriesSnapshot:
         self,
         frames: dict[str, tuple[list[str], pd.DataFrame]],
         strategy_timeframe: str,
+        trades: list[dict] | None = None,
     ) -> None:
-        """`frames` = {timeframe: (roles, DataFrame)}."""
+        """`frames` = {timeframe: (roles, DataFrame)}; `trades` = lista de
+        dicts JSON-safe con `time` en epoch ms."""
         state = {
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "strategy_timeframe": strategy_timeframe,
             "frames": frames,
+            "trades": trades or [],
         }
         with self._lock:
             self._state = state
@@ -110,20 +116,25 @@ class SeriesSnapshot:
         if timeframe is not None and timeframe not in frames:
             return None
         names = [timeframe] if timeframe is not None else list(frames)
+        items = [
+            {
+                "timeframe": name,
+                "roles": frames[name][0],
+                **frame_to_columnar(frames[name][1], limit),
+            }
+            for name in names
+        ]
+        # Con `limit`, solo los trades desde el inicio de la ventana más antigua.
+        starts = [i["first_bar_time"] for i in items if i["first_bar_time"] is not None]
+        since = min(starts) if limit > 0 and starts else None
         return {
             **self._base,
             "ready": True,
             "updated_at": state["updated_at"],
             "strategy_timeframe": state["strategy_timeframe"],
             "limit": limit,
-            "timeframes": [
-                {
-                    "timeframe": name,
-                    "roles": frames[name][0],
-                    **frame_to_columnar(frames[name][1], limit),
-                }
-                for name in names
-            ],
+            "timeframes": items,
+            "trades": [t for t in state["trades"] if since is None or t["time"] >= since],
         }
 
 

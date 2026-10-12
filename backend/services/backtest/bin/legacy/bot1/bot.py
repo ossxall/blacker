@@ -417,35 +417,82 @@ def resample(raw: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return resample_ohlcv(raw, timeframe)
 
 
-def build_series_frames(
+def series_frame(
+    strategy: EMACrossStrategy,
     raw: pd.DataFrame,
     bars: pd.DataFrame,
-    signals: pd.DataFrame,
-    adx_exit,
-    weak_exit,
+    name: str,
+    computed: tuple | None = None,
+) -> pd.DataFrame:
+    """OHLCV de `bars` + las series de la estrategia (señales y salidas).
+
+    `computed` = (signals, adx_exit, weak_exit) si ya se calcularon para
+    `bars`; si no, se calculan aquí. Si el cálculo falla, devuelve solo OHLCV.
+    """
+    frame = bars.copy()
+    try:
+        signals, adx_exit, weak_exit = computed or (
+            strategy.generate_signals(bars),
+            *strategy.prepare_exits(raw, bars),
+        )
+    except Exception:
+        logger.exception("No se pudieron calcular las series de %s", name)
+        return frame
+    for col in signals.columns:
+        if col not in frame.columns:
+            frame[col] = signals[col].to_numpy()
+    for col, arr in (("adx_exit", adx_exit), ("weak_exit", weak_exit)):
+        if arr is not None and len(arr) == len(frame):
+            frame[col] = np.asarray(arr)
+    return frame
+
+
+def build_series_frames(
+    strategy: EMACrossStrategy,
+    raw: pd.DataFrame,
+    bars: pd.DataFrame,
+    computed: tuple,
     cfg: Config,
     interval: str,
 ) -> dict[str, tuple[list[str], pd.DataFrame]]:
-    """Arma `{timeframe: (roles, DataFrame)}` para el endpoint de series."""
-    # Timeframe de la estrategia: OHLCV + señales + series de salida.
-    strat = bars.copy()
-    for col in signals.columns.difference(strat.columns):
-        strat[col] = signals[col].to_numpy()
-    for name, arr in (("adx_exit", adx_exit), ("weak_exit", weak_exit)):
-        if arr is not None and len(arr) == len(strat):
-            strat[name] = np.asarray(arr)
+    """Arma `{timeframe: (roles, DataFrame)}` para el endpoint de series.
 
+    Todos los timeframes llevan las mismas series (OHLCV, EMAs, ADX, cruces,
+    target, salidas), calculadas con la misma estrategia.
+    """
     frames: dict[str, tuple[list[str], pd.DataFrame]] = {}
-    for role, timeframe, frame in (("strategy", cfg.timeframe, strat), ("raw", interval, raw)):
-        frames.setdefault(timeframe, ([], frame))[0].append(role)
-    # Timeframes auxiliares (solo OHLCV remuestreado).
+
+    def add(role: str, timeframe: str, make) -> None:
+        if timeframe not in frames:
+            frames[timeframe] = ([], make())
+        frames[timeframe][0].append(role)
+
+    add("strategy", cfg.timeframe,
+        lambda: series_frame(strategy, raw, bars, cfg.timeframe, computed))
+    add("raw", interval, lambda: series_frame(strategy, raw, raw, interval))
     for role, timeframe in (
         ("adx_exit", cfg.adx_timeframe),
         ("ema_weakening", cfg.ema_weakening_timeframe),
     ):
         if timeframe:
-            frames.setdefault(timeframe, ([], resample(raw, timeframe)))[0].append(role)
+            add(role, timeframe,
+                lambda tf=timeframe: series_frame(strategy, raw, resample(raw, tf), tf))
     return frames
+
+
+def events_to_trades(events: list[dict]) -> list[dict]:
+    """Eventos ENTRY/EXIT -> trades planos para graficar (tiempos en epoch ms).
+
+    Se ordenan como el backtest: por tiempo de ejecución, EXIT antes que ENTRY.
+    """
+    trades = [
+        {
+            "event": e["event"], "side": e["side"], "reason": e["reason"],
+            "time": e["signal_time"], "price": e["price"], **json.loads(e["payload"]),
+        }
+        for e in events
+    ]
+    return sorted(trades, key=lambda t: (t["time"], t["event"] != "EXIT"))
 
 
 def _reason_is_intrabar(reason: str) -> bool:
@@ -487,7 +534,7 @@ def build_events(
     # Indicadores por barra {bar_ms: (ema_fast, ema_slow, adx_entry)}.
     indicators = dict(
         zip(
-            (bars.index.asi8 // 10**6).tolist(),
+            bars.index.as_unit("ms").asi8.tolist(),  # epoch ms, sea cual sea la unidad
             zip(*(signals[c].to_numpy(float) for c in ("ema_fast", "ema_slow", "adx_entry"))),
         )
     )
@@ -629,15 +676,15 @@ class SignalBot:
             ms_to_iso(self.live_since_ms),
         )
 
-    def _publish_snapshot(self, raw, bars, signals, adx_exit, weak_exit) -> None:
+    def _publish_snapshot(self, raw, bars, computed, events) -> None:
         """Actualiza el endpoint de series (nunca debe romper el ciclo)."""
         if self.snapshot is None:
             return
         try:
             frames = build_series_frames(
-                raw, bars, signals, adx_exit, weak_exit, self.cfg, self.interval
+                self.strategy, raw, bars, computed, self.cfg, self.interval
             )
-            self.snapshot.publish(frames, self.cfg.timeframe)
+            self.snapshot.publish(frames, self.cfg.timeframe, events_to_trades(events))
         except Exception:
             logger.exception("No se pudo actualizar el snapshot de series")
 
@@ -659,11 +706,11 @@ class SignalBot:
 
         signals = self.strategy.generate_signals(bars)
         adx_exit, weak_exit = self.strategy.prepare_exits(raw, bars)
-        self._publish_snapshot(raw, bars, signals, adx_exit, weak_exit)
-
         events = build_events(
             bars, signals, adx_exit, weak_exit, self.cfg, self.symbol, self.interval
         )
+        # El endpoint muestra todos los trades del backtest (sin filtro live-only).
+        self._publish_snapshot(raw, bars, (signals, adx_exit, weak_exit), events)
         if self.live_since_ms is not None:
             # live-only: descarta las señales anteriores al arranque.
             events = [e for e in events if e["bar_time"] >= self.live_since_ms]

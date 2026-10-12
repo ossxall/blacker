@@ -2,12 +2,15 @@
 """
 Grafica el JSON del endpoint `/series` de bot.py (ver server.py).
 
-Genera una página HTML interactiva (Plotly) con un gráfico por timeframe:
+Genera una página HTML interactiva (Plotly). Cada timeframe recibe el mismo
+gráfico completo, con todo lo que traiga el payload:
 
-- timeframe de la estrategia: velas + EMA rápida/lenta, marcadores de cruce
-  (`cross_up` / `cross_down`) y de salida (`adx_exit` / `weak_exit`), más
-  paneles de `adx_entry`, volumen y `target`.
-- resto de timeframes: velas + volumen.
+- precio: velas + EMA rápida/lenta, marcadores de señal (`cross_up`,
+  `cross_down`, `adx_exit`, `weak_exit`) y los trades;
+- trades: entradas (▲ LONG / ▼ SHORT), salidas (■ verde si ganó, rojo si
+  perdió; tooltip con razón, PnL, R y % cerrado) y una línea de entrada a cada
+  salida;
+- paneles: `adx_entry`, volumen y `target` (solo si la serie existe).
 
 Uso
 ---
@@ -22,7 +25,9 @@ Requiere `pandas` y `plotly` (`pip install plotly`).
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -37,6 +42,8 @@ DEFAULT_SOURCE = "http://127.0.0.1:8080/series"
 
 UP, DOWN = "#26a69a", "#ef5350"
 FAST, SLOW, NEUTRAL = "#ff9800", "#2962ff", "#7e57c2"
+EXIT_SIGNAL, WEAK_SIGNAL = "#ffeb3b", "#e040fb"
+PANEL_HEIGHTS = {"price": 0.55, "adx": 0.15, "volume": 0.15, "target": 0.15}
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +74,20 @@ def to_frame(entry: dict, tz: str, last: int | None) -> pd.DataFrame:
     return frame.tail(last) if last else frame
 
 
+def to_trades(raw_trades: list[dict], tz: str) -> pd.DataFrame:
+    """Trades del payload -> DataFrame con columna `ts` (hora de ejecución)."""
+    if not raw_trades:
+        return pd.DataFrame()
+    trades = pd.DataFrame(raw_trades)
+    for column in ("price", "pnl_net", "r_multiple", "close_pct", "position_id"):
+        if column not in trades:
+            trades[column] = float("nan")
+    trades["ts"] = to_index(trades["time"].tolist(), tz)
+    return trades
+
+
 # ---------------------------------------------------------------------------
-# Gráficos
+# Trazas
 # ---------------------------------------------------------------------------
 
 def _flag(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -78,71 +97,135 @@ def _flag(frame: pd.DataFrame, column: str) -> pd.Series:
     return frame[column].fillna(False).astype(bool)
 
 
-def _candles(frame: pd.DataFrame) -> go.Candlestick:
-    return go.Candlestick(
-        x=frame.index, open=frame["open"], high=frame["high"],
-        low=frame["low"], close=frame["close"], name="precio",
-        increasing_line_color=UP, decreasing_line_color=DOWN,
-    )
+def _num(value, default: float = 0.0) -> float:
+    return default if pd.isna(value) else float(value)
 
 
-def _volume(frame: pd.DataFrame) -> go.Bar:
-    colors = [UP if c >= o else DOWN for o, c in zip(frame["open"], frame["close"])]
-    return go.Bar(x=frame.index, y=frame["volume"], marker_color=colors,
-                  name="volumen", showlegend=False)
+def add_signal_markers(fig, frame: pd.DataFrame, row: int) -> None:
+    """Marcadores pequeños de las señales de la estrategia, junto a la vela."""
+    pad = (frame["high"].max() - frame["low"].min()) * 0.02
+    for column, y, symbol, color in (
+        ("cross_up", frame["low"] - pad, "triangle-up-open", UP),
+        ("cross_down", frame["high"] + pad, "triangle-down-open", DOWN),
+        ("adx_exit", frame["high"] + 2 * pad, "x", EXIT_SIGNAL),
+        ("weak_exit", frame["high"] + 3 * pad, "diamond-open", WEAK_SIGNAL),
+    ):
+        mask = _flag(frame, column)
+        if mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=frame.index[mask], y=y[mask], mode="markers", name=column,
+                    marker=dict(symbol=symbol, size=8, color=color, line=dict(width=1.5, color=color)),
+                ),
+                row=row, col=1,
+            )
 
 
-def _markers(fig, frame, column, y, name, symbol, color, row) -> None:
-    mask = _flag(frame, column)
-    if mask.any():
-        fig.add_trace(
-            go.Scatter(
-                x=frame.index[mask], y=y[mask], mode="markers", name=name,
-                marker=dict(symbol=symbol, size=10, color=color,
-                            line=dict(width=1, color="white")),
-            ),
-            row=row, col=1,
-        )
+def add_trades(fig, trades: pd.DataFrame, frame: pd.DataFrame, row: int) -> tuple[int, int]:
+    """Superpone entradas, salidas y la línea entrada->salida. Devuelve (n_entradas, n_salidas)."""
+    if trades.empty:
+        return 0, 0
+    step = frame.index.to_series().diff().median()
+    end = frame.index[-1] + (step if pd.notna(step) else pd.Timedelta(0))
+    window = trades[(trades["ts"] >= frame.index[0]) & (trades["ts"] <= end)]
+    entries = window[window["event"] == "ENTRY"]
+    exits = window[window["event"] == "EXIT"]
+    entry_by_position = {e.position_id: e for e in entries.itertuples()}
+
+    # Línea de cada entrada a cada una de sus salidas (verde ganó, roja perdió).
+    lines = {True: ([], []), False: ([], [])}
+    for ex in exits.itertuples():
+        entry = entry_by_position.get(ex.position_id)
+        if entry is not None:
+            xs, ys = lines[_num(ex.pnl_net) >= 0]
+            xs += [entry.ts, ex.ts, None]
+            ys += [entry.price, ex.price, None]
+    for won, (xs, ys) in lines.items():
+        if xs:
+            fig.add_trace(
+                go.Scatter(x=xs, y=ys, mode="lines", name="trade +" if won else "trade −",
+                           line=dict(color=UP if won else DOWN, width=1.2, dash="dot"),
+                           hoverinfo="skip"),
+                row=row, col=1,
+            )
+
+    # Entradas.
+    for side, symbol, color in (("LONG", "triangle-up", UP), ("SHORT", "triangle-down", DOWN)):
+        sub = entries[entries["side"] == side]
+        if not sub.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["ts"], y=sub["price"], mode="markers", name=f"entrada {side}",
+                    marker=dict(symbol=symbol, size=14, color=color, line=dict(width=1.5, color="white")),
+                    text=[f"ENTRY {side}<br>precio {p:,.2f}" for p in sub["price"]],
+                    hovertemplate="%{text}<extra></extra>",
+                ),
+                row=row, col=1,
+            )
+
+    # Salidas (parciales incluidas), coloreadas por resultado.
+    for won, label in ((True, "salida +"), (False, "salida −")):
+        sub = exits[exits["pnl_net"].map(lambda v: (_num(v) >= 0) == won)]
+        if not sub.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["ts"], y=sub["price"], mode="markers", name=label,
+                    marker=dict(symbol="square", size=11, color=UP if won else DOWN,
+                                line=dict(width=1.5, color="white")),
+                    text=[
+                        f"EXIT {r.side} · {r.reason}<br>precio {r.price:,.2f}"
+                        f"<br>PnL {_num(r.pnl_net):+,.2f} · R {_num(r.r_multiple):+.2f}"
+                        f"<br>cierra {_num(r.close_pct, 100):.0f}% ({r.action})"
+                        for r in sub.itertuples()
+                    ],
+                    hovertemplate="%{text}<extra></extra>",
+                ),
+                row=row, col=1,
+            )
+    return len(entries), len(exits)
 
 
-def build_figure(entry: dict, payload: dict, tz: str, last: int | None) -> go.Figure | None:
+# ---------------------------------------------------------------------------
+# Gráfico de un timeframe
+# ---------------------------------------------------------------------------
+
+def build_figure(
+    entry: dict, payload: dict, tz: str, last: int | None, trades: pd.DataFrame
+) -> go.Figure | None:
     frame = to_frame(entry, tz, last)
     if frame.empty:
         return None
 
-    is_strategy = "strategy" in entry["roles"]
     panels = ["price"]
-    if is_strategy and "adx_entry" in frame:
+    if "adx_entry" in frame:
         panels.append("adx")
     if "volume" in frame:
         panels.append("volume")
-    if is_strategy and "target" in frame:
+    if "target" in frame:
         panels.append("target")
     row = {name: i + 1 for i, name in enumerate(panels)}
-    heights = {"price": 0.55, "adx": 0.15, "volume": 0.15, "target": 0.15}
 
     fig = make_subplots(
         rows=len(panels), cols=1, shared_xaxes=True, vertical_spacing=0.03,
-        row_heights=[heights[p] for p in panels],
+        row_heights=[PANEL_HEIGHTS[p] for p in panels],
     )
-    fig.add_trace(_candles(frame), row=row["price"], col=1)
-
-    if is_strategy:
-        for column, color in (("ema_fast", FAST), ("ema_slow", SLOW)):
-            if column in frame:
-                fig.add_trace(
-                    go.Scatter(x=frame.index, y=frame[column], name=column,
-                               line=dict(color=color, width=1.5)),
-                    row=row["price"], col=1,
-                )
-        # Marcadores a una distancia proporcional al rango visible.
-        pad = (frame["high"].max() - frame["low"].min()) * 0.02
-        low, high = frame["low"] - pad, frame["high"] + pad
-        p = row["price"]
-        _markers(fig, frame, "cross_up", low, "cross_up", "triangle-up", UP, p)
-        _markers(fig, frame, "cross_down", high, "cross_down", "triangle-down", DOWN, p)
-        _markers(fig, frame, "adx_exit", high + pad, "adx_exit", "x", "#ffeb3b", p)
-        _markers(fig, frame, "weak_exit", high + 2 * pad, "weak_exit", "diamond", "#e040fb", p)
+    fig.add_trace(
+        go.Candlestick(
+            x=frame.index, open=frame["open"], high=frame["high"], low=frame["low"],
+            close=frame["close"], name="precio",
+            increasing_line_color=UP, decreasing_line_color=DOWN,
+        ),
+        row=1, col=1,
+    )
+    for column, color in (("ema_fast", FAST), ("ema_slow", SLOW)):
+        if column in frame:
+            fig.add_trace(
+                go.Scatter(x=frame.index, y=frame[column], name=column,
+                           line=dict(color=color, width=1.5)),
+                row=1, col=1,
+            )
+    add_signal_markers(fig, frame, 1)
+    n_entries, n_exits = add_trades(fig, trades, frame, 1)
 
     if "adx" in row:
         fig.add_trace(
@@ -152,7 +235,12 @@ def build_figure(entry: dict, payload: dict, tz: str, last: int | None) -> go.Fi
         )
         fig.update_yaxes(title_text="ADX", row=row["adx"], col=1)
     if "volume" in row:
-        fig.add_trace(_volume(frame), row=row["volume"], col=1)
+        colors = [UP if c >= o else DOWN for o, c in zip(frame["open"], frame["close"])]
+        fig.add_trace(
+            go.Bar(x=frame.index, y=frame["volume"], marker_color=colors,
+                   name="volumen", showlegend=False),
+            row=row["volume"], col=1,
+        )
         fig.update_yaxes(title_text="vol", row=row["volume"], col=1)
     if "target" in row:
         fig.add_trace(
@@ -162,13 +250,14 @@ def build_figure(entry: dict, payload: dict, tz: str, last: int | None) -> go.Fi
         )
         fig.update_yaxes(title_text="target", tickvals=[-1, 0, 1], row=row["target"], col=1)
 
-    roles = ", ".join(entry["roles"])
+    title = (
+        f"{payload.get('symbol', '')} · {entry['timeframe']} ({', '.join(entry['roles'])}) · "
+        f"{len(frame)} velas · {n_entries} entradas / {n_exits} salidas"
+    )
     fig.update_layout(
-        title=f"{payload.get('symbol', '')} · {entry['timeframe']} ({roles}) · "
-              f"{len(frame)} velas",
-        template="plotly_dark", height=250 + 170 * len(panels),
+        title=title, template="plotly_dark", height=250 + 170 * len(panels),
         margin=dict(l=60, r=30, t=60, b=30), hovermode="x unified",
-        xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.04),
+        legend=dict(orientation="h", y=1.04),
     )
     fig.update_xaxes(rangeslider_visible=False)
     return fig
@@ -183,10 +272,12 @@ PAGE = """<!doctype html>
 <title>{title}</title>
 <style>
   body {{ background:#111; color:#ddd; font:14px system-ui,sans-serif; margin:0 auto; max-width:1500px; padding:16px; }}
-  h1 {{ font-size:18px; margin:0 0 4px; }} p {{ margin:0 0 16px; color:#999; }}
-  .chart {{ margin-bottom:24px; }}
+  h1 {{ font-size:18px; margin:0 0 4px; }} p {{ margin:0 0 12px; color:#999; }}
+  nav a {{ color:#8ab4f8; margin-right:14px; text-decoration:none; }}
+  .chart {{ margin:16px 0 24px; }}
 </style></head><body>
 <h1>{title}</h1><p>{subtitle}</p>
+<nav>{nav}</nav>
 {charts}
 </body></html>
 """
@@ -197,25 +288,33 @@ def build_page(payload: dict, args: argparse.Namespace) -> tuple[str, int]:
     if args.timeframe:
         entries = [e for e in entries if e["timeframe"] in args.timeframe]
 
-    figures = [fig for e in entries if (fig := build_figure(e, payload, args.tz, args.last))]
+    trades = pd.DataFrame() if args.no_trades else to_trades(payload.get("trades", []), args.tz)
+    figures = [
+        (e["timeframe"], fig)
+        for e in entries
+        if (fig := build_figure(e, payload, args.tz, args.last, trades)) is not None
+    ]
+
     plotly_js = True if args.offline else "cdn"  # solo se incluye en el primer gráfico
-    charts = "\n".join(
-        '<div class="chart">'
-        + fig.to_html(full_html=False, include_plotlyjs=plotly_js if i == 0 else False)
-        + "</div>"
-        for i, fig in enumerate(figures)
-    )
+    nav, charts = [], []
+    for i, (timeframe, fig) in enumerate(figures):
+        anchor = "tf-" + re.sub(r"\W+", "_", timeframe)
+        label = html_lib.escape(timeframe)
+        nav.append(f'<a href="#{anchor}">{label}</a>')
+        body = fig.to_html(full_html=False, include_plotlyjs=plotly_js if i == 0 else False)
+        charts.append(f'<div class="chart" id="{anchor}">{body}</div>')
+
     subtitle = (
         f"intervalo {payload.get('interval', '?')} · estrategia "
-        f"{payload.get('strategy_timeframe', '?')} · calculado {payload.get('updated_at', '?')} "
-        f"· zona horaria {args.tz}"
+        f"{payload.get('strategy_timeframe', '?')} · {len(payload.get('trades', []))} "
+        f"eventos de trade · calculado {payload.get('updated_at', '?')} · zona horaria {args.tz}"
     )
     refresh = f'<meta http-equiv="refresh" content="{args.watch:g}">' if args.watch else ""
-    html = PAGE.format(
-        refresh=refresh, title=f"{payload.get('symbol', 'series')} — series",
-        subtitle=subtitle, charts=charts,
+    page = PAGE.format(
+        refresh=refresh, title=f"{html_lib.escape(payload.get('symbol', 'series'))} — series",
+        subtitle=html_lib.escape(subtitle), nav="".join(nav), charts="\n".join(charts),
     )
-    return html, len(figures)
+    return page, len(figures)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +330,7 @@ def parse_args() -> argparse.Namespace:
                         help="Solo este timeframe (repetible), p. ej. -t 30min -t 1m.")
     parser.add_argument("--last", type=int, default=None, help="Graficar solo las últimas N velas.")
     parser.add_argument("--tz", default="UTC", help="Zona horaria (p. ej. America/Bogota).")
+    parser.add_argument("--no-trades", action="store_true", help="No superponer los trades.")
     parser.add_argument("--offline", action="store_true",
                         help="Incrusta plotly.js en el HTML (por defecto se carga desde CDN).")
     parser.add_argument("--watch", type=float, default=0, metavar="SEGUNDOS",
@@ -244,8 +344,8 @@ def render(args: argparse.Namespace) -> int:
     if not payload.get("ready", True) or not payload.get("timeframes"):
         print("El bot todavía no tiene series calculadas.", file=sys.stderr)
         return 0
-    html, count = build_page(payload, args)
-    Path(args.out).write_text(html, encoding="utf-8")
+    page, count = build_page(payload, args)
+    Path(args.out).write_text(page, encoding="utf-8")
     print(f"{count} gráfico(s) -> {args.out}  (calculado {payload.get('updated_at')})")
     return count
 
