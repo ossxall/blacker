@@ -1,20 +1,47 @@
 #!/usr/bin/env python3
 """
-Bot 1 — Señales EMA Cross (eventos en signal.db)
-================================================
+Bot 1 — Estrategia EMA Cross en vivo (eventos en signal.db)
+===========================================================
 
-Lee la data OHLCV almacenada por `feed.py` en `feed.db` (1m por defecto),
-aplica la estrategia definida en `strategy/strategy.py` y guarda cada señal
-como un evento en `signal.db`.
+Lee la data OHLCV almacenada por `feed.py` en `feed.db` (1m por defecto) y
+**replica exactamente el backtest** definido en `strategy/strategy.py`:
+
+- Remuestrea a `STRATEGY_TIMEFRAME`, calcula señales y salidas con
+  `EMACrossStrategy` y ejecuta el `Backtester` sobre las velas cerradas.
+- Por cada acción que tomaría el backtest (apertura, reversal, cierre por
+  EMA_CROSS, ADX_REVERSAL, EMA_WEAKENING, STOP_LOSS, BREAKEVEN, PARTIAL_TP)
+  guarda un evento en `signal.db`.
 
 Reglas de diseño
 ----------------
-- El bot **no crea órdenes**. Solo publica eventos con `executed = 0`
+- El bot **no crea órdenes**. Solo publica los eventos con `executed = 0`
   (false); un consumidor externo decide si los ejecuta y actualiza la marca.
 - Cada evento es idempotente: se deduplica por
   (symbol, interval, timeframe, event, signal, reason, bar_time).
-- La señal se conoce al cierre de la vela de la estrategia y es accionable
-  en la apertura siguiente; por eso se guardan `bar_time` y `signal_time`.
+- Las decisiones se conocen al cierre de la vela y se ejecutan en la apertura
+  siguiente (igual que el backtest); por eso se guardan `bar_time` (vela de la
+  señal) y `signal_time` (momento de ejecución). Las salidas por stop/breakeven/
+  partial se disparan dentro de la vela, por lo que `bar_time == signal_time`.
+- `force_close_at_end` se desactiva: en vivo una posición abierta no debe
+  cerrarse artificialmente al final de los datos disponibles.
+
+Orden de los eventos (para el consumidor)
+-----------------------------------------
+Cada posición genera un `ENTRY` y uno o más `EXIT` (partial TP, weakening,
+breakeven, stop, reversal o cierre completo). Para reproducir el backtest,
+ordena por `(signal_time, bar_time, event)` con `EXIT` antes que `ENTRY`:
+
+- `ENTRY`: `signal_time = bar_time + timeframe` (se ejecuta en la apertura
+  siguiente a la vela de la señal).
+- `EXIT` por EMA_CROSS / ADX / EMA_WEAKENING: también `signal_time = bar_time
+  + timeframe` (se decide al cierre y se ejecuta en la apertura siguiente).
+- `EXIT` por STOP_LOSS / BREAKEVEN / PARTIAL_TP: ocurre dentro de la vela, por
+  eso `signal_time == bar_time`. Si coincide con una apertura, la apertura va
+  primero (bar_time menor).
+
+El `payload` de cada `EXIT` incluye `action` (`CLOSE`/`PARTIAL_CLOSE`),
+`close_pct` (porcentaje de la posición *restante* a cerrar, igual que el
+backtest), `exit_price`, `pnl_net` y `r_multiple`.
 
 Uso
 ---
@@ -28,6 +55,8 @@ de la estrategia con prefijo `STRATEGY_`).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import logging
 import math
@@ -36,6 +65,7 @@ import signal
 import sqlite3
 import sys
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +81,7 @@ if str(_LEGACY_DIR) not in sys.path:
     sys.path.insert(0, str(_LEGACY_DIR))
 
 from strategy.strategy import (
+    Backtester,
     Config,
     EMACrossStrategy,
     resample_ohlcv,
@@ -114,7 +145,11 @@ def resolve_path(value: str) -> Path:
 
 
 def build_strategy_config() -> Config:
-    """Config de la estrategia. Los defaults coinciden con `strategy.Config`."""
+    """Config de la estrategia. Los defaults coinciden con `strategy.Config`.
+
+    Se exponen todos los parámetros para que el bot ejecute exactamente la
+    misma estrategia que el backtest (señales, salidas y gestión de posición).
+    """
     defaults = Config()
     return Config(
         ema_fast=env_int("STRATEGY_EMA_FAST", defaults.ema_fast),
@@ -126,7 +161,47 @@ def build_strategy_config() -> Config:
         entry_adx_enabled=env_bool("STRATEGY_ENTRY_ADX", defaults.entry_adx_enabled),
         entry_adx_len=env_int("STRATEGY_ENTRY_ADX_LEN", defaults.entry_adx_len),
         entry_adx_min=env_float("STRATEGY_ENTRY_ADX_MIN", defaults.entry_adx_min),
-        timestamp_is_close=defaults.timestamp_is_close,
+        # Gestión de posición: afecta el sizing y las salidas (stop/partial).
+        initial_capital=env_float(
+            "STRATEGY_INITIAL_CAPITAL", defaults.initial_capital
+        ),
+        commission_bps=env_float("STRATEGY_COMMISSION_BPS", defaults.commission_bps),
+        slippage_bps=env_float("STRATEGY_SLIPPAGE_BPS", defaults.slippage_bps),
+        risk_pct=env_float("STRATEGY_RISK_PCT", defaults.risk_pct),
+        max_leverage=env_float("STRATEGY_MAX_LEVERAGE", defaults.max_leverage),
+        stop_loss_pct=env_float("STRATEGY_STOP_LOSS_PCT", defaults.stop_loss_pct),
+        partial_tp_enabled=env_bool(
+            "STRATEGY_PARTIAL_TP", defaults.partial_tp_enabled
+        ),
+        partial_tp_r=env_float("STRATEGY_PARTIAL_TP_R", defaults.partial_tp_r),
+        partial_tp_pct=env_float("STRATEGY_PARTIAL_TP_PCT", defaults.partial_tp_pct),
+        move_stop_to_breakeven=env_bool(
+            "STRATEGY_MOVE_STOP_TO_BREAKEVEN", defaults.move_stop_to_breakeven
+        ),
+        # Salidas: `prepare_exits` usa estos parámetros para generar los
+        # eventos de salida, así que deben ser configurables igual que
+        # en el backtest para que ambos usen la misma estrategia.
+        adx_exit_enabled=env_bool("STRATEGY_ADX_EXIT", defaults.adx_exit_enabled),
+        adx_timeframe=os.getenv("STRATEGY_ADX_TIMEFRAME", defaults.adx_timeframe),
+        adx_dilen=env_int("STRATEGY_ADX_DILEN", defaults.adx_dilen),
+        adx_adxlen=env_int("STRATEGY_ADX_ADXLEN", defaults.adx_adxlen),
+        adx_key_level=env_float("STRATEGY_ADX_KEY_LEVEL", defaults.adx_key_level),
+        adx_exit_pct=env_float("STRATEGY_ADX_EXIT_PCT", defaults.adx_exit_pct),
+        ema_weakening_exit_enabled=env_bool(
+            "STRATEGY_EMA_WEAKENING_EXIT", defaults.ema_weakening_exit_enabled
+        ),
+        ema_weakening_timeframe=os.getenv(
+            "STRATEGY_EMA_WEAKENING_TIMEFRAME", defaults.ema_weakening_timeframe
+        ),
+        ema_weakening_gap_pct=env_float(
+            "STRATEGY_EMA_WEAKENING_GAP_PCT", defaults.ema_weakening_gap_pct
+        ),
+        ema_weakening_exit_pct=env_float(
+            "STRATEGY_EMA_WEAKENING_EXIT_PCT", defaults.ema_weakening_exit_pct
+        ),
+        timestamp_is_close=env_bool(
+            "STRATEGY_TIMESTAMP_IS_CLOSE", defaults.timestamp_is_close
+        ),
     )
 
 
@@ -287,6 +362,11 @@ def to_strategy_timeframe(raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return resample_ohlcv(raw, cfg.timeframe)
 
 
+def _reason_is_intrabar(reason: str) -> bool:
+    """Stop, breakeven y take-profit parcial se disparan dentro de la vela."""
+    return reason.startswith(("STOP_LOSS", "PARTIAL_TP")) or reason == "BREAKEVEN"
+
+
 def build_events(
     bars: pd.DataFrame,
     signals: pd.DataFrame,
@@ -296,38 +376,62 @@ def build_events(
     symbol: str = "",
     interval: str = "",
 ) -> list[dict]:
-    """Construye eventos de entrada y condiciones de salida."""
-    if bars.empty:
+    """Ejecuta el backtest y traduce cada acción real a un evento.
+
+    Reutiliza el motor `Backtester` de `strategy/strategy.py` sobre las velas
+    cerradas, de modo que el bot publica exactamente las acciones que tomaría
+    el backtest: aperturas (incluidas reversals), cierres por EMA_CROSS,
+    ADX_REVERSAL, EMA_WEAKENING, y las salidas por STOP_LOSS, BREAKEVEN y
+    PARTIAL_TP. La posición abierta al final de los datos no se cierra
+    (`force_close_at_end=False`): en vivo sigue vigente.
+    """
+    if bars.empty or len(bars) < 2:
         return []
     if cfg is None:
         raise ValueError("cfg requerido")
 
-    timeframe_ms = int(pd.Timedelta(cfg.timeframe).total_seconds() * 1000)
-    target = signals["target"].to_numpy() if signals is not None else np.zeros(len(bars))
-    fast = signals["ema_fast"].to_numpy(float) if signals is not None else np.full(len(bars), np.nan)
-    slow = signals["ema_slow"].to_numpy(float) if signals is not None else np.full(len(bars), np.nan)
-    entry_adx = signals["adx_entry"].to_numpy(float) if signals is not None else np.full(len(bars), np.nan)
-    closes = bars["close"].to_numpy(float)
-    index = bars.index
+    live_cfg = replace(cfg, force_close_at_end=False)
+    engine = Backtester(bars, live_cfg, signals, adx_exit, weak_exit)
+    # `Backtester.run` imprime progreso; lo silenciamos para no ensuciar el log.
+    with contextlib.redirect_stdout(io.StringIO()):
+        engine.run()
+
+    tf_ms = int(pd.Timedelta(cfg.timeframe).total_seconds() * 1000)
     created_at = utc_iso()
 
-    adx_arr = np.asarray(adx_exit, dtype=bool) if adx_exit is not None else np.zeros(len(bars), dtype=bool)
-    weak_arr = np.asarray(weak_exit, dtype=bool) if weak_exit is not None else np.zeros(len(bars), dtype=bool)
-    if len(adx_arr) != len(bars):
-        adx_arr = np.zeros(len(bars), dtype=bool)
-    if len(weak_arr) != len(bars):
-        weak_arr = np.zeros(len(bars), dtype=bool)
+    # Indicadores por barra para enriquecer los eventos.
+    ema_fast = signals["ema_fast"].to_numpy(float)
+    ema_slow = signals["ema_slow"].to_numpy(float)
+    adx_entry = signals["adx_entry"].to_numpy(float)
+    meta = {
+        int(ms): (ema_fast[i], ema_slow[i], adx_entry[i])
+        for i, ms in enumerate(bars.index.asi8 // 10**6)
+    }
+
+    def indicators(bar_ms: int) -> tuple[float, float, float]:
+        values = meta.get(bar_ms)
+        return values if values is not None else (np.nan, np.nan, np.nan)
 
     events: list[dict] = []
-    for i in np.flatnonzero(target != 0):
-        direction = int(target[i])
-        if direction == 1 and not cfg.allow_long:
-            continue
-        if direction == -1 and not cfg.allow_short:
-            continue
-        signal_side = "LONG" if direction == 1 else "SHORT"
-        bar_time = int(index[i].timestamp() * 1000)
-        signal_time = bar_time if cfg.timestamp_is_close else bar_time + timeframe_ms
+
+    # --- Aperturas: una por posición (cerrada o todavía abierta) ---
+    entries: dict[int, tuple[str, pd.Timestamp, float]] = {}
+    for trade in engine.trades:
+        if trade.position_id not in entries:
+            entries[trade.position_id] = (trade.side, trade.entry_time, trade.entry_price)
+    open_pos = engine.position
+    if open_pos is not None and open_pos.position_id not in entries:
+        entries[open_pos.position_id] = (
+            "LONG" if open_pos.side == 1 else "SHORT",
+            open_pos.entry_time,
+            open_pos.entry_price,
+        )
+
+    for position_id in sorted(entries):
+        side, entry_time, entry_price = entries[position_id]
+        signal_time = int(entry_time.timestamp() * 1000)
+        bar_time = signal_time - tf_ms
+        fast_v, slow_v, adx_v = indicators(bar_time)
         events.append(
             {
                 "symbol": symbol,
@@ -336,70 +440,80 @@ def build_events(
                 "bar_time": bar_time,
                 "signal_time": signal_time,
                 "event": "ENTRY",
-                "signal": signal_side,
-                "side": signal_side,
+                "signal": side,
+                "side": side,
                 "reason": "EMA_CROSS",
-                "price": opt_float(closes[i]),
-                "ema_fast": opt_float(fast[i]),
-                "ema_slow": opt_float(slow[i]),
-                "adx_entry": opt_float(entry_adx[i]),
+                "price": opt_float(entry_price),
+                "ema_fast": opt_float(fast_v),
+                "ema_slow": opt_float(slow_v),
+                "adx_entry": opt_float(adx_v),
                 "executed": 0,
                 "created_at": created_at,
-                "payload": json.dumps({"target": direction}),
+                "payload": json.dumps({"action": "OPEN", "position_id": position_id}),
             }
         )
 
-    for i in np.flatnonzero(adx_arr):
-        bar_time = int(index[i].timestamp() * 1000)
-        signal_time = bar_time if cfg.timestamp_is_close else bar_time + timeframe_ms
-        adx_tf_min = int(pd.Timedelta(cfg.adx_timeframe).total_seconds() / 60)
-        reason = f"ADX_{adx_tf_min}M_REVERSAL" if cfg.adx_exit_pct >= 100 else f"ADX_{adx_tf_min}M_REVERSAL_{cfg.adx_exit_pct:g}%"
-        events.append(
-            {
-                "symbol": symbol,
-                "interval": interval,
-                "timeframe": cfg.timeframe,
-                "bar_time": bar_time,
-                "signal_time": signal_time,
-                "event": "EXIT_CONDITION",
-                "signal": "ADX_REVERSAL",
-                "side": None,
-                "reason": reason,
-                "price": opt_float(closes[i]),
-                "ema_fast": opt_float(fast[i]),
-                "ema_slow": opt_float(slow[i]),
-                "adx_entry": opt_float(entry_adx[i]),
-                "executed": 0,
-                "created_at": created_at,
-                "payload": json.dumps({"condition": "adx_reversal", "exit_pct": cfg.adx_exit_pct}),
-            }
-        )
+    # --- Cierres: un evento por cada tramo ejecutado por el backtest ---
+    legs_by_position: dict[int, list] = {}
+    for trade in engine.trades:
+        legs_by_position.setdefault(trade.position_id, []).append(trade)
 
-    for i in np.flatnonzero(weak_arr):
-        bar_time = int(index[i].timestamp() * 1000)
-        signal_time = bar_time if cfg.timestamp_is_close else bar_time + timeframe_ms
-        weak_tf = cfg.ema_weakening_timeframe or cfg.timeframe
-        reason = f"EMA_WEAKENING_{weak_tf.upper()}" if cfg.ema_weakening_exit_pct >= 100 else f"EMA_WEAKENING_{weak_tf.upper()}_{cfg.ema_weakening_exit_pct:g}%"
-        events.append(
-            {
-                "symbol": symbol,
-                "interval": interval,
-                "timeframe": cfg.timeframe,
-                "bar_time": bar_time,
-                "signal_time": signal_time,
-                "event": "EXIT_CONDITION",
-                "signal": "EMA_WEAKENING",
-                "side": None,
-                "reason": reason,
-                "price": opt_float(closes[i]),
-                "ema_fast": opt_float(fast[i]),
-                "ema_slow": opt_float(slow[i]),
-                "adx_entry": opt_float(entry_adx[i]),
-                "executed": 0,
-                "created_at": created_at,
-                "payload": json.dumps({"condition": "ema_weakening", "exit_pct": cfg.ema_weakening_exit_pct}),
-            }
-        )
+    # Cantidad inicial de una posición que quedó abierta con cierres parciales.
+    open_quantity = (
+        engine.position.initial_quantity if engine.position is not None else None
+    )
+    open_position_id = engine.position.position_id if engine.position is not None else None
+
+    for position_id in sorted(legs_by_position):
+        legs = legs_by_position[position_id]
+        # Para posiciones cerradas la suma de tramos es la cantidad inicial; en
+        # una posición todavía abierta se toma del propio motor.
+        if position_id == open_position_id and open_quantity:
+            initial_qty = open_quantity
+        else:
+            initial_qty = sum(leg.quantity for leg in legs)
+        remaining = initial_qty
+        for leg in legs:
+            signal_time = int(leg.exit_time.timestamp() * 1000)
+            intrabar = _reason_is_intrabar(leg.reason)
+            bar_time = signal_time if intrabar else signal_time - tf_ms
+            fast_v, slow_v, adx_v = indicators(bar_time)
+            # El backtest cierra `percent` de la posición *restante*; replicamos
+            # ese porcentaje (el que debe aplicar el consumidor sobre su posición).
+            close_pct = 100.0 * leg.quantity / remaining if remaining else 100.0
+            r_multiple = (
+                leg.pnl_net / leg.position_risk if leg.position_risk else None
+            )
+            events.append(
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "timeframe": cfg.timeframe,
+                    "bar_time": bar_time,
+                    "signal_time": signal_time,
+                    "event": "EXIT",
+                    "signal": leg.side,
+                    "side": leg.side,
+                    "reason": leg.reason,
+                    "price": opt_float(leg.exit_price),
+                    "ema_fast": opt_float(fast_v),
+                    "ema_slow": opt_float(slow_v),
+                    "adx_entry": opt_float(adx_v),
+                    "executed": 0,
+                    "created_at": created_at,
+                    "payload": json.dumps(
+                        {
+                            "action": "CLOSE" if close_pct >= 99.999 else "PARTIAL_CLOSE",
+                            "position_id": position_id,
+                            "close_pct": close_pct,
+                            "exit_price": opt_float(leg.exit_price),
+                            "pnl_net": opt_float(leg.pnl_net),
+                            "r_multiple": opt_float(r_multiple),
+                        }
+                    ),
+                }
+            )
+            remaining -= leg.quantity
 
     return events
 
@@ -451,7 +565,9 @@ class SignalBot:
         inserted = self.store.insert(events)
         if inserted:
             logger.info(
-                "Publicados %d eventos nuevos (de %d señales).", inserted, len(events)
+                "Publicados %d eventos nuevos (de %d acciones del backtest).",
+                inserted,
+                len(events),
             )
         return inserted
 
@@ -474,7 +590,8 @@ class SignalBot:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Bot de señales EMA Cross -> signal.db (solo eventos)."
+        description="Bot EMA Cross en vivo: replica el backtest y publica sus "
+        "acciones como eventos en signal.db."
     )
     parser.add_argument(
         "--feed-db",
