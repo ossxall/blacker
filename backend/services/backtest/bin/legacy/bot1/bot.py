@@ -3,7 +3,7 @@
 Bot 1 — Estrategia EMA Cross en vivo (eventos en signal.db)
 ===========================================================
 
-Lee la data OHLCV almacenada por `feed.py` en `feed.db` (1m por defecto) y
+Lee la data OHLCV almacenada por `feed.py` en `data/feed.db` (1m por defecto) y
 **replica exactamente el backtest** definido en `strategy/strategy.py`:
 
 - Remuestrea a `STRATEGY_TIMEFRAME`, calcula señales y salidas con
@@ -48,6 +48,15 @@ Uso
     python bot.py                 # bucle continuo (polling de feed.db)
     python bot.py --once          # procesa lo disponible y termina
     python bot.py --help
+
+Modo live-only
+--------------
+Con `--live-only` (o `LIVE_ONLY=true`) el bot ignora el histórico y publica
+solo las señales cuya vela (`bar_time`) es igual o posterior al arranque; así
+no vuelca de golpe todas las señales pasadas al ponerse en marcha. La marca de
+arranque se guarda en `signal.db` (`bot_state.live_since_ms`) para no perder
+señales entre reinicios. Para reanudar desde una fecha concreta:
+`--live-since 2026-09-01` (o epoch en ms).
 
 La configuración se toma de `.env` (mismas variables que `feed.py` más las
 de la estrategia con prefijo `STRATEGY_`).
@@ -119,6 +128,21 @@ def utc_now() -> datetime:
 
 def utc_iso() -> str:
     return utc_now().isoformat()
+
+
+def ms_to_iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def parse_live_since(value: str) -> int:
+    """Convierte epoch en ms o una fecha ISO 8601 a epoch en ms."""
+    text = value.strip()
+    if text.lstrip("-").isdigit():
+        return int(text)
+    moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp() * 1000)
 
 
 def env_int(name: str, default: int) -> int:
@@ -256,6 +280,13 @@ SIGNALS_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_signals_executed ON signals(executed)",
 )
 
+BOT_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS bot_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
 INSERT_SQL = """
 INSERT OR IGNORE INTO signals (
     symbol, interval, timeframe, bar_time, signal_time, event, signal,
@@ -282,6 +313,7 @@ class SignalStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute(SIGNALS_DDL)
+        self.conn.execute(BOT_STATE_DDL)
         for ddl in SIGNALS_INDEXES:
             self.conn.execute(ddl)
         self.conn.commit()
@@ -293,6 +325,24 @@ class SignalStore:
         cursor = self.conn.executemany(INSERT_SQL, events)
         self.conn.commit()
         return cursor.rowcount if cursor.rowcount is not None else 0
+
+    def get_state(self, key: str) -> str | None:
+        if self.conn is None:
+            return None
+        row = self.conn.execute(
+            "SELECT value FROM bot_state WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        if self.conn is None:
+            return
+        self.conn.execute(
+            "INSERT INTO bot_state(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
 
     def close(self) -> None:
         if self.conn is not None:
@@ -546,6 +596,8 @@ class SignalBot:
         symbol: str,
         interval: str,
         min_bars: int | None = None,
+        live_only: bool = False,
+        live_since_ms: int | None = None,
     ):
         self.cfg = cfg
         self.feed = feed
@@ -554,9 +606,44 @@ class SignalBot:
         self.interval = interval
         self.strategy = EMACrossStrategy(cfg)
         self.min_bars = min_bars or (cfg.ema_slow + 2)
+        self.live_only = live_only
+        self.live_since_ms = live_since_ms
+        self._live_resolved = False
+
+    def _resolve_live_since(self) -> None:
+        """Fija la marca desde la que se publican señales (modo live-only).
+
+        En modo live-only se ignora el histórico: solo se publican señales
+        cuya vela (`bar_time`) es igual o posterior al arranque del bot. La
+        marca se guarda en `signal.db` (`bot_state`) para no perder señales
+        entre reinicios.
+        """
+        if self._live_resolved:
+            return
+        self._live_resolved = True
+        if not self.live_only:
+            return
+
+        if self.live_since_ms is None:
+            stored = self.store.get_state("live_since_ms")
+            if stored is not None:
+                self.live_since_ms = int(stored)
+                logger.info(
+                    "Modo live-only: reanudando desde %s.",
+                    ms_to_iso(self.live_since_ms),
+                )
+                return
+            self.live_since_ms = int(utc_now().timestamp() * 1000)
+
+        self.store.set_state("live_since_ms", str(self.live_since_ms))
+        logger.info(
+            "Modo live-only: solo señales desde %s (se ignora el histórico).",
+            ms_to_iso(self.live_since_ms),
+        )
 
     def process_once(self) -> int:
         """Ejecuta un ciclo: lee, calcula y publica eventos nuevos."""
+        self._resolve_live_since()
         if self.feed.conn is None:
             self.feed.connect()
         raw = self.feed.load_closed()
@@ -577,6 +664,9 @@ class SignalBot:
         signals = self.strategy.generate_signals(bars)
         adx_exit, weak_exit = self.strategy.prepare_exits(raw, bars)
         events = build_events(bars, signals, adx_exit, weak_exit, self.cfg, self.symbol, self.interval)
+        if self.live_since_ms is not None:
+            # live-only: descarta las señales anteriores al arranque.
+            events = [e for e in events if e["bar_time"] >= self.live_since_ms]
         inserted = self.store.insert(events)
         if inserted:
             logger.info(
@@ -613,13 +703,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feed-db",
-        default=os.getenv("DB_PATH", "feed.db"),
-        help="Ruta a feed.db (por defecto DB_PATH o feed.db).",
+        default=os.getenv("DB_PATH", "data/feed.db"),
+        help="Ruta a feed.db (por defecto DB_PATH o data/feed.db).",
     )
     parser.add_argument(
         "--signal-db",
-        default=os.getenv("SIGNAL_DB", "signal.db"),
-        help="Ruta a signal.db (por defecto SIGNAL_DB o signal.db).",
+        default=os.getenv("SIGNAL_DB", "data/signal.db"),
+        help="Ruta a signal.db (por defecto SIGNAL_DB o data/signal.db).",
     )
     parser.add_argument("--symbol", default=os.getenv("SYMBOL", "BTCUSDT"))
     parser.add_argument("--interval", default=os.getenv("INTERVAL", "1m"))
@@ -631,6 +721,17 @@ def parse_args() -> argparse.Namespace:
         help="Intervalo de sondeo de feed.db en modo continuo.",
     )
     parser.add_argument("--once", action="store_true", help="Un solo ciclo y salir.")
+    parser.add_argument(
+        "--live-only",
+        action="store_true",
+        help="Publica solo señales desde el arranque (ignora el histórico).",
+    )
+    parser.add_argument(
+        "--live-since",
+        default=None,
+        help="Marca temporal (epoch ms o ISO 8601) desde la que publicar; "
+        "implica --live-only.",
+    )
     return parser.parse_args()
 
 
@@ -661,9 +762,23 @@ def main() -> int:
 
     feed = FeedReader(feed_path, symbol, interval)
     store = SignalStore(signal_path)
+    live_only = (
+        args.live_only
+        or args.live_since is not None
+        or env_bool("LIVE_ONLY", False)
+    )
+    live_since_ms = parse_live_since(args.live_since) if args.live_since else None
     try:
         store.connect()
-        bot = SignalBot(cfg, feed, store, symbol, interval)
+        bot = SignalBot(
+            cfg,
+            feed,
+            store,
+            symbol,
+            interval,
+            live_only=live_only,
+            live_since_ms=live_since_ms,
+        )
         bot.run(once=args.once, poll_seconds=args.poll_seconds)
     finally:
         feed.close()

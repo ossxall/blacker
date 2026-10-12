@@ -22,11 +22,11 @@ case "${1:-help}" in
     .venv/bin/pip install -r requirements.txt
     ;;
   feed)  exec "$PY" feed.py --db "$FEED_DB" ;;
-  bot)   exec "$PY" bot.py --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" ;;
-  once)  "$PY" bot.py --once --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" ;;
+  bot)   exec "$PY" bot.py --live-only --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" ;;
+  once)  "$PY" bot.py --once --live-only --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" ;;
   up)
     "$PY" feed.py --db "$FEED_DB" > >(sed -u 's/^/[feed] /') 2>&1 & FEED=$!
-    "$PY" bot.py --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" \
+    "$PY" bot.py --live-only --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" \
         > >(sed -u 's/^/[bot]  /') 2>&1 & BOT=$!
     trap 'kill $FEED $BOT 2>/dev/null; exit 0' INT TERM
     wait

@@ -41,7 +41,7 @@ WS_BASE_URL = "wss://fstream.binance.com/ws"
 
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT").upper()
 INTERVAL = os.getenv("INTERVAL", "1m")
-DB_PATH = os.getenv("DB_PATH", "feed.db")
+DB_PATH = os.getenv("DB_PATH", "data/feed.db")
 START_DATE = os.getenv("START_DATE", "2026-08-01")
 
 REST_TIMEOUT_CONNECT = float(os.getenv("REST_TIMEOUT_CONNECT", "5"))

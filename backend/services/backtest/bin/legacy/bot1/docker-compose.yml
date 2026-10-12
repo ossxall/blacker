@@ -67,6 +67,7 @@ services:
       DB_PATH: /data/feed.db
       SIGNAL_DB: /data/signal.db
       BOT_HEARTBEAT: /data/bot1.heartbeat
+      LIVE_ONLY: "true"
     healthcheck:
       test: ["CMD", "python", "healthcheck.py", "bot"]
       interval: 60s
