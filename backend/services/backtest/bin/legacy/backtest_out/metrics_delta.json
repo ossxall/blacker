@@ -1,5 +1,167 @@
 {
-  "generated_at": "2026-10-12T04:28:55.076999+00:00",
-  "previous_available": false,
-  "delta": {}
+  "generated_at": "2026-10-12T21:01:21.409232+00:00",
+  "previous_available": true,
+  "delta": {
+    "avg_pnl": {
+      "previous": 72.89680359178402,
+      "current": 72.89680359178402,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "expectancy_r": {
+      "previous": 0.31850741207146444,
+      "current": 0.31850741207146444,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "final_equity": {
+      "previous": 49582.96435033876,
+      "current": 49582.96435033876,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "initial_capital": {
+      "previous": 10000.0,
+      "current": 10000.0,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "legs": {
+      "previous": 925,
+      "current": 925,
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "losses": {
+      "previous": 229,
+      "current": 229,
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "max_consecutive_losses": {
+      "previous": 6,
+      "current": 6,
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "max_dd_peak_equity": {
+      "previous": 12901.079010665782,
+      "current": 12901.079010665782,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "max_dd_peak_vs_capital_pct": {
+      "previous": 29.010790106657815,
+      "current": 29.010790106657815,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "max_dd_trough_equity": {
+      "previous": 11330.087077513808,
+      "current": 11330.087077513808,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "max_dd_trough_vs_capital_pct": {
+      "previous": 13.300870775138085,
+      "current": 13.300870775138085,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "max_drawdown_pct": {
+      "previous": -12.177213486198934,
+      "current": -12.177213486198934,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "min_equity": {
+      "previous": 9980.94815075544,
+      "current": 9980.94815075544,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "min_equity_vs_capital_pct": {
+      "previous": -0.1905184924456127,
+      "current": -0.1905184924456127,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "net_pnl": {
+      "previous": 39582.96435033873,
+      "current": 39582.96435033873,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "positions": {
+      "previous": 543,
+      "current": 543,
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "profit_factor": {
+      "previous": 1.7079440843286782,
+      "current": 1.7079440843286782,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "return_over_maxdd": {
+      "previous": 32.50576529285635,
+      "current": 32.50576529285635,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "return_pct": {
+      "previous": 395.8296435033876,
+      "current": 395.8296435033876,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "sharpe_daily_365": {
+      "previous": 1.5874677935520562,
+      "current": 1.5874677935520562,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "sortino_daily_365": {
+      "previous": 3.0653830288925654,
+      "current": 3.0653830288925654,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "win_rate_pct": {
+      "previous": 57.826887661141804,
+      "current": 57.826887661141804,
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
+    },
+    "wins": {
+      "previous": 314,
+      "current": 314,
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
+    }
+  }
 }
