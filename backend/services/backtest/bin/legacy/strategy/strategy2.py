@@ -3,6 +3,10 @@
 Strategy 2 — EMA Cross + ADX / EMA Weakening
 ============================================
 
+Gestión de salida por defecto: take-profit parcial a 1R (50%) y stop a
+breakeven del resto (`partial_tp_enabled`). Sube el win rate y recorta la
+racha de pérdidas en whipsaw; puede desactivarse con `partial_tp_enabled=False`.
+
 Archivo único con API reutilizable para backtesting y bots.
 
 Uso:
@@ -71,6 +75,16 @@ class Config:
     ema_weakening_gap_pct: float = 0.001
     ema_weakening_exit_pct: float = 50.0
 
+    # Gestión de salida orientada a reducir la racha de pérdidas en whipsaw:
+    # al alcanzar `partial_tp_r` veces el riesgo inicial se asegura beneficio
+    # cerrando `partial_tp_pct` de la posición y, opcionalmente, se mueve el
+    # stop del resto a breakeven. Sube el win rate real (rompe rachas de
+    # stop-loss consecutivos) a cambio de recortar parte del retorno.
+    partial_tp_enabled: bool = True
+    partial_tp_r: float = 1.0
+    partial_tp_pct: float = 50.0
+    move_stop_to_breakeven: bool = True
+
     force_close_at_end: bool = True
     timestamp_is_close: bool = False
 
@@ -100,6 +114,9 @@ class Config:
         if self.ema_weakening_exit_enabled:
             if self.ema_weakening_gap_pct <= 0 or not 0 < self.ema_weakening_exit_pct <= 100:
                 raise ValueError("Configuración de weakening inválida.")
+        if self.partial_tp_enabled:
+            if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:
+                raise ValueError("Configuración de take-profit parcial inválida.")
         if not (self.allow_long or self.allow_short):
             raise ValueError("Debe habilitarse LONG, SHORT o ambos.")
 
@@ -115,6 +132,8 @@ class Position:
     entry_fee: float
     stop_pct: float
     risk_amount: float
+    breakeven: bool = False
+    partial_done: bool = False
 
 
 @dataclass
@@ -471,14 +490,38 @@ class Backtester:
             pos.quantity = remaining
             pos.entry_fee -= entry_fee
 
+    def _risk_unit(self, pos: Position) -> float:
+        return pos.risk_amount / pos.initial_quantity if pos.initial_quantity else 0.0
+
+    def _manage(self, i: int):
+        """Take-profit parcial y stop a breakeven para recortar rachas de pérdidas."""
+        cfg, pos = self.cfg, self.position
+        if pos is None or not cfg.partial_tp_enabled or pos.partial_done:
+            return
+        risk_unit = self._risk_unit(pos)
+        if risk_unit <= 0:
+            return
+        trigger = pos.entry_price + pos.side * cfg.partial_tp_r * risk_unit
+        hit = self.h[i] >= trigger if pos.side == 1 else self.l[i] <= trigger
+        if not hit:
+            return
+        fill = max(trigger, self.o[i]) if pos.side == 1 else min(trigger, self.o[i])
+        self.close_position(cfg.partial_tp_pct, fill, self.times[i], f"PARTIAL_TP_{cfg.partial_tp_r:g}R")
+        pos = self.position
+        if pos is not None:
+            pos.partial_done = True
+            if cfg.move_stop_to_breakeven:
+                pos.breakeven = True
+
     def _stop(self, i: int) -> bool:
         pos = self.position
         if pos is None or pos.stop_pct <= 0: return False
-        stop = self._stop_price(pos.side, pos.entry_price, pos.stop_pct)
+        stop = pos.entry_price if pos.breakeven else self._stop_price(pos.side, pos.entry_price, pos.stop_pct)
         hit = self.l[i] <= stop if pos.side == 1 else self.h[i] >= stop
         if not hit: return False
         fill = min(self.o[i], stop) if pos.side == 1 else max(self.o[i], stop)
-        self.close_position(100, fill, self.times[i], f"STOP_LOSS_{pos.stop_pct*100:.2f}%")
+        reason = "BREAKEVEN" if pos.breakeven else f"STOP_LOSS_{pos.stop_pct*100:.2f}%"
+        self.close_position(100, fill, self.times[i], reason)
         if self.verbose: print(f"[STOP] {self.times[i]} fill={fill:.8f}", flush=True)
         return True
 
@@ -521,6 +564,8 @@ class Backtester:
                 self.pending_exit = None
 
             stop_hit = self._stop(i)
+            if not stop_hit:
+                self._manage(i)
             if not stop_hit and bool(self.signals["valid"].iloc[i]):
                 target = int(self.signals["target"].iloc[i])
                 if target == 1 and not cfg.allow_long: target = 0
@@ -732,6 +777,10 @@ def parse_args():
     p.add_argument("--ema-weakening-timeframe", default=d.ema_weakening_timeframe)
     p.add_argument("--ema-weakening-gap-pct", type=float, default=d.ema_weakening_gap_pct)
     p.add_argument("--ema-weakening-exit-pct", type=float, default=d.ema_weakening_exit_pct)
+    p.add_argument("--partial-tp", action=argparse.BooleanOptionalAction, default=d.partial_tp_enabled)
+    p.add_argument("--partial-tp-r", type=float, default=d.partial_tp_r)
+    p.add_argument("--partial-tp-pct", type=float, default=d.partial_tp_pct)
+    p.add_argument("--breakeven-stop", action=argparse.BooleanOptionalAction, default=d.move_stop_to_breakeven)
     p.add_argument("--no-long", action="store_true")
     p.add_argument("--no-short", action="store_true")
     p.add_argument("--no-force-close", action="store_true")
@@ -755,6 +804,8 @@ def config_from_args(a) -> Config:
         adx_adxlen=a.adx_adxlen, adx_key_level=a.adx_key_level, adx_exit_pct=a.adx_exit_pct,
         ema_weakening_exit_enabled=a.ema_weakening_exit, ema_weakening_timeframe=a.ema_weakening_timeframe,
         ema_weakening_gap_pct=a.ema_weakening_gap_pct, ema_weakening_exit_pct=a.ema_weakening_exit_pct,
+        partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
+        move_stop_to_breakeven=a.breakeven_stop,
         force_close_at_end=not a.no_force_close)
 
 
