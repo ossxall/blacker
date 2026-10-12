@@ -2,8 +2,11 @@
 # =============================================================================
 # - Ambos servicios comparten la imagen y un volumen con feed.db y signal.db.
 # - `feed` escribe feed.db (WAL); `bot` solo lee feed.db y escribe signal.db.
-# - Resiliencia: `restart: unless-stopped`, `init: true`, healthchecks reales,
-#   límites de log y `depends_on: service_healthy` para el bot.
+# - Resiliencia: `restart: unless-stopped`, `init: true`, healthchecks reales
+#   y límites de log. El bot solo espera a que el contenedor del feed ARRANQUE
+#   (`service_started`), no a que esté sano: bot.py tolera que feed.db falte o
+#   esté vacío y reintenta cada POLL_SECONDS, así que nunca queda bloqueado si
+#   el feed tarda o queda unhealthy.
 #
 # Uso (desde ./bot1):
 #   docker compose up -d --build
@@ -58,7 +61,8 @@ services:
     command: ["python", "bot.py"]
     depends_on:
       feed:
-        condition: service_healthy
+        # Solo orden de arranque, no salud: el bot arranca igual y espera datos.
+        condition: service_started
     environment:
       DB_PATH: /data/feed.db
       SIGNAL_DB: /data/signal.db

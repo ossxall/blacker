@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Healthchecks de los contenedores de bot1
 ========================================
