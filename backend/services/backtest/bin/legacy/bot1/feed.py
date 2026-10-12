@@ -3,15 +3,16 @@
 Resilient Binance USDⓈ-M Futures OHLCV collector.
 Symbol: BTCUSDT | Interval: 1m | Storage: SQLite
 
-- REST backfill with pagination (default: from 2019-09-08 UTC).
+- REST backfill with pagination (default: from YEAR-MM-DD UTC).
 - WebSocket live updates, including the currently forming candle.
 - Idempotent SQLite UPSERT keyed by candle open time.
 - Reconnects with exponential backoff and periodic REST gap repair.
 - No API key required: public market data only.
 """
 from __future__ import annotations
-
-import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
 from contextlib import contextmanager
 import logging
 import os
@@ -19,10 +20,7 @@ import signal
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterable
-
+import argparse
 import requests
 import websocket
 
@@ -36,7 +34,7 @@ MINUTE_MS = 60_000
 STOP = threading.Event()
 DB_LOCK = threading.Lock()
 
-LOG = logging.getLogger("binance_ohlcv")
+LOG = logging.getLogger("feed")
 
 
 def utc_now_ms() -> int:
