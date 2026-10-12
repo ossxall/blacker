@@ -68,7 +68,10 @@ WS_WATCHDOG_SECONDS = max(
 MAX_BACKOFF_SECONDS = max(
     5, int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 )
-WS_MAX_RECOVERY_SECONDS = 600
+# 0 (por defecto) = reintentar indefinidamente.
+WS_MAX_RECOVERY_SECONDS = max(
+    0, int(os.getenv("WS_MAX_RECOVERY_SECONDS", "0"))
+)
 WS_STABLE_SECONDS = 60
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -79,6 +82,7 @@ WS_LOCK = threading.RLock()
 
 ACTIVE_WS = None
 WS_CONNECTED = threading.Event()
+BACKFILL_DONE = threading.Event()
 
 LAST_WS_MESSAGE_MONOTONIC = 0.0
 LAST_WS_MESSAGE_UTC = None
@@ -551,6 +555,7 @@ def initial_backfill_worker():
         logger.exception("Fallo inesperado en backfill")
         set_state("backfill_status", "error")
     finally:
+        BACKFILL_DONE.set()
         session.close()
 
 
@@ -620,6 +625,14 @@ def rest_repair_worker():
     session = create_session()
 
     try:
+        # Espera a que el backfill inicial termine para no
+        # descargar el mismo rango en paralelo.
+        while not STOP_EVENT.is_set():
+            if BACKFILL_DONE.wait(1):
+                break
+        else:
+            return
+
         while not STOP_EVENT.is_set():
             try:
                 repair_recent(session)
@@ -830,7 +843,10 @@ def run_websocket_forever():
 
             failed_for = time.monotonic() - recovery_started
 
-            if failed_for >= WS_MAX_RECOVERY_SECONDS:
+            if (
+                WS_MAX_RECOVERY_SECONDS > 0
+                and failed_for >= WS_MAX_RECOVERY_SECONDS
+            ):
                 logger.critical(
                     "Sin recuperación estable durante %s s.",
                     int(failed_for),
@@ -957,7 +973,9 @@ def main():
     try:
         recovered = run_websocket_forever()
 
-        if not recovered and not STOP_EVENT.is_set():
+        # run_websocket_forever() siempre deja STOP_EVENT activo;
+        # recovered=False indica fallo crítico del WebSocket.
+        if not recovered:
             exit_code = 1
 
     except KeyboardInterrupt:
