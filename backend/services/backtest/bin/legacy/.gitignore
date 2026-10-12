@@ -7,3 +7,6 @@
 *.db
 *.db-wal
 *.db-shm
+.ruff_cache
+.dev
+.vite
