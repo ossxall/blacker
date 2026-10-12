@@ -25,10 +25,22 @@ case "${1:-help}" in
   bot)   exec "$PY" bot.py --live-only --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" ;;
   once)  "$PY" bot.py --once --live-only --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" ;;
   up)
-    "$PY" feed.py --db "$FEED_DB" > >(sed -u 's/^/[feed] /') 2>&1 & FEED=$!
-    "$PY" bot.py --live-only --feed-db "$FEED_DB" --signal-db "$SIGNAL_DB" \
-        > >(sed -u 's/^/[bot]  /') 2>&1 & BOT=$!
-    trap 'kill $FEED $BOT 2>/dev/null; exit 0' INT TERM
+    LIVE_ARGS=()
+    if [[ "${2:-}" == "live-only" ]]; then
+      LIVE_ARGS+=(--live-only)
+    fi
+
+    "$PY" feed.py --db "$FEED_DB" \
+        > >(sed -u 's/^/[feed] /') 2>&1 &
+    FEED=$!
+
+    "$PY" bot.py "${LIVE_ARGS[@]}" \
+        --feed-db "$FEED_DB" \
+        --signal-db "$SIGNAL_DB" \
+        > >(sed -u 's/^/[bot]  /') 2>&1 &
+    BOT=$!
+
+    trap 'kill "$FEED" "$BOT" 2>/dev/null; exit 0' INT TERM
     wait
     ;;
   status)
