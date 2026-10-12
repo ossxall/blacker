@@ -58,6 +58,12 @@ arranque se guarda en `signal.db` (`bot_state.live_since_ms`) para no perder
 señales entre reinicios. Para reanudar desde una fecha concreta:
 `--live-since 2026-09-01` (o epoch en ms).
 
+Endpoint HTTP de debug
+----------------------
+Expone el último cálculo de series de cada timeframe en JSON (ver `server.py`).
+Se configura con `--http-host` / `HTTP_HOST` (por defecto 127.0.0.1) y
+`--http-port` / `HTTP_PORT` (por defecto 8080; `0` lo desactiva).
+
 La configuración se toma de `.env` (mismas variables que `feed.py` más las
 de la estrategia con prefijo `STRATEGY_`).
 """
@@ -82,13 +88,14 @@ import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Estrategia compartida (strategy/strategy.py)
+# Estrategia compartida (strategy/strategy.py) y módulos locales (server.py)
 # ---------------------------------------------------------------------------
 _BASE_DIR = Path(__file__).resolve().parent          # .../bin/legacy/bot1
 _LEGACY_DIR = _BASE_DIR.parent                       # .../bin/legacy
-if str(_LEGACY_DIR) not in sys.path:
-    sys.path.insert(0, str(_LEGACY_DIR))
+for _path in (_LEGACY_DIR, _BASE_DIR):               # bot1/ queda primero
+    sys.path.insert(0, str(_path))
 
+from server import SeriesSnapshot, start_server
 from strategy.strategy import (
     Backtester,
     Config,
@@ -108,13 +115,11 @@ except ImportError:
 
 
 # ===========================================================================
-# Configuración
+# Utilidades y configuración
 # ===========================================================================
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(threadName)s: %(message)s",
 )
 logger = logging.getLogger("bot1")
@@ -134,6 +139,10 @@ def ms_to_iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
+def ts_ms(moment: pd.Timestamp) -> int:
+    return int(moment.timestamp() * 1000)
+
+
 def parse_live_since(value: str) -> int:
     """Convierte epoch en ms o una fecha ISO 8601 a epoch en ms."""
     text = value.strip()
@@ -142,7 +151,20 @@ def parse_live_since(value: str) -> int:
     moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    return int(moment.timestamp() * 1000)
+    return ts_ms(moment)
+
+
+def opt_float(value) -> float | None:
+    """Convierte a float JSON-safe; None si no es finito."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def env_str(name: str, default: str) -> str:
+    return os.getenv(name, default)
 
 
 def env_int(name: str, default: int) -> int:
@@ -171,8 +193,7 @@ def resolve_path(value: str) -> Path:
 def touch_heartbeat() -> None:
     """Registra actividad para el healthcheck del contenedor (best-effort).
 
-    Solo actúa si `BOT_HEARTBEAT` está definido; si no, es un no-op, de modo
-    que ejecuciones locales/tests no escriben nada.
+    Solo actúa si `BOT_HEARTBEAT` está definido; si no, es un no-op.
     """
     path = os.getenv("BOT_HEARTBEAT")
     if not path:
@@ -183,64 +204,51 @@ def touch_heartbeat() -> None:
         logger.debug("No se pudo escribir el heartbeat en %s", path)
 
 
-def build_strategy_config() -> Config:
-    """Config de la estrategia. Los defaults coinciden con `strategy.Config`.
+# Campo de `Config` -> (variable de entorno, lector). Los defaults salen de
+# `Config()`, así el bot ejecuta la misma estrategia que el backtest.
+_CONFIG_ENV = {
+    "ema_fast": ("STRATEGY_EMA_FAST", env_int),
+    "ema_slow": ("STRATEGY_EMA_SLOW", env_int),
+    "timeframe": ("STRATEGY_TIMEFRAME", env_str),
+    "allow_long": ("STRATEGY_ALLOW_LONG", env_bool),
+    "allow_short": ("STRATEGY_ALLOW_SHORT", env_bool),
+    "confirm_bars": ("STRATEGY_CONFIRM_BARS", env_int),
+    "entry_adx_enabled": ("STRATEGY_ENTRY_ADX", env_bool),
+    "entry_adx_len": ("STRATEGY_ENTRY_ADX_LEN", env_int),
+    "entry_adx_min": ("STRATEGY_ENTRY_ADX_MIN", env_float),
+    # Gestión de posición: afecta el sizing y las salidas (stop/partial).
+    "initial_capital": ("STRATEGY_INITIAL_CAPITAL", env_float),
+    "commission_bps": ("STRATEGY_COMMISSION_BPS", env_float),
+    "slippage_bps": ("STRATEGY_SLIPPAGE_BPS", env_float),
+    "risk_pct": ("STRATEGY_RISK_PCT", env_float),
+    "max_leverage": ("STRATEGY_MAX_LEVERAGE", env_float),
+    "stop_loss_pct": ("STRATEGY_STOP_LOSS_PCT", env_float),
+    "partial_tp_enabled": ("STRATEGY_PARTIAL_TP", env_bool),
+    "partial_tp_r": ("STRATEGY_PARTIAL_TP_R", env_float),
+    "partial_tp_pct": ("STRATEGY_PARTIAL_TP_PCT", env_float),
+    "move_stop_to_breakeven": ("STRATEGY_MOVE_STOP_TO_BREAKEVEN", env_bool),
+    # Salidas: las usa `prepare_exits`.
+    "adx_exit_enabled": ("STRATEGY_ADX_EXIT", env_bool),
+    "adx_timeframe": ("STRATEGY_ADX_TIMEFRAME", env_str),
+    "adx_dilen": ("STRATEGY_ADX_DILEN", env_int),
+    "adx_adxlen": ("STRATEGY_ADX_ADXLEN", env_int),
+    "adx_key_level": ("STRATEGY_ADX_KEY_LEVEL", env_float),
+    "adx_exit_pct": ("STRATEGY_ADX_EXIT_PCT", env_float),
+    "ema_weakening_exit_enabled": ("STRATEGY_EMA_WEAKENING_EXIT", env_bool),
+    "ema_weakening_timeframe": ("STRATEGY_EMA_WEAKENING_TIMEFRAME", env_str),
+    "ema_weakening_gap_pct": ("STRATEGY_EMA_WEAKENING_GAP_PCT", env_float),
+    "ema_weakening_exit_pct": ("STRATEGY_EMA_WEAKENING_EXIT_PCT", env_float),
+    "timestamp_is_close": ("STRATEGY_TIMESTAMP_IS_CLOSE", env_bool),
+}
 
-    Se exponen todos los parámetros para que el bot ejecute exactamente la
-    misma estrategia que el backtest (señales, salidas y gestión de posición).
-    """
+
+def build_strategy_config() -> Config:
     defaults = Config()
     return Config(
-        ema_fast=env_int("STRATEGY_EMA_FAST", defaults.ema_fast),
-        ema_slow=env_int("STRATEGY_EMA_SLOW", defaults.ema_slow),
-        timeframe=os.getenv("STRATEGY_TIMEFRAME", defaults.timeframe),
-        allow_long=env_bool("STRATEGY_ALLOW_LONG", defaults.allow_long),
-        allow_short=env_bool("STRATEGY_ALLOW_SHORT", defaults.allow_short),
-        confirm_bars=env_int("STRATEGY_CONFIRM_BARS", defaults.confirm_bars),
-        entry_adx_enabled=env_bool("STRATEGY_ENTRY_ADX", defaults.entry_adx_enabled),
-        entry_adx_len=env_int("STRATEGY_ENTRY_ADX_LEN", defaults.entry_adx_len),
-        entry_adx_min=env_float("STRATEGY_ENTRY_ADX_MIN", defaults.entry_adx_min),
-        # Gestión de posición: afecta el sizing y las salidas (stop/partial).
-        initial_capital=env_float(
-            "STRATEGY_INITIAL_CAPITAL", defaults.initial_capital
-        ),
-        commission_bps=env_float("STRATEGY_COMMISSION_BPS", defaults.commission_bps),
-        slippage_bps=env_float("STRATEGY_SLIPPAGE_BPS", defaults.slippage_bps),
-        risk_pct=env_float("STRATEGY_RISK_PCT", defaults.risk_pct),
-        max_leverage=env_float("STRATEGY_MAX_LEVERAGE", defaults.max_leverage),
-        stop_loss_pct=env_float("STRATEGY_STOP_LOSS_PCT", defaults.stop_loss_pct),
-        partial_tp_enabled=env_bool(
-            "STRATEGY_PARTIAL_TP", defaults.partial_tp_enabled
-        ),
-        partial_tp_r=env_float("STRATEGY_PARTIAL_TP_R", defaults.partial_tp_r),
-        partial_tp_pct=env_float("STRATEGY_PARTIAL_TP_PCT", defaults.partial_tp_pct),
-        move_stop_to_breakeven=env_bool(
-            "STRATEGY_MOVE_STOP_TO_BREAKEVEN", defaults.move_stop_to_breakeven
-        ),
-        # Salidas: `prepare_exits` usa estos parámetros para generar los
-        # eventos de salida, así que deben ser configurables igual que
-        # en el backtest para que ambos usen la misma estrategia.
-        adx_exit_enabled=env_bool("STRATEGY_ADX_EXIT", defaults.adx_exit_enabled),
-        adx_timeframe=os.getenv("STRATEGY_ADX_TIMEFRAME", defaults.adx_timeframe),
-        adx_dilen=env_int("STRATEGY_ADX_DILEN", defaults.adx_dilen),
-        adx_adxlen=env_int("STRATEGY_ADX_ADXLEN", defaults.adx_adxlen),
-        adx_key_level=env_float("STRATEGY_ADX_KEY_LEVEL", defaults.adx_key_level),
-        adx_exit_pct=env_float("STRATEGY_ADX_EXIT_PCT", defaults.adx_exit_pct),
-        ema_weakening_exit_enabled=env_bool(
-            "STRATEGY_EMA_WEAKENING_EXIT", defaults.ema_weakening_exit_enabled
-        ),
-        ema_weakening_timeframe=os.getenv(
-            "STRATEGY_EMA_WEAKENING_TIMEFRAME", defaults.ema_weakening_timeframe
-        ),
-        ema_weakening_gap_pct=env_float(
-            "STRATEGY_EMA_WEAKENING_GAP_PCT", defaults.ema_weakening_gap_pct
-        ),
-        ema_weakening_exit_pct=env_float(
-            "STRATEGY_EMA_WEAKENING_EXIT_PCT", defaults.ema_weakening_exit_pct
-        ),
-        timestamp_is_close=env_bool(
-            "STRATEGY_TIMESTAMP_IS_CLOSE", defaults.timestamp_is_close
-        ),
+        **{
+            field: read(var, getattr(defaults, field))
+            for field, (var, read) in _CONFIG_ENV.items()
+        }
     )
 
 
@@ -324,19 +332,15 @@ class SignalStore:
             return 0
         cursor = self.conn.executemany(INSERT_SQL, events)
         self.conn.commit()
-        return cursor.rowcount if cursor.rowcount is not None else 0
+        return max(cursor.rowcount, 0)
 
     def get_state(self, key: str) -> str | None:
-        if self.conn is None:
-            return None
         row = self.conn.execute(
             "SELECT value FROM bot_state WHERE key = ?", (key,)
         ).fetchone()
         return row[0] if row else None
 
     def set_state(self, key: str, value: str) -> None:
-        if self.conn is None:
-            return
         self.conn.execute(
             "INSERT INTO bot_state(key, value) VALUES(?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -350,21 +354,19 @@ class SignalStore:
             self.conn = None
 
 
-def opt_float(value) -> float | None:
-    """Convierte a float JSON-safe; None si no es finito."""
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if math.isfinite(result) else None
-
-
 # ===========================================================================
 # feed.db — lectura de OHLCV
 # ===========================================================================
 
 class FeedReader:
     """Lee velas ya cerradas desde `feed.db` (solo lecturas)."""
+
+    QUERY = """
+        SELECT open_time, open, high, low, close, volume
+        FROM candles
+        WHERE symbol = ? AND interval = ? AND is_closed = 1
+        ORDER BY open_time
+    """
 
     def __init__(self, path: Path, symbol: str, interval: str):
         self.path = path
@@ -384,29 +386,19 @@ class FeedReader:
     def load_closed(self) -> pd.DataFrame:
         """Devuelve todas las velas cerradas indexadas por timestamp UTC."""
         if self.conn is None:
-            raise RuntimeError("FeedReader sin conexión.")
-        query = """
-            SELECT open_time, open, high, low, close, volume
-            FROM candles
-            WHERE symbol = ? AND interval = ? AND is_closed = 1
-            ORDER BY open_time
-        """
+            self.connect()
         frame = pd.read_sql_query(
-            query, self.conn, params=(self.symbol, self.interval)
+            self.QUERY, self.conn, params=(self.symbol, self.interval)
         )
         if frame.empty:
             return frame
-        frame = frame.rename(columns={"open_time": "timestamp"})
-        frame["timestamp"] = pd.to_datetime(
-            frame["timestamp"], unit="ms", utc=True
-        )
-        frame = (
+        frame["timestamp"] = pd.to_datetime(frame.pop("open_time"), unit="ms", utc=True)
+        return (
             frame.dropna(subset=["open", "high", "low", "close"])
             .drop_duplicates("timestamp", keep="last")
             .sort_values("timestamp")
-            .set_index("timestamp")
+            .set_index("timestamp")[["open", "high", "low", "close", "volume"]]
         )
-        return frame[["open", "high", "low", "close", "volume"]]
 
     def close(self) -> None:
         if self.conn is not None:
@@ -415,16 +407,45 @@ class FeedReader:
 
 
 # ===========================================================================
-# Generación de eventos
+# Series (para el endpoint) y eventos
 # ===========================================================================
 
-def to_strategy_timeframe(raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """Remuestrea a `cfg.timeframe` sin los prints de `strategy.to_timeframe`."""
-    if raw.empty:
+def resample(raw: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Remuestrea OHLCV a `timeframe` (copia si el origen ya es >= timeframe)."""
+    if raw.empty or pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(timeframe):
         return raw.copy()
-    if pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(cfg.timeframe):
-        return raw.copy()
-    return resample_ohlcv(raw, cfg.timeframe)
+    return resample_ohlcv(raw, timeframe)
+
+
+def build_series_frames(
+    raw: pd.DataFrame,
+    bars: pd.DataFrame,
+    signals: pd.DataFrame,
+    adx_exit,
+    weak_exit,
+    cfg: Config,
+    interval: str,
+) -> dict[str, tuple[list[str], pd.DataFrame]]:
+    """Arma `{timeframe: (roles, DataFrame)}` para el endpoint de series."""
+    # Timeframe de la estrategia: OHLCV + señales + series de salida.
+    strat = bars.copy()
+    for col in signals.columns.difference(strat.columns):
+        strat[col] = signals[col].to_numpy()
+    for name, arr in (("adx_exit", adx_exit), ("weak_exit", weak_exit)):
+        if arr is not None and len(arr) == len(strat):
+            strat[name] = np.asarray(arr)
+
+    frames: dict[str, tuple[list[str], pd.DataFrame]] = {}
+    for role, timeframe, frame in (("strategy", cfg.timeframe, strat), ("raw", interval, raw)):
+        frames.setdefault(timeframe, ([], frame))[0].append(role)
+    # Timeframes auxiliares (solo OHLCV remuestreado).
+    for role, timeframe in (
+        ("adx_exit", cfg.adx_timeframe),
+        ("ema_weakening", cfg.ema_weakening_timeframe),
+    ):
+        if timeframe:
+            frames.setdefault(timeframe, ([], resample(raw, timeframe)))[0].append(role)
+    return frames
 
 
 def _reason_is_intrabar(reason: str) -> bool:
@@ -435,11 +456,11 @@ def _reason_is_intrabar(reason: str) -> bool:
 def build_events(
     bars: pd.DataFrame,
     signals: pd.DataFrame,
-    adx_exit: np.ndarray | None = None,
-    weak_exit: np.ndarray | None = None,
-    cfg: Config = None,
-    symbol: str = "",
-    interval: str = "",
+    adx_exit: np.ndarray | None,
+    weak_exit: np.ndarray | None,
+    cfg: Config,
+    symbol: str,
+    interval: str,
 ) -> list[dict]:
     """Ejecuta el backtest y traduce cada acción real a un evento.
 
@@ -450,13 +471,12 @@ def build_events(
     PARTIAL_TP. La posición abierta al final de los datos no se cierra
     (`force_close_at_end=False`): en vivo sigue vigente.
     """
-    if bars.empty or len(bars) < 2:
+    if len(bars) < 2:
         return []
-    if cfg is None:
-        raise ValueError("cfg requerido")
 
-    live_cfg = replace(cfg, force_close_at_end=False)
-    engine = Backtester(bars, live_cfg, signals, adx_exit, weak_exit)
+    engine = Backtester(
+        bars, replace(cfg, force_close_at_end=False), signals, adx_exit, weak_exit
+    )
     # `Backtester.run` imprime progreso; lo silenciamos para no ensuciar el log.
     with contextlib.redirect_stdout(io.StringIO()):
         engine.run()
@@ -464,119 +484,88 @@ def build_events(
     tf_ms = int(pd.Timedelta(cfg.timeframe).total_seconds() * 1000)
     created_at = utc_iso()
 
-    # Indicadores por barra para enriquecer los eventos.
-    ema_fast = signals["ema_fast"].to_numpy(float)
-    ema_slow = signals["ema_slow"].to_numpy(float)
-    adx_entry = signals["adx_entry"].to_numpy(float)
-    meta = {
-        int(ms): (ema_fast[i], ema_slow[i], adx_entry[i])
-        for i, ms in enumerate(bars.index.asi8 // 10**6)
-    }
+    # Indicadores por barra {bar_ms: (ema_fast, ema_slow, adx_entry)}.
+    indicators = dict(
+        zip(
+            (bars.index.asi8 // 10**6).tolist(),
+            zip(*(signals[c].to_numpy(float) for c in ("ema_fast", "ema_slow", "adx_entry"))),
+        )
+    )
 
-    def indicators(bar_ms: int) -> tuple[float, float, float]:
-        values = meta.get(bar_ms)
-        return values if values is not None else (np.nan, np.nan, np.nan)
+    def make_event(event, side, reason, bar_time, signal_time, price, payload) -> dict:
+        fast, slow, adx = indicators.get(bar_time, (np.nan,) * 3)
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "timeframe": cfg.timeframe,
+            "bar_time": bar_time,
+            "signal_time": signal_time,
+            "event": event,
+            "signal": side,
+            "side": side,
+            "reason": reason,
+            "price": opt_float(price),
+            "ema_fast": opt_float(fast),
+            "ema_slow": opt_float(slow),
+            "adx_entry": opt_float(adx),
+            "executed": 0,
+            "created_at": created_at,
+            "payload": json.dumps(payload),
+        }
+
+    open_pos = engine.position
+    entries: dict[int, tuple] = {}              # position_id -> (side, time, price)
+    legs: dict[int, list] = {}                  # position_id -> tramos de cierre
+    for trade in engine.trades:
+        entries.setdefault(trade.position_id, (trade.side, trade.entry_time, trade.entry_price))
+        legs.setdefault(trade.position_id, []).append(trade)
+    if open_pos is not None:
+        entries.setdefault(
+            open_pos.position_id,
+            ("LONG" if open_pos.side == 1 else "SHORT", open_pos.entry_time, open_pos.entry_price),
+        )
 
     events: list[dict] = []
 
     # --- Aperturas: una por posición (cerrada o todavía abierta) ---
-    entries: dict[int, tuple[str, pd.Timestamp, float]] = {}
-    for trade in engine.trades:
-        if trade.position_id not in entries:
-            entries[trade.position_id] = (trade.side, trade.entry_time, trade.entry_price)
-    open_pos = engine.position
-    if open_pos is not None and open_pos.position_id not in entries:
-        entries[open_pos.position_id] = (
-            "LONG" if open_pos.side == 1 else "SHORT",
-            open_pos.entry_time,
-            open_pos.entry_price,
-        )
-
     for position_id in sorted(entries):
         side, entry_time, entry_price = entries[position_id]
-        signal_time = int(entry_time.timestamp() * 1000)
-        bar_time = signal_time - tf_ms
-        fast_v, slow_v, adx_v = indicators(bar_time)
+        signal_time = ts_ms(entry_time)
         events.append(
-            {
-                "symbol": symbol,
-                "interval": interval,
-                "timeframe": cfg.timeframe,
-                "bar_time": bar_time,
-                "signal_time": signal_time,
-                "event": "ENTRY",
-                "signal": side,
-                "side": side,
-                "reason": "EMA_CROSS",
-                "price": opt_float(entry_price),
-                "ema_fast": opt_float(fast_v),
-                "ema_slow": opt_float(slow_v),
-                "adx_entry": opt_float(adx_v),
-                "executed": 0,
-                "created_at": created_at,
-                "payload": json.dumps({"action": "OPEN", "position_id": position_id}),
-            }
+            make_event(
+                "ENTRY", side, "EMA_CROSS", signal_time - tf_ms, signal_time,
+                entry_price, {"action": "OPEN", "position_id": position_id},
+            )
         )
 
     # --- Cierres: un evento por cada tramo ejecutado por el backtest ---
-    legs_by_position: dict[int, list] = {}
-    for trade in engine.trades:
-        legs_by_position.setdefault(trade.position_id, []).append(trade)
-
-    # Cantidad inicial de una posición que quedó abierta con cierres parciales.
-    open_quantity = (
-        engine.position.initial_quantity if engine.position is not None else None
-    )
-    open_position_id = engine.position.position_id if engine.position is not None else None
-
-    for position_id in sorted(legs_by_position):
-        legs = legs_by_position[position_id]
-        # Para posiciones cerradas la suma de tramos es la cantidad inicial; en
-        # una posición todavía abierta se toma del propio motor.
-        if position_id == open_position_id and open_quantity:
-            initial_qty = open_quantity
+    for position_id in sorted(legs):
+        # En una posición cerrada la suma de tramos es la cantidad inicial; en
+        # una todavía abierta (con parciales) se toma del propio motor.
+        if open_pos is not None and open_pos.position_id == position_id and open_pos.initial_quantity:
+            remaining = open_pos.initial_quantity
         else:
-            initial_qty = sum(leg.quantity for leg in legs)
-        remaining = initial_qty
-        for leg in legs:
-            signal_time = int(leg.exit_time.timestamp() * 1000)
-            intrabar = _reason_is_intrabar(leg.reason)
-            bar_time = signal_time if intrabar else signal_time - tf_ms
-            fast_v, slow_v, adx_v = indicators(bar_time)
-            # El backtest cierra `percent` de la posición *restante*; replicamos
-            # ese porcentaje (el que debe aplicar el consumidor sobre su posición).
+            remaining = sum(leg.quantity for leg in legs[position_id])
+
+        for leg in legs[position_id]:
+            signal_time = ts_ms(leg.exit_time)
+            bar_time = signal_time if _reason_is_intrabar(leg.reason) else signal_time - tf_ms
+            # El backtest cierra un porcentaje de la posición *restante*; es el
+            # que debe aplicar el consumidor sobre su posición.
             close_pct = 100.0 * leg.quantity / remaining if remaining else 100.0
-            r_multiple = (
-                leg.pnl_net / leg.position_risk if leg.position_risk else None
-            )
+            r_multiple = leg.pnl_net / leg.position_risk if leg.position_risk else None
             events.append(
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "timeframe": cfg.timeframe,
-                    "bar_time": bar_time,
-                    "signal_time": signal_time,
-                    "event": "EXIT",
-                    "signal": leg.side,
-                    "side": leg.side,
-                    "reason": leg.reason,
-                    "price": opt_float(leg.exit_price),
-                    "ema_fast": opt_float(fast_v),
-                    "ema_slow": opt_float(slow_v),
-                    "adx_entry": opt_float(adx_v),
-                    "executed": 0,
-                    "created_at": created_at,
-                    "payload": json.dumps(
-                        {
-                            "action": "CLOSE" if close_pct >= 99.999 else "PARTIAL_CLOSE",
-                            "position_id": position_id,
-                            "close_pct": close_pct,
-                            "exit_price": opt_float(leg.exit_price),
-                            "pnl_net": opt_float(leg.pnl_net),
-                            "r_multiple": opt_float(r_multiple),
-                        }
-                    ),
-                }
+                make_event(
+                    "EXIT", leg.side, leg.reason, bar_time, signal_time, leg.exit_price,
+                    {
+                        "action": "CLOSE" if close_pct >= 99.999 else "PARTIAL_CLOSE",
+                        "position_id": position_id,
+                        "close_pct": close_pct,
+                        "exit_price": opt_float(leg.exit_price),
+                        "pnl_net": opt_float(leg.pnl_net),
+                        "r_multiple": opt_float(r_multiple),
+                    },
+                )
             )
             remaining -= leg.quantity
 
@@ -598,6 +587,7 @@ class SignalBot:
         min_bars: int | None = None,
         live_only: bool = False,
         live_since_ms: int | None = None,
+        snapshot: SeriesSnapshot | None = None,
     ):
         self.cfg = cfg
         self.feed = feed
@@ -608,14 +598,13 @@ class SignalBot:
         self.min_bars = min_bars or (cfg.ema_slow + 2)
         self.live_only = live_only
         self.live_since_ms = live_since_ms
+        self.snapshot = snapshot
         self._live_resolved = False
 
     def _resolve_live_since(self) -> None:
         """Fija la marca desde la que se publican señales (modo live-only).
 
-        En modo live-only se ignora el histórico: solo se publican señales
-        cuya vela (`bar_time`) es igual o posterior al arranque del bot. La
-        marca se guarda en `signal.db` (`bot_state`) para no perder señales
+        La marca se guarda en `signal.db` (`bot_state`) para no perder señales
         entre reinicios.
         """
         if self._live_resolved:
@@ -629,11 +618,10 @@ class SignalBot:
             if stored is not None:
                 self.live_since_ms = int(stored)
                 logger.info(
-                    "Modo live-only: reanudando desde %s.",
-                    ms_to_iso(self.live_since_ms),
+                    "Modo live-only: reanudando desde %s.", ms_to_iso(self.live_since_ms)
                 )
                 return
-            self.live_since_ms = int(utc_now().timestamp() * 1000)
+            self.live_since_ms = ts_ms(utc_now())
 
         self.store.set_state("live_since_ms", str(self.live_since_ms))
         logger.info(
@@ -641,29 +629,41 @@ class SignalBot:
             ms_to_iso(self.live_since_ms),
         )
 
+    def _publish_snapshot(self, raw, bars, signals, adx_exit, weak_exit) -> None:
+        """Actualiza el endpoint de series (nunca debe romper el ciclo)."""
+        if self.snapshot is None:
+            return
+        try:
+            frames = build_series_frames(
+                raw, bars, signals, adx_exit, weak_exit, self.cfg, self.interval
+            )
+            self.snapshot.publish(frames, self.cfg.timeframe)
+        except Exception:
+            logger.exception("No se pudo actualizar el snapshot de series")
+
     def process_once(self) -> int:
         """Ejecuta un ciclo: lee, calcula y publica eventos nuevos."""
         self._resolve_live_since()
-        if self.feed.conn is None:
-            self.feed.connect()
         raw = self.feed.load_closed()
         if raw.empty:
             logger.debug("feed.db sin velas cerradas todavía.")
             return 0
 
-        bars = to_strategy_timeframe(raw, self.cfg)
+        bars = resample(raw, self.cfg.timeframe)
         if len(bars) < self.min_bars:
             logger.info(
                 "Insuficientes velas %s (%d < %d); esperando más datos.",
-                self.cfg.timeframe,
-                len(bars),
-                self.min_bars,
+                self.cfg.timeframe, len(bars), self.min_bars,
             )
             return 0
 
         signals = self.strategy.generate_signals(bars)
         adx_exit, weak_exit = self.strategy.prepare_exits(raw, bars)
-        events = build_events(bars, signals, adx_exit, weak_exit, self.cfg, self.symbol, self.interval)
+        self._publish_snapshot(raw, bars, signals, adx_exit, weak_exit)
+
+        events = build_events(
+            bars, signals, adx_exit, weak_exit, self.cfg, self.symbol, self.interval
+        )
         if self.live_since_ms is not None:
             # live-only: descarta las señales anteriores al arranque.
             events = [e for e in events if e["bar_time"] >= self.live_since_ms]
@@ -671,8 +671,7 @@ class SignalBot:
         if inserted:
             logger.info(
                 "Publicados %d eventos nuevos (de %d acciones del backtest).",
-                inserted,
-                len(events),
+                inserted, len(events),
             )
         return inserted
 
@@ -685,8 +684,7 @@ class SignalBot:
             except Exception:
                 logger.exception("Error durante el ciclo del bot")
 
-            # Señal de vida para el healthcheck del contenedor.
-            touch_heartbeat()
+            touch_heartbeat()  # señal de vida para el healthcheck del contenedor
 
             if once or STOP_EVENT.wait(poll_seconds):
                 break
@@ -732,6 +730,17 @@ def parse_args() -> argparse.Namespace:
         help="Marca temporal (epoch ms o ISO 8601) desde la que publicar; "
         "implica --live-only.",
     )
+    parser.add_argument(
+        "--http-host",
+        default=os.getenv("HTTP_HOST", "127.0.0.1"),
+        help="Host del endpoint HTTP de series (por defecto HTTP_HOST o 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=env_int("HTTP_PORT", 8080),
+        help="Puerto del endpoint HTTP de series (0 lo desactiva).",
+    )
     return parser.parse_args()
 
 
@@ -753,34 +762,35 @@ def main() -> int:
 
     logger.info(
         "Bot iniciado: symbol=%s interval=%s timeframe=%s feed=%s signal=%s",
-        symbol,
-        interval,
-        cfg.timeframe,
-        feed_path,
-        signal_path,
+        symbol, interval, cfg.timeframe, feed_path, signal_path,
     )
+
+    live_only = args.live_only or args.live_since is not None or env_bool("LIVE_ONLY", False)
+    live_since_ms = parse_live_since(args.live_since) if args.live_since else None
 
     feed = FeedReader(feed_path, symbol, interval)
     store = SignalStore(signal_path)
-    live_only = (
-        args.live_only
-        or args.live_since is not None
-        or env_bool("LIVE_ONLY", False)
-    )
-    live_since_ms = parse_live_since(args.live_since) if args.live_since else None
+    snapshot = SeriesSnapshot(symbol, interval) if args.http_port > 0 else None
+    http_server = None
     try:
         store.connect()
-        bot = SignalBot(
-            cfg,
-            feed,
-            store,
-            symbol,
-            interval,
-            live_only=live_only,
-            live_since_ms=live_since_ms,
-        )
-        bot.run(once=args.once, poll_seconds=args.poll_seconds)
+        if snapshot is not None:
+            try:
+                http_server = start_server(snapshot, args.http_host, args.http_port)
+            except OSError:
+                logger.exception(
+                    "No se pudo abrir el endpoint HTTP en %s:%d; el bot sigue sin él.",
+                    args.http_host, args.http_port,
+                )
+                snapshot = None
+        SignalBot(
+            cfg, feed, store, symbol, interval,
+            live_only=live_only, live_since_ms=live_since_ms, snapshot=snapshot,
+        ).run(once=args.once, poll_seconds=args.poll_seconds)
     finally:
+        if http_server is not None:
+            http_server.shutdown()
+            http_server.server_close()
         feed.close()
         store.close()
 
