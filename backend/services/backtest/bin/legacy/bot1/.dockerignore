@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.heartbeat

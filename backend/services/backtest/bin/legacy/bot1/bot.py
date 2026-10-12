@@ -144,6 +144,21 @@ def resolve_path(value: str) -> Path:
     return path if path.is_absolute() else (_BASE_DIR / path)
 
 
+def touch_heartbeat() -> None:
+    """Registra actividad para el healthcheck del contenedor (best-effort).
+
+    Solo actúa si `BOT_HEARTBEAT` está definido; si no, es un no-op, de modo
+    que ejecuciones locales/tests no escriben nada.
+    """
+    path = os.getenv("BOT_HEARTBEAT")
+    if not path:
+        return
+    try:
+        Path(path).write_text(utc_iso(), encoding="utf-8")
+    except OSError:
+        logger.debug("No se pudo escribir el heartbeat en %s", path)
+
+
 def build_strategy_config() -> Config:
     """Config de la estrategia. Los defaults coinciden con `strategy.Config`.
 
@@ -579,6 +594,9 @@ class SignalBot:
                 logger.warning("%s", exc)
             except Exception:
                 logger.exception("Error durante el ciclo del bot")
+
+            # Señal de vida para el healthcheck del contenedor.
+            touch_heartbeat()
 
             if once or STOP_EVENT.wait(poll_seconds):
                 break
