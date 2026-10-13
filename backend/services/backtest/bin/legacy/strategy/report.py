@@ -5,6 +5,7 @@ import math
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+import random
 
 import numpy as np
 import pandas as pd
@@ -719,7 +720,8 @@ def build_backtest_figure(
     if html_path is not None:
         path = Path(html_path)
         _write_plotly_html(fig, path, title=fig.layout.title.text or "backtest")
-        print(f"[PLOTLY] HTML guardado en {path.resolve()} ({path.stat().st_size / 1024:.0f} KB)")
+        if random.random() < 0.1:
+            print(f"[PLOTLY] HTML guardado en {path.resolve()} ({path.stat().st_size / 1024:.0f} KB)")
     return fig
 
 
