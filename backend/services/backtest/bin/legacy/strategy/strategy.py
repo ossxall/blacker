@@ -366,6 +366,10 @@ def main():
         plot_enabled=not args.no_plot,
         plot_path=args.plot,
         plot_dpi=args.plot_dpi,
+        raw=raw,
+        signals=signals,
+        adx_exit=adx_exit,
+        weak_exit=weak_exit,
     )
 
 
