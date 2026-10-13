@@ -34,19 +34,14 @@ from strategy.config import Config
 from strategy.models import (
     Position,
     Trade,
-    TRADE_COLUMNS,
     CROSS_REASON,
     DEFAULT_OUTPUT_DIR,
     empty_trades,
 )
 from strategy.indicators import (
     ema,
-    true_range,
     adx,
     confirmed_crosses,
-    adx_reversal_flags,
-    ema_weakening_flags,
-    align_closed_flags,
     build_adx_exit,
     build_weakening_exit,
 )
@@ -60,7 +55,6 @@ import math
 import time
 import numpy as np
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # Estrategia: compartida por backtest y bots
