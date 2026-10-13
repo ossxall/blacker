@@ -231,8 +231,9 @@ class Backtester:
         n, cfg = len(self.bars), self.cfg
         if not n:
             return empty_trades(), pd.DataFrame(columns=["timestamp", "cash", "equity", "position_side", "position_quantity"])
-        adx_tf_min = int(pd.Timedelta(cfg.adx_timeframe).total_seconds() / 60)
-        adx_base = f"ADX_{adx_tf_min}M_REVERSAL"
+        adx_labels = "_".join(f"{int(pd.Timedelta(tf).total_seconds() // 60)}M"
+                              for tf in cfg.adx_timeframes)
+        adx_base = f"ADX_{adx_labels}_REVERSAL"
         adx_reason = adx_base if cfg.adx_exit_pct >= 100 else f"{adx_base}_{cfg.adx_exit_pct:g}%"
         weak_tf = cfg.ema_weakening_timeframe or cfg.timeframe
         weak_base = f"EMA_WEAKENING_{weak_tf.upper()}"
@@ -301,11 +302,14 @@ def parse_args():
     p.add_argument("--entry-adx-len", type=int, default=d.entry_adx_len)
     p.add_argument("--entry-adx-min", type=float, default=d.entry_adx_min)
     p.add_argument("--adx-exit", action=argparse.BooleanOptionalAction, default=d.adx_exit_enabled)
-    p.add_argument("--adx-timeframe", default=d.adx_timeframe)
+    p.add_argument("--adx-timeframe", default=d.adx_timeframe,
+                   help="Timeframe(s) ADX de salida separados por coma; se combinan con OR (p. ej. 1D,30min).")
     p.add_argument("--adx-dilen", type=int, default=d.adx_dilen)
     p.add_argument("--adx-adxlen", type=int, default=d.adx_adxlen)
     p.add_argument("--adx-key-level", type=float, default=d.adx_key_level)
     p.add_argument("--adx-exit-pct", type=float, default=d.adx_exit_pct)
+    p.add_argument("--adx-exit-range", type=int, default=d.adx_exit_range,
+                   help="Velas durante las que una reversión ADX mantiene activada la salida (default 4).")
     p.add_argument("--ema-weakening-exit", action=argparse.BooleanOptionalAction, default=d.ema_weakening_exit_enabled)
     p.add_argument("--ema-weakening-timeframe", default=d.ema_weakening_timeframe)
     p.add_argument("--ema-weakening-gap-pct", type=float, default=d.ema_weakening_gap_pct)
@@ -335,6 +339,7 @@ def config_from_args(a) -> Config:
         entry_adx_enabled=a.entry_adx_filter, entry_adx_len=a.entry_adx_len, entry_adx_min=a.entry_adx_min,
         adx_exit_enabled=a.adx_exit, adx_timeframe=a.adx_timeframe, adx_dilen=a.adx_dilen,
         adx_adxlen=a.adx_adxlen, adx_key_level=a.adx_key_level, adx_exit_pct=a.adx_exit_pct,
+        adx_exit_range=a.adx_exit_range,
         ema_weakening_exit_enabled=a.ema_weakening_exit, ema_weakening_timeframe=a.ema_weakening_timeframe,
         ema_weakening_gap_pct=a.ema_weakening_gap_pct, ema_weakening_exit_pct=a.ema_weakening_exit_pct,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,

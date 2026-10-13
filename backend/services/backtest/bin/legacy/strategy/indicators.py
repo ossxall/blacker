@@ -93,16 +93,54 @@ def align_closed_flags(source_index: pd.DatetimeIndex, flags: np.ndarray,
     return out
 
 
-def build_adx_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:
-    if not cfg.adx_exit_enabled or bars.empty:
+def spread_flags(flags: np.ndarray, window: int) -> np.ndarray:
+    """Mantiene activo cada flag durante ``window`` velas consecutivas.
+
+    Equivale a que en cada vela la señal se active si hubo una activación en
+    cualquiera de las ``window`` velas anteriores (incluida la actual).
+    """
+    flags = np.asarray(flags, bool)
+    if window <= 1 or not flags.any():
+        return flags
+    cumulative = np.concatenate([[0], np.cumsum(flags)])
+    idx = np.arange(len(flags))
+    start = np.maximum(idx - window + 1, 0)
+    return (cumulative[idx + 1] - cumulative[start]) > 0
+
+
+def _adx_exit_flags(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config,
+                    timeframe: str) -> Optional[np.ndarray]:
+    """Flags de reversión ADX para un único timeframe, alineadas a ``bars``."""
+    if pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(timeframe):
         return None
-    if pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(cfg.adx_timeframe):
-        return None
-    low = resample_ohlcv(raw, cfg.adx_timeframe)
+    low = resample_ohlcv(raw, timeframe)
     if len(low) < cfg.adx_dilen + cfg.adx_adxlen + 2:
         return None
     flags = adx_reversal_flags(adx(low, cfg.adx_dilen, cfg.adx_adxlen)["adx"].to_numpy(), cfg.adx_key_level)
-    return align_closed_flags(low.index, flags, bars.index, cfg.adx_timeframe, cfg.timeframe)
+    return align_closed_flags(low.index, flags, bars.index, timeframe, cfg.timeframe)
+
+
+def build_adx_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:
+    """Salida ADX combinando con OR todos los ``cfg.adx_timeframes``.
+
+    Devuelve ``None`` si no se pudo calcular ninguno (deshabilitado, sin datos
+    suficientes o timeframes incompatibles); si al menos uno es válido, devuelve
+    la unión de sus reversiones, mantenida activa ``cfg.adx_exit_range`` velas
+    del timeframe de la estrategia tras cada reversión.
+    """
+    if not cfg.adx_exit_enabled or bars.empty:
+        return None
+    combined = np.zeros(len(bars), dtype=bool)
+    built = False
+    for timeframe in cfg.adx_timeframes:
+        flags = _adx_exit_flags(raw, bars, cfg, timeframe)
+        if flags is None:
+            continue
+        built = True
+        combined |= flags
+    if not built:
+        return None
+    return spread_flags(combined, cfg.adx_exit_range)
 
 
 def build_weakening_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:

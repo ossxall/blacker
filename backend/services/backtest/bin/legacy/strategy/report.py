@@ -221,33 +221,38 @@ def _position_spans(trades: pd.DataFrame) -> list[dict]:
     return spans
 
 
-def _higher_timeframes(raw: pd.DataFrame | None, cfg: Config) -> tuple[dict | None, dict | None]:
+def _higher_timeframes(raw: pd.DataFrame | None, cfg: Config) -> tuple[list[dict], dict | None]:
     """Series e indicadores de los timeframes de salida (ADX y EMA weakening)."""
     if raw is None or raw.empty:
-        return None, None
+        return [], None
     from strategy.indicators import adx as adx_indicator
     from strategy.indicators import adx_reversal_flags, ema, ema_weakening_flags
     from strategy.utils import resample_ohlcv, source_minutes
 
-    adx_tf = weak_tf = None
-    if cfg.adx_exit_enabled and pd.Timedelta(minutes=source_minutes(raw)) < pd.Timedelta(cfg.adx_timeframe):
-        low = resample_ohlcv(raw, cfg.adx_timeframe)
-        if len(low) >= cfg.adx_dilen + cfg.adx_adxlen + 2:
+    source_td = pd.Timedelta(minutes=source_minutes(raw))
+    adx_tfs: list[dict] = []
+    if cfg.adx_exit_enabled:
+        for timeframe in cfg.adx_timeframes:
+            if source_td >= pd.Timedelta(timeframe):
+                continue
+            low = resample_ohlcv(raw, timeframe)
+            if len(low) < cfg.adx_dilen + cfg.adx_adxlen + 2:
+                continue
             adx_values = adx_indicator(low, cfg.adx_dilen, cfg.adx_adxlen)["adx"].to_numpy(float)
-            adx_tf = {"timeframe": cfg.adx_timeframe, "bars": low, "adx": adx_values,
-                      "key_level": cfg.adx_key_level,
-                      "reversal": adx_reversal_flags(adx_values, cfg.adx_key_level)}
+            adx_tfs.append({"timeframe": timeframe, "bars": low, "adx": adx_values,
+                            "key_level": cfg.adx_key_level,
+                            "reversal": adx_reversal_flags(adx_values, cfg.adx_key_level)})
 
+    weak_tf = None
     tf = cfg.ema_weakening_timeframe or cfg.timeframe
-    if cfg.ema_weakening_exit_enabled and pd.Timedelta(tf) != pd.Timedelta(cfg.timeframe) \
-            and pd.Timedelta(minutes=source_minutes(raw)) < pd.Timedelta(tf):
+    if cfg.ema_weakening_exit_enabled and pd.Timedelta(tf) != pd.Timedelta(cfg.timeframe) and source_td < pd.Timedelta(tf):
         low = resample_ohlcv(raw, tf)
         if len(low) >= cfg.ema_slow + 2:
             fast, slow = ema(low.close, cfg.ema_fast).to_numpy(float), ema(low.close, cfg.ema_slow).to_numpy(float)
             weak_tf = {"timeframe": tf, "bars": low, "ema_fast": fast, "ema_slow": slow,
                        "gap_pct": cfg.ema_weakening_gap_pct,
                        "weakening": ema_weakening_flags(fast, slow, cfg.ema_weakening_gap_pct)}
-    return adx_tf, weak_tf
+    return adx_tfs, weak_tf
 
 
 def _slice_timeframe(info: dict | None, start: pd.Timestamp, end: pd.Timestamp) -> dict | None:
@@ -427,29 +432,33 @@ def build_backtest_figure(
     if len(weak_flags) != n:
         weak_flags = np.zeros(n, bool)
 
-    adx_tf, weak_stf = _higher_timeframes(raw, cfg)
+    adx_tfs, weak_stf = _higher_timeframes(raw, cfg)
     if window is not None:
-        adx_tf = _slice_timeframe(adx_tf, win_start, win_end)
+        adx_tfs = [frame for frame in
+                   (_slice_timeframe(frame, win_start, win_end) for frame in adx_tfs)
+                   if frame is not None]
         weak_stf = _slice_timeframe(weak_stf, win_start, win_end)
 
     trade_count = 0 if trades is None or trades.empty else int(trades["position_id"].nunique())
+
+    adx_panels = [f"adx_tf_{i}" for i in range(len(adx_tfs))]
 
     panels = ["price"]
     if signals is not None and "adx_entry" in signals:
         panels.append("adx")
     if signals is not None and "target" in signals:
         panels.append("target")
-    if adx_tf is not None:
-        panels.append("adx_tf")
+    panels.extend(adx_panels)
     if weak_stf is not None:
         panels.append("weak_tf")
     if equity is not None and not equity.empty:
         panels.append("equity")
 
-    weights = {"price": 1.0, "adx": 0.25, "target": 0.2, "adx_tf": 0.35,
-               "weak_tf": 0.35, "equity": 0.4}
+    weights = {"price": 1.0, "adx": 0.25, "target": 0.2, "weak_tf": 0.35, "equity": 0.4}
+    for name in adx_panels:
+        weights[name] = 0.35
     total_weight = sum(weights[name] for name in panels)
-    specs = [[{"secondary_y": name in ("price", "adx_tf")}] for name in panels]
+    specs = [[{"secondary_y": name == "price" or name in adx_panels}] for name in panels]
     fig = make_subplots(
         rows=len(panels), cols=1, shared_xaxes=False, vertical_spacing=0.035,
         row_heights=[weights[name] / total_weight for name in panels], specs=specs,
@@ -623,9 +632,12 @@ def build_backtest_figure(
         fig.update_yaxes(title_text="señal", tickvals=[-1, 0, 1], ticktext=["short", "flat", "long"],
                          row=rr, col=1)
 
-    # -- Timeframe de salida ADX -------------------------------------------
-    if "adx_tf" in row:
-        rr = row["adx_tf"]
+    # -- Timeframes de ADX (uno por timeframe configurado) ----------------
+    for idx, adx_tf in enumerate(adx_tfs):
+        name = f"adx_tf_{idx}"
+        if name not in row:
+            continue
+        rr = row[name]
         low = adx_tf["bars"]
         low_x = _x_ms(low.index)
         adx_values = np.asarray(adx_tf["adx"], float)

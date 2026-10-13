@@ -234,6 +234,7 @@ _CONFIG_ENV = {
     "adx_adxlen": ("STRATEGY_ADX_ADXLEN", env_int),
     "adx_key_level": ("STRATEGY_ADX_KEY_LEVEL", env_float),
     "adx_exit_pct": ("STRATEGY_ADX_EXIT_PCT", env_float),
+    "adx_exit_range": ("STRATEGY_ADX_EXIT_RANGE", env_int),
     "ema_weakening_exit_enabled": ("STRATEGY_EMA_WEAKENING_EXIT", env_bool),
     "ema_weakening_timeframe": ("STRATEGY_EMA_WEAKENING_TIMEFRAME", env_str),
     "ema_weakening_gap_pct": ("STRATEGY_EMA_WEAKENING_GAP_PCT", env_float),
@@ -470,8 +471,9 @@ def build_series_frames(
     add("strategy", cfg.timeframe,
         lambda: series_frame(strategy, raw, bars, cfg.timeframe, computed))
     add("raw", interval, lambda: series_frame(strategy, raw, raw, interval))
+    adx_tfs = cfg.adx_timeframes if cfg.adx_exit_enabled else ()
     for role, timeframe in (
-        ("adx_exit", cfg.adx_timeframe),
+        *(("adx_exit", tf) for tf in adx_tfs),
         ("ema_weakening", cfg.ema_weakening_timeframe),
     ):
         if timeframe:
