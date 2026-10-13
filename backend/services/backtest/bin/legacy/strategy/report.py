@@ -272,6 +272,8 @@ def _slice_timeframe(info: dict | None, start: pd.Timestamp, end: pd.Timestamp) 
 
 _GL_THRESHOLD = 2000   # series más largas se renderizan con WebGL (Scattergl)
 _MAX_CANDLES = 3000    # sobre este tamaño se dibuja la línea de cierre en vez de velas
+_PANEL_HEIGHT = 460    # alto (px) de cada panel del HTML interactivo
+_MIN_HEIGHT = 1400     # alto (px) mínimo del HTML interactivo
 
 
 def _x_ms(values) -> np.ndarray:
@@ -697,7 +699,7 @@ def build_backtest_figure(
     fig.update_layout(
         title=title or (f"{source or 'backtest'} · {cfg.timeframe} · {len(bars):,} velas · "
                         f"{trade_count} posiciones"),
-        template="plotly_dark", height=max(1000, 320 * len(panels)),
+        template="plotly_dark", height=max(_MIN_HEIGHT, _PANEL_HEIGHT * len(panels)),
         margin=dict(l=60, r=20, t=80, b=40), hovermode="closest",
         legend=dict(orientation="h", y=1.02), bargap=0.15,
     )
