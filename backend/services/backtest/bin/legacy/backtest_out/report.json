@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2_ema_cross",
-  "generated_at": "2026-10-13T03:24:06.951487+00:00",
+  "generated_at": "2026-10-13T03:29:09.273958+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -37,7 +37,7 @@
     "adx_exit_pct": 100.0,
     "ema_weakening_exit_enabled": true,
     "ema_weakening_timeframe": "20min",
-    "ema_weakening_gap_pct": 0.001,
+    "ema_weakening_gap_pct": 0.0005,
     "ema_weakening_exit_pct": 25.0,
     "partial_tp_enabled": true,
     "partial_tp_r": 1.0,
@@ -48,27 +48,27 @@
   },
   "metrics": {
     "initial_capital": 10000.0,
-    "final_equity": 50765.46900875152,
-    "net_pnl": 40765.46900875152,
-    "return_pct": 407.6546900875152,
-    "max_drawdown_pct": -12.177213486198934,
-    "max_dd_peak_equity": 12901.079010665782,
-    "max_dd_trough_equity": 11330.087077513808,
-    "max_dd_peak_vs_capital_pct": 29.010790106657815,
-    "max_dd_trough_vs_capital_pct": 13.300870775138085,
+    "final_equity": 51281.26552147373,
+    "net_pnl": 41281.2655214737,
+    "return_pct": 412.81265521473733,
+    "max_drawdown_pct": -12.037241092574934,
+    "max_dd_peak_equity": 12777.998700758704,
+    "max_dd_trough_equity": 11239.880190342286,
+    "max_dd_peak_vs_capital_pct": 27.77998700758704,
+    "max_dd_trough_vs_capital_pct": 12.398801903422862,
     "min_equity": 9980.94815075544,
     "min_equity_vs_capital_pct": -0.1905184924456127,
-    "return_over_maxdd": 33.476845137808525,
-    "sharpe_daily_365": 1.6091156230072625,
-    "sortino_daily_365": 3.110392176636334,
-    "legs": 925,
+    "return_over_maxdd": 34.294623829490064,
+    "sharpe_daily_365": 1.618544948808821,
+    "sortino_daily_365": 3.1241038244701986,
+    "legs": 936,
     "positions": 543,
     "wins": 315,
     "losses": 228,
     "win_rate_pct": 58.011049723756905,
-    "profit_factor": 1.729612068819569,
-    "avg_pnl": 75.07452856123669,
-    "expectancy_r": 0.3228367320742511,
+    "profit_factor": 1.7368431248153757,
+    "avg_pnl": 76.02443005796262,
+    "expectancy_r": 0.3251105990545493,
     "max_consecutive_losses": 6
   },
   "by_side": {
@@ -77,10 +77,10 @@
       "wins": 145,
       "losses": 117,
       "win_rate_pct": 55.343511450381676,
-      "profit_factor": 1.992511132940695,
-      "net_pnl": 28163.13676768014,
-      "avg_pnl": 107.49288842626007,
-      "expectancy_r": 0.4465554898544757,
+      "profit_factor": 1.9897834038848279,
+      "net_pnl": 28215.748383107923,
+      "avg_pnl": 107.69369611873253,
+      "expectancy_r": 0.44179229426834765,
       "max_consecutive_losses": 6
     },
     "SHORT": {
@@ -88,10 +88,10 @@
       "wins": 170,
       "losses": 111,
       "win_rate_pct": 60.4982206405694,
-      "profit_factor": 1.4583139317772555,
-      "net_pnl": 12602.332241071392,
-      "avg_pnl": 44.8481574415352,
-      "expectancy_r": 0.2074832995531876,
+      "profit_factor": 1.4748074896372894,
+      "net_pnl": 13065.51713836578,
+      "avg_pnl": 46.49650227176434,
+      "expectancy_r": 0.2163184134815416,
       "max_consecutive_losses": 5
     }
   },
@@ -99,32 +99,32 @@
     "PARTIAL_TP_1R": {
       "legs": 286,
       "positions": 286,
-      "pnl_net": 37102.98710191472
+      "pnl_net": 37289.523236254274
     },
     "BREAKEVEN": {
       "legs": 214,
       "positions": 214,
-      "pnl_net": -158.86763711046927
+      "pnl_net": -160.50489653397028
     },
     "STOP_LOSS_1.00%": {
       "legs": 203,
       "positions": 203,
-      "pnl_net": -53315.12263976291
+      "pnl_net": -53267.02536207909
     },
     "EMA_WEAKENING_20MIN_25%": {
-      "legs": 96,
-      "positions": 53,
-      "pnl_net": 21493.075377711266
+      "legs": 107,
+      "positions": 62,
+      "pnl_net": 18560.703342586192
     },
     "EMA_CROSS_EXIT": {
       "legs": 40,
       "positions": 40,
-      "pnl_net": 20167.03691712154
+      "pnl_net": 21763.501666181284
     },
     "ADX_1440M_REVERSAL": {
       "legs": 86,
       "positions": 86,
-      "pnl_net": 15476.359888877385
+      "pnl_net": 17095.067535065013
     }
   }
 }

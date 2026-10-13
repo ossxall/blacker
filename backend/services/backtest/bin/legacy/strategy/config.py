@@ -36,7 +36,7 @@ class Config:
 
     ema_weakening_exit_enabled: bool = True
     ema_weakening_timeframe: str = "20min"
-    ema_weakening_gap_pct: float = 0.001
+    ema_weakening_gap_pct: float = 0.0005
     ema_weakening_exit_pct: float = 25.0
 
     # Gestión de salida orientada a reducir la racha de pérdidas en whipsaw:
