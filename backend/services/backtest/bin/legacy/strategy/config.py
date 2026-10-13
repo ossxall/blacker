@@ -28,7 +28,7 @@ class Config:
     adx_timeframe: str | list[str] | tuple[str, ...] = ("1D")
     # Ventana (en velas del timeframe de la estrategia) durante la cual una
     # reversión ADX mantiene activada la salida.
-    adx_exit_range: int = 4
+    adx_exit_range: int = 6
     adx_dilen: int = 14
     adx_adxlen: int = 14
     adx_key_level: float = 23.0
