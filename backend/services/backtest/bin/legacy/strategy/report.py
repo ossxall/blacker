@@ -305,6 +305,9 @@ _PLOTLY_CONFIG = {
     "modeBarButtonsToRemove": ["select2d", "lasso2d"],
 }
 
+#: Subcarpeta, dentro de ``output_dir``, donde se guardan los HTML de Plotly.
+_PLOTLY_SUBDIR = "html"
+
 _PLOTLY_HTML_TEMPLATE = """<!doctype html>
 <html lang="es">
 <head>
@@ -775,10 +778,12 @@ def build_monthly_backtest_htmls(
 
     Cada archivo cubre un mes calendario, pero los indicadores se calculan sobre
     la serie completa y solo se recortan al mostrar, así que no se pierde el
-    warmup de las EMAs/ADX. Los archivos se llaman ``<stem>_<YYYY-MM>.html`` y el
-    índice se escribe en ``index_path`` (por defecto ``output_dir/backtest.html``).
+    warmup de las EMAs/ADX. Los archivos se guardan en ``output_dir/html/`` con
+    nombres ``<stem>_<YYYY-MM>.html`` y el índice se escribe en ``index_path``
+    (por defecto ``output_dir/html/backtest.html``).
     """
-    index_path = Path(index_path) if index_path is not None else Path(output_dir) / "backtest.html"
+    index_path = (Path(index_path) if index_path is not None
+                  else Path(output_dir) / _PLOTLY_SUBDIR / "backtest.html")
     index_path.parent.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     links: list[tuple[str, str, int]] = []
@@ -814,7 +819,8 @@ def generate_report(trades: pd.DataFrame, equity: pd.DataFrame, cfg: Config, dat
     Punto de entrada único que unifica `calculate_metrics`, `print_report`,
     `equity_curve_from_trades`, `build_report`, `write_outputs`, `plot_equity` y
     `build_monthly_backtest_htmls`. Por defecto escribe **un HTML por mes** en
-    `output_dir/backtest_<YYYY-MM>.html` más un índice `output_dir/backtest.html`.
+    `output_dir/html/backtest_<YYYY-MM>.html` más un índice
+    `output_dir/html/backtest.html`.
     Devuelve el diccionario de métricas calculado.
     """
     metrics = calculate_metrics(trades, equity, cfg.initial_capital)
