@@ -29,6 +29,9 @@
   "partial_tp_r": 1.0,
   "partial_tp_pct": 50.0,
   "move_stop_to_breakeven": true,
+  "close_on_ema_slow_touch": true,
+  "close_on_ema_slow_touch_pct": 0.0,
+  "close_on_ema_slow_touch_exit_pct": 50.0,
   "force_close_at_end": true,
   "timestamp_is_close": false
 }

@@ -49,6 +49,14 @@ class Config:
     partial_tp_pct: float = 50.0
     move_stop_to_breakeven: bool = True
 
+    # Salida si el precio toca la EMA slow después de una entrada por cross EMA.
+    # `..._pct` es la tolerancia en % alrededor de la EMA (0.10 = 0.10%).
+    # `..._exit_pct` es el % de la posición que se cierra al tocar la EMA
+    # (100 = cierre total; < 100 = salida parcial, una sola vez por posición).
+    close_on_ema_slow_touch: bool = True
+    close_on_ema_slow_touch_pct: float = 0.0  # Tolerancia en % (0.10 = 0.10%)
+    close_on_ema_slow_touch_exit_pct: float = 50.0  # % de la posición a cerrar en el toque
+
     force_close_at_end: bool = True
     timestamp_is_close: bool = False
 
@@ -97,5 +105,10 @@ class Config:
         if self.partial_tp_enabled:
             if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:
                 raise ValueError("Configuración de take-profit parcial inválida.")
+        if self.close_on_ema_slow_touch:
+            if self.close_on_ema_slow_touch_pct < 0:
+                raise ValueError("close_on_ema_slow_touch_pct debe ser >= 0.")
+            if not 0 < self.close_on_ema_slow_touch_exit_pct <= 100:
+                raise ValueError("close_on_ema_slow_touch_exit_pct debe estar en (0, 100].")
         if not (self.allow_long or self.allow_short):
             raise ValueError("Debe habilitarse LONG, SHORT o ambos.")

@@ -201,6 +201,10 @@ UP_COLOR, DOWN_COLOR = "#26a69a", "#ef5350"
 FAST_COLOR, SLOW_COLOR, NEUTRAL_COLOR = "#ff9800", "#2962ff", "#7e57c2"
 ADX_EXIT_COLOR, WEAK_EXIT_COLOR = "#ffeb3b", "#e040fb"
 STOP_COLOR, TARGET_COLOR, BREAKEVEN_COLOR = "#ff5252", "#00e676", "#b0bec5"
+EMA_SLOW_TOUCH_COLOR = "#00e5ff"
+
+#: Prefijo del motivo de salida cuando el precio toca la EMA slow.
+EMA_SLOW_TOUCH_REASON = "EMA_SLOW_TOUCH"
 
 
 def _position_spans(trades: pd.DataFrame) -> list[dict]:
@@ -372,8 +376,9 @@ def build_backtest_figure(
 
     * velas del timeframe de la estrategia y las EMAs rápida/lenta;
     * señales de cruce (`cross_up`/`cross_down`) y salidas (`adx_exit`/`weak_exit`);
-    * trades: entradas, salidas, unión entrada→salida, stop-loss, breakeven y
-      take-profit parcial;
+    * trades: entradas, salidas, unión entrada→salida, stop-loss, breakeven,
+      take-profit parcial y salidas por toque a la EMA slow (motivo
+      ``EMA_SLOW_TOUCH_*``), estas últimas con un marcador propio;
     * paneles de ADX de entrada, `target` (señal), volumen y curva de equity;
     * series e indicadores de los timeframes de salida (ADX y EMA weakening)
       cuando se dispone del dataset original `raw`.
@@ -586,6 +591,22 @@ def build_backtest_figure(
                 fig.add_trace(_marker_trace(_x_ms(sub["exit_time"]), sub["exit_price"],
                                             label, "square", color, 11, text=texts),
                               row=r, col=1)
+
+        # Salidas por toque a la EMA slow (motivo EMA_SLOW_TOUCH_*), resaltadas
+        # con un marcador propio para identificarlas en el gráfico.
+        touch = trades[trades["reason"].astype(str).str.startswith(EMA_SLOW_TOUCH_REASON)]
+        if win_start is not None:
+            touch = touch[(touch["exit_time"] >= win_start) & (touch["exit_time"] < win_end)]
+        if not touch.empty:
+            touch_texts = [
+                f"SALIDA {t.side} · {t.reason}<br>{t.exit_time:%Y-%m-%d %H:%M}<br>"
+                f"precio {t.exit_price:,.4f}<br>PnL {t.pnl_net:+,.2f}"
+                for t in touch.itertuples()
+            ]
+            fig.add_trace(_marker_trace(_x_ms(touch["exit_time"]), touch["exit_price"],
+                                        "salida toque EMA slow", "circle-x",
+                                        EMA_SLOW_TOUCH_COLOR, 12, text=touch_texts),
+                          row=r, col=1)
 
         def _level_trace(name, color, dash, level_of):
             xs, ys = [], []

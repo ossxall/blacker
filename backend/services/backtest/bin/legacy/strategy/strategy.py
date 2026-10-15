@@ -7,6 +7,10 @@ Gestión de salida por defecto: take-profit parcial a 1R (50%) y stop a
 breakeven del resto (`partial_tp_enabled`). Sube el win rate y recorta la
 racha de pérdidas en whipsaw; puede desactivarse con `partial_tp_enabled=False`.
 
+Además, tras una entrada por cross EMA, un toque a la EMA slow cierra una parte
+configurable de la posición (`close_on_ema_slow_touch_exit_pct`, 100 = cierre
+total) una sola vez por posición.
+
 Archivo único con API reutilizable para backtesting y bots.
 
 Uso:
@@ -179,18 +183,77 @@ class Backtester:
     def _risk_unit(self, pos: Position) -> float:
         return pos.risk_amount / pos.initial_quantity if pos.initial_quantity else 0.0
 
-    def _manage(self, i: int):
-        """Take-profit parcial y stop a breakeven para recortar rachas de pérdidas."""
+    def _ema_slow_touch_level(self, i: int) -> Optional[float]:
+        """Nivel de cierre por toque a la EMA slow en la vela ``i``.
+
+        Devuelve el precio de disparo con la tolerancia ya aplicada, o ``None``
+        si el cierre por toque no está activo. Para LONG el disparo es
+        ``EMA_slow * (1 + tol)`` y para SHORT ``EMA_slow * (1 - tol)``; con
+        tolerancia 0 es la propia EMA slow.
+        """
         cfg, pos = self.cfg, self.position
-        if pos is None or not cfg.partial_tp_enabled or pos.partial_done:
-            return
+        if pos is None or not cfg.close_on_ema_slow_touch or self.signals is None:
+            return None
+        if "ema_slow" not in self.signals.columns or i >= len(self.signals):
+            return None
+        ema_slow = float(self.signals["ema_slow"].iloc[i])
+        if not np.isfinite(ema_slow) or ema_slow <= 0:
+            return None
+        tol = max(cfg.close_on_ema_slow_touch_pct, 0.0) / 100.0
+        return ema_slow * (1 + tol) if pos.side == 1 else ema_slow * (1 - tol)
+
+    def _ema_slow_touch(self, i: int) -> bool:
+        """Salida (total o parcial) si el precio toca la EMA slow tras el cross.
+
+        El parámetro `close_on_ema_slow_touch_pct` define la tolerancia en %:
+        para LONG se dispara cuando el mínimo llega a EMA_slow * (1 + tol), y
+        para SHORT cuando el máximo llega a EMA_slow * (1 - tol). Con tolerancia
+        0 el disparo ocurre justo al tocar la EMA slow.
+
+        Se cierra `close_on_ema_slow_touch_exit_pct` de la posición: con 100 es
+        un cierre total; con un valor menor es una **salida parcial** que sólo
+        se aplica una vez por posición (`pos.touch_done`); el resto sigue
+        gestionándose con las reglas habituales (stop, TP, cross, ADX, …).
+        """
+        cfg, pos = self.cfg, self.position
+        trigger = self._ema_slow_touch_level(i)
+        if pos is None or trigger is None or pos.touch_done:
+            return False
+        if pos.side == 1:
+            if self.l[i] > trigger:
+                return False
+            fill = min(self.o[i], trigger)
+        else:
+            if self.h[i] < trigger:
+                return False
+            fill = max(self.o[i], trigger)
+        self.close_position(cfg.close_on_ema_slow_touch_exit_pct, fill, self.times[i],
+                            f"EMA_SLOW_TOUCH_{cfg.close_on_ema_slow_touch_pct:g}%")
+        pos = self.position
+        if pos is not None:
+            pos.touch_done = True
+        return True
+
+    def _manage(self, i: int) -> bool:
+        """Take-profit parcial y salida por toque a la EMA slow.
+
+        Devuelve ``True`` si el toque a la EMA slow cerró (parte de) la posición,
+        para que `run` pueda resolver el resto del stop en la misma vela.
+        """
+        cfg, pos = self.cfg, self.position
+        if pos is None:
+            return False
+        if self._ema_slow_touch(i):
+            return True
+        if not cfg.partial_tp_enabled or pos.partial_done:
+            return False
         risk_unit = self._risk_unit(pos)
         if risk_unit <= 0:
-            return
+            return False
         trigger = pos.entry_price + pos.side * cfg.partial_tp_r * risk_unit
         hit = self.h[i] >= trigger if pos.side == 1 else self.l[i] <= trigger
         if not hit:
-            return
+            return False
         fill = max(trigger, self.o[i]) if pos.side == 1 else min(trigger, self.o[i])
         self.close_position(cfg.partial_tp_pct, fill, self.times[i], f"PARTIAL_TP_{cfg.partial_tp_r:g}R")
         pos = self.position
@@ -198,13 +261,23 @@ class Backtester:
             pos.partial_done = True
             if cfg.move_stop_to_breakeven:
                 pos.breakeven = True
+        return False
 
-    def _stop(self, i: int) -> bool:
+    def _stop(self, i: int, touch_level: Optional[float] = None) -> bool:
         pos = self.position
         if pos is None or pos.stop_pct <= 0: return False
         stop = pos.entry_price if pos.breakeven else self._stop_price(pos.side, pos.entry_price, pos.stop_pct)
         hit = self.l[i] <= stop if pos.side == 1 else self.h[i] >= stop
         if not hit: return False
+        # Si en la misma vela también se toca la EMA slow y ésta se alcanza antes
+        # que el stop (está más cerca de la entrada), gana el toque: el stop se
+        # pospone y `_manage` cerrará por EMA_SLOW_TOUCH. En salida parcial el
+        # resto se cierra al stop en la misma vela (ver `run`).
+        if touch_level is not None and not pos.touch_done:
+            touch_hit = self.l[i] <= touch_level if pos.side == 1 else self.h[i] >= touch_level
+            touch_first = touch_level >= stop if pos.side == 1 else touch_level <= stop
+            if touch_hit and touch_first:
+                return False
         fill = min(self.o[i], stop) if pos.side == 1 else max(self.o[i], stop)
         reason = "BREAKEVEN" if pos.breakeven else f"STOP_LOSS_{pos.stop_pct*100:.2f}%"
         self.close_position(100, fill, self.times[i], reason)
@@ -250,9 +323,12 @@ class Backtester:
                 self.close_position(pct, self.o[i], self.times[i], reason)
                 self.pending_exit = None
 
-            stop_hit = self._stop(i)
+            stop_hit = self._stop(i, self._ema_slow_touch_level(i))
             if not stop_hit:
-                self._manage(i)
+                # Tras una salida parcial por toque a la EMA slow, si la vela
+                # también recorrió hasta el stop, se cierra el resto al stop.
+                if self._manage(i) and self.position is not None:
+                    stop_hit = self._stop(i)
             if not stop_hit and bool(self.signals["valid"].iloc[i]):
                 target = int(self.signals["target"].iloc[i])
                 if target == 1 and not cfg.allow_long: target = 0
@@ -318,6 +394,11 @@ def parse_args():
     p.add_argument("--partial-tp-r", type=float, default=d.partial_tp_r)
     p.add_argument("--partial-tp-pct", type=float, default=d.partial_tp_pct)
     p.add_argument("--breakeven-stop", action=argparse.BooleanOptionalAction, default=d.move_stop_to_breakeven)
+    p.add_argument("--close-on-ema-slow-touch", action=argparse.BooleanOptionalAction, default=d.close_on_ema_slow_touch)
+    p.add_argument("--close-on-ema-slow-touch-pct", type=float, default=d.close_on_ema_slow_touch_pct,
+                   help="Tolerancia en %% alrededor de la EMA slow (0.10 = 0.10%%).")
+    p.add_argument("--close-on-ema-slow-touch-exit-pct", type=float, default=d.close_on_ema_slow_touch_exit_pct,
+                   help="%% de la posición a cerrar al tocar la EMA slow (100 = cierre total, < 100 = parcial).")
     p.add_argument("--no-long", action="store_true")
     p.add_argument("--no-short", action="store_true")
     p.add_argument("--no-force-close", action="store_true")
@@ -344,6 +425,9 @@ def config_from_args(a) -> Config:
         ema_weakening_gap_pct=a.ema_weakening_gap_pct, ema_weakening_exit_pct=a.ema_weakening_exit_pct,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
         move_stop_to_breakeven=a.breakeven_stop,
+        close_on_ema_slow_touch=a.close_on_ema_slow_touch,
+        close_on_ema_slow_touch_pct=a.close_on_ema_slow_touch_pct,
+        close_on_ema_slow_touch_exit_pct=a.close_on_ema_slow_touch_exit_pct,
         force_close_at_end=not a.no_force_close)
 
 

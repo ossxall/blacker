@@ -9,7 +9,8 @@ Lee la data OHLCV almacenada por `feed.py` en `data/feed.db` (1m por defecto) y
 - Remuestrea a `STRATEGY_TIMEFRAME`, calcula señales y salidas con
   `EMACrossStrategy` y ejecuta el `Backtester` sobre las velas cerradas.
 - Por cada acción que tomaría el backtest (apertura, reversal, cierre por
-  EMA_CROSS, ADX_REVERSAL, EMA_WEAKENING, STOP_LOSS, BREAKEVEN, PARTIAL_TP)
+  EMA_CROSS, ADX_REVERSAL, EMA_WEAKENING, STOP_LOSS, BREAKEVEN, PARTIAL_TP,
+  EMA_SLOW_TOUCH)
   guarda un evento en `signal.db`.
 
 Reglas de diseño
@@ -21,7 +22,8 @@ Reglas de diseño
 - Las decisiones se conocen al cierre de la vela y se ejecutan en la apertura
   siguiente (igual que el backtest); por eso se guardan `bar_time` (vela de la
   señal) y `signal_time` (momento de ejecución). Las salidas por stop/breakeven/
-  partial se disparan dentro de la vela, por lo que `bar_time == signal_time`.
+  partial/toque a la EMA slow se disparan dentro de la vela, por lo que
+  `bar_time == signal_time`.
 - `force_close_at_end` se desactiva: en vivo una posición abierta no debe
   cerrarse artificialmente al final de los datos disponibles.
 
@@ -35,9 +37,9 @@ ordena por `(signal_time, bar_time, event)` con `EXIT` antes que `ENTRY`:
   siguiente a la vela de la señal).
 - `EXIT` por EMA_CROSS / ADX / EMA_WEAKENING: también `signal_time = bar_time
   + timeframe` (se decide al cierre y se ejecuta en la apertura siguiente).
-- `EXIT` por STOP_LOSS / BREAKEVEN / PARTIAL_TP: ocurre dentro de la vela, por
-  eso `signal_time == bar_time`. Si coincide con una apertura, la apertura va
-  primero (bar_time menor).
+- `EXIT` por STOP_LOSS / BREAKEVEN / PARTIAL_TP / EMA_SLOW_TOUCH: ocurre dentro
+  de la vela, por eso `signal_time == bar_time`. Si coincide con una apertura,
+  la apertura va primero (bar_time menor).
 
 El `payload` de cada `EXIT` incluye `action` (`CLOSE`/`PARTIAL_CLOSE`),
 `close_pct` (porcentaje de la posición *restante* a cerrar, igual que el
@@ -100,9 +102,8 @@ from strategy.strategy import (
     Backtester,
     Config,
     EMACrossStrategy,
-    resample_ohlcv,
-    source_minutes,
 )
+from strategy.utils import resample_ohlcv, source_minutes
 
 try:
     from dotenv import load_dotenv
@@ -227,6 +228,10 @@ _CONFIG_ENV = {
     "partial_tp_r": ("STRATEGY_PARTIAL_TP_R", env_float),
     "partial_tp_pct": ("STRATEGY_PARTIAL_TP_PCT", env_float),
     "move_stop_to_breakeven": ("STRATEGY_MOVE_STOP_TO_BREAKEVEN", env_bool),
+    # Cierre por toque a la EMA slow (misma lógica que el backtest).
+    "close_on_ema_slow_touch": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH", env_bool),
+    "close_on_ema_slow_touch_pct": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH_PCT", env_float),
+    "close_on_ema_slow_touch_exit_pct": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH_EXIT_PCT", env_float),
     # Salidas: las usa `prepare_exits`.
     "adx_exit_enabled": ("STRATEGY_ADX_EXIT", env_bool),
     "adx_timeframe": ("STRATEGY_ADX_TIMEFRAME", env_str),
@@ -498,8 +503,8 @@ def events_to_trades(events: list[dict]) -> list[dict]:
 
 
 def _reason_is_intrabar(reason: str) -> bool:
-    """Stop, breakeven y take-profit parcial se disparan dentro de la vela."""
-    return reason.startswith(("STOP_LOSS", "PARTIAL_TP")) or reason == "BREAKEVEN"
+    """Stop, breakeven, take-profit parcial y toque a la EMA slow se disparan dentro de la vela."""
+    return reason.startswith(("STOP_LOSS", "PARTIAL_TP", "EMA_SLOW_TOUCH")) or reason == "BREAKEVEN"
 
 
 def build_events(
@@ -516,8 +521,8 @@ def build_events(
     Reutiliza el motor `Backtester` de `strategy/strategy.py` sobre las velas
     cerradas, de modo que el bot publica exactamente las acciones que tomaría
     el backtest: aperturas (incluidas reversals), cierres por EMA_CROSS,
-    ADX_REVERSAL, EMA_WEAKENING, y las salidas por STOP_LOSS, BREAKEVEN y
-    PARTIAL_TP. La posición abierta al final de los datos no se cierra
+    ADX_REVERSAL, EMA_WEAKENING, y las salidas por STOP_LOSS, BREAKEVEN,
+    PARTIAL_TP y EMA_SLOW_TOUCH. La posición abierta al final de los datos no se cierra
     (`force_close_at_end=False`): en vivo sigue vigente.
     """
     if len(bars) < 2:
