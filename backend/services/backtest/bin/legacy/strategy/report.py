@@ -226,10 +226,10 @@ def _position_spans(trades: pd.DataFrame) -> list[dict]:
     return spans
 
 
-def _higher_timeframes(raw: pd.DataFrame | None, cfg: Config) -> tuple[list[dict], dict | None]:
+def _higher_timeframes(raw: pd.DataFrame | None, cfg: Config) -> tuple[list[dict], list[dict]]:
     """Series e indicadores de los timeframes de salida (ADX y EMA weakening)."""
     if raw is None or raw.empty:
-        return [], None
+        return [], []
     from strategy.indicators import adx as adx_indicator
     from strategy.indicators import adx_reversal_flags, ema, ema_weakening_flags
     from strategy.utils import resample_ohlcv, source_minutes
@@ -248,16 +248,20 @@ def _higher_timeframes(raw: pd.DataFrame | None, cfg: Config) -> tuple[list[dict
                             "key_level": cfg.adx_key_level,
                             "reversal": adx_reversal_flags(adx_values, cfg.adx_key_level)})
 
-    weak_tf = None
-    tf = cfg.ema_weakening_timeframe or cfg.timeframe
-    if cfg.ema_weakening_exit_enabled and pd.Timedelta(tf) != pd.Timedelta(cfg.timeframe) and source_td < pd.Timedelta(tf):
-        low = resample_ohlcv(raw, tf)
-        if len(low) >= cfg.ema_slow + 2:
-            fast, slow = ema(low.close, cfg.ema_fast).to_numpy(float), ema(low.close, cfg.ema_slow).to_numpy(float)
-            weak_tf = {"timeframe": tf, "bars": low, "ema_fast": fast, "ema_slow": slow,
-                       "gap_pct": cfg.ema_weakening_gap_pct,
-                       "weakening": ema_weakening_flags(fast, slow, cfg.ema_weakening_gap_pct)}
-    return adx_tfs, weak_tf
+    weak_tfs: list[dict] = []
+    if cfg.ema_weakening_exit_enabled:
+        for tf in cfg.ema_weakening_timeframes or (cfg.timeframe,):
+            if pd.Timedelta(tf) == pd.Timedelta(cfg.timeframe) or source_td >= pd.Timedelta(tf):
+                continue
+            low = resample_ohlcv(raw, tf)
+            if len(low) < cfg.ema_slow + 2:
+                continue
+            fast = ema(low.close, cfg.ema_fast).to_numpy(float)
+            slow = ema(low.close, cfg.ema_slow).to_numpy(float)
+            weak_tfs.append({"timeframe": tf, "bars": low, "ema_fast": fast, "ema_slow": slow,
+                             "gap_pct": cfg.ema_weakening_gap_pct,
+                             "weakening": ema_weakening_flags(fast, slow, cfg.ema_weakening_gap_pct)})
+    return adx_tfs, weak_tfs
 
 
 def _slice_timeframe(info: dict | None, start: pd.Timestamp, end: pd.Timestamp) -> dict | None:
@@ -438,16 +442,19 @@ def build_backtest_figure(
     if len(weak_flags) != n:
         weak_flags = np.zeros(n, bool)
 
-    adx_tfs, weak_stf = _higher_timeframes(raw, cfg)
+    adx_tfs, weak_tfs = _higher_timeframes(raw, cfg)
     if window is not None:
         adx_tfs = [frame for frame in
                    (_slice_timeframe(frame, win_start, win_end) for frame in adx_tfs)
                    if frame is not None]
-        weak_stf = _slice_timeframe(weak_stf, win_start, win_end)
+        weak_tfs = [frame for frame in
+                    (_slice_timeframe(frame, win_start, win_end) for frame in weak_tfs)
+                    if frame is not None]
 
     trade_count = 0 if trades is None or trades.empty else int(trades["position_id"].nunique())
 
     adx_panels = [f"adx_tf_{i}" for i in range(len(adx_tfs))]
+    weak_panels = [f"weak_tf_{i}" for i in range(len(weak_tfs))]
 
     panels = ["price"]
     if signals is not None and "adx_entry" in signals:
@@ -455,13 +462,14 @@ def build_backtest_figure(
     if signals is not None and "target" in signals:
         panels.append("target")
     panels.extend(adx_panels)
-    if weak_stf is not None:
-        panels.append("weak_tf")
+    panels.extend(weak_panels)
     if equity is not None and not equity.empty:
         panels.append("equity")
 
-    weights = {"price": 1.0, "adx": 0.25, "target": 0.2, "weak_tf": 0.35, "equity": 0.4}
+    weights = {"price": 1.0, "adx": 0.25, "target": 0.2, "equity": 0.4}
     for name in adx_panels:
+        weights[name] = 0.35
+    for name in weak_panels:
         weights[name] = 0.35
     total_weight = sum(weights[name] for name in panels)
     specs = [[{"secondary_y": name == "price" or name in adx_panels}] for name in panels]
@@ -687,27 +695,33 @@ def build_backtest_figure(
         fig.update_yaxes(title_text="precio", row=rr, col=1, secondary_y=False)
         fig.update_yaxes(title_text="ADX", showgrid=False, row=rr, col=1, secondary_y=True)
 
-    # -- Timeframe de weakening --------------------------------------------
-    if "weak_tf" in row:
-        rr = row["weak_tf"]
-        low = weak_stf["bars"]
+    # -- Timeframes de weakening (uno por timeframe configurado) -----------
+    for idx, weak_tf in enumerate(weak_tfs):
+        name = f"weak_tf_{idx}"
+        if name not in row:
+            continue
+        rr = row[name]
+        low = weak_tf["bars"]
         low_x = _x_ms(low.index)
         if len(low) <= _MAX_CANDLES:
             fig.add_trace(go.Candlestick(
                 x=low_x, open=_sig(low["open"]), high=_sig(low["high"]),
                 low=_sig(low["low"]), close=_sig(low["close"]),
-                name=f"precio {weak_stf['timeframe']}", increasing_line_color=UP_COLOR,
+                name=f"precio {weak_tf['timeframe']}", increasing_line_color=UP_COLOR,
                 decreasing_line_color=DOWN_COLOR, showlegend=False, opacity=0.6), row=rr, col=1)
-        fig.add_trace(_line_trace(low_x, weak_stf["ema_fast"], f"EMA {cfg.ema_fast} ({weak_stf['timeframe']})",
+        else:
+            fig.add_trace(_line_trace(low_x, low["close"].to_numpy(float), f"cierre {weak_tf['timeframe']}",
+                                      "#90a4ae", width=1.0, showlegend=False, opacity=0.7), row=rr, col=1)
+        fig.add_trace(_line_trace(low_x, weak_tf["ema_fast"], f"EMA {cfg.ema_fast} ({weak_tf['timeframe']})",
                                   FAST_COLOR, width=1.2), row=rr, col=1)
-        fig.add_trace(_line_trace(low_x, weak_stf["ema_slow"], f"EMA {cfg.ema_slow} ({weak_stf['timeframe']})",
+        fig.add_trace(_line_trace(low_x, weak_tf["ema_slow"], f"EMA {cfg.ema_slow} ({weak_tf['timeframe']})",
                                   SLOW_COLOR, width=1.2), row=rr, col=1)
-        flags = weak_stf["weakening"]
+        flags = weak_tf["weakening"]
         if flags.any():
             hi = low["high"].to_numpy(float)
             fig.add_trace(_marker_trace(low_x[flags], hi[flags], "weakening",
                                         "diamond", WEAK_EXIT_COLOR, 8), row=rr, col=1)
-        fig.update_yaxes(title_text=f"EMA {weak_stf['timeframe']}", row=rr, col=1)
+        fig.update_yaxes(title_text=f"EMA {weak_tf['timeframe']}", row=rr, col=1)
 
     # -- Equity ------------------------------------------------------------
     if "equity" in row:

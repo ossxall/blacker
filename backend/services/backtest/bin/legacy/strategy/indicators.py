@@ -143,14 +143,13 @@ def build_adx_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Option
     return spread_flags(combined, cfg.adx_exit_range)
 
 
-def build_weakening_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:
-    if not cfg.ema_weakening_exit_enabled or bars.empty:
-        return None
-    tf = cfg.ema_weakening_timeframe or cfg.timeframe
-    if pd.Timedelta(tf) == pd.Timedelta(cfg.timeframe) or pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(tf):
+def _weakening_exit_flags(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config,
+                          timeframe: str) -> Optional[np.ndarray]:
+    """Flags de weakening para un único timeframe, alineadas a ``bars``."""
+    if pd.Timedelta(timeframe) == pd.Timedelta(cfg.timeframe) or pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(timeframe):
         source_bars, source_tf = bars, cfg.timeframe
     else:
-        source_bars, source_tf = resample_ohlcv(raw, tf), tf
+        source_bars, source_tf = resample_ohlcv(raw, timeframe), timeframe
     if len(source_bars) < cfg.ema_slow + 2:
         return None
     flags = ema_weakening_flags(ema(source_bars.close, cfg.ema_fast).to_numpy(),
@@ -159,3 +158,25 @@ def build_weakening_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> 
     if source_bars.index.equals(bars.index):
         return flags
     return align_closed_flags(source_bars.index, flags, bars.index, source_tf, cfg.timeframe)
+
+
+def build_weakening_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:
+    """Salida EMA weakening combinando con OR todos los ``cfg.ema_weakening_timeframes``.
+
+    Devuelve ``None`` si no se pudo calcular ninguno (deshabilitado, sin datos
+    suficientes o timeframes incompatibles); si al menos uno es válido, devuelve
+    la unión de sus señales de debilitamiento.
+    """
+    if not cfg.ema_weakening_exit_enabled or bars.empty:
+        return None
+    combined = np.zeros(len(bars), dtype=bool)
+    built = False
+    for timeframe in (cfg.ema_weakening_timeframes or (cfg.timeframe,)):
+        flags = _weakening_exit_flags(raw, bars, cfg, timeframe)
+        if flags is None:
+            continue
+        built = True
+        combined |= flags
+    if not built:
+        return None
+    return combined

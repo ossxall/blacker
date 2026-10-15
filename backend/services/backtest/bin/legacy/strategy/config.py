@@ -2,6 +2,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 import pandas as pd
 
+
+def timeframe_tuple(raw: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Normaliza uno o varios timeframes.
+
+    Acepta un ``str`` separado por comas (``"1D,30min"``) o una secuencia
+    (``["1D", "30min"]``) y devuelve una tupla sin elementos vacíos.
+    """
+    if isinstance(raw, (list, tuple)):
+        parts = [str(item) for item in raw]
+    else:
+        parts = str(raw).split(",")
+    return tuple(part.strip() for part in parts if part.strip())
+
+
 @dataclass
 class Config:
     ema_fast: int = 55
@@ -35,7 +49,10 @@ class Config:
     adx_exit_pct: float = 100.0
 
     ema_weakening_exit_enabled: bool = True
-    ema_weakening_timeframe: str = "30min"
+    # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
+    # ["1D", "30min"]; la salida weakening se dispara si hay debilitamiento en
+    # cualquiera de ellos.
+    ema_weakening_timeframe: str | list[str] | tuple[str, ...] = "30min"
     ema_weakening_gap_pct: float = 0.0005
     ema_weakening_exit_pct: float = 25.0
 
@@ -51,10 +68,14 @@ class Config:
 
     # Salida si el precio toca la EMA slow después de una entrada por cross EMA.
     # `..._pct` es la tolerancia en % alrededor de la EMA (0.10 = 0.10%).
+    # `..._after` decide el sentido de la tolerancia: False (default) la aplica
+    # ANTES del toque (LONG dispara en EMA*(1+tol), SHORT en EMA*(1-tol)); True
+    # la aplica DESPUÉS del toque (LONG en EMA*(1-tol), SHORT en EMA*(1+tol)).
     # `..._exit_pct` es el % de la posición que se cierra al tocar la EMA
     # (100 = cierre total; < 100 = salida parcial, una sola vez por posición).
     close_on_ema_slow_touch: bool = True
-    close_on_ema_slow_touch_pct: float = 0.0  # Tolerancia en % (0.10 = 0.10%)
+    close_on_ema_slow_touch_pct: float = 0.1  # Tolerancia en % (0.10 = 0.10%)
+    close_on_ema_slow_touch_after: bool = False  # False = antes del toque; True = después
     close_on_ema_slow_touch_exit_pct: float = 50.0  # % de la posición a cerrar en el toque
 
     force_close_at_end: bool = True
@@ -63,12 +84,12 @@ class Config:
     @property
     def adx_timeframes(self) -> tuple[str, ...]:
         """Timeframes ADX normalizados (uno o varios); la salida usa OR entre ellos."""
-        raw = self.adx_timeframe
-        if isinstance(raw, (list, tuple)):
-            parts = [str(item) for item in raw]
-        else:
-            parts = str(raw).split(",")
-        return tuple(part.strip() for part in parts if part.strip())
+        return timeframe_tuple(self.adx_timeframe)
+
+    @property
+    def ema_weakening_timeframes(self) -> tuple[str, ...]:
+        """Timeframes de weakening normalizados (uno o varios); la salida usa OR entre ellos."""
+        return timeframe_tuple(self.ema_weakening_timeframe)
 
     def __post_init__(self):
         if min(self.ema_fast, self.ema_slow) <= 0 or self.ema_fast >= self.ema_slow:
@@ -80,8 +101,11 @@ class Config:
                 raise ValueError(f"adx_timeframe inválido: {timeframe!r}.")
         if self.adx_exit_enabled and not self.adx_timeframes:
             raise ValueError("adx_timeframe no puede estar vacío.")
-        if self.ema_weakening_timeframe and pd.Timedelta(self.ema_weakening_timeframe) <= pd.Timedelta(0):
-            raise ValueError("ema_weakening_timeframe debe ser positivo.")
+        if self.ema_weakening_exit_enabled and not self.ema_weakening_timeframes:
+            raise ValueError("ema_weakening_timeframe no puede estar vacío.")
+        for timeframe in self.ema_weakening_timeframes:
+            if pd.Timedelta(timeframe) <= pd.Timedelta(0):
+                raise ValueError(f"ema_weakening_timeframe inválido: {timeframe!r}.")
         if self.initial_capital <= 0 or self.max_leverage <= 0:
             raise ValueError("Capital y leverage deben ser positivos.")
         if not 0 < self.risk_pct <= 0.2:

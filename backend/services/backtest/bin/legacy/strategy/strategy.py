@@ -9,7 +9,9 @@ racha de pérdidas en whipsaw; puede desactivarse con `partial_tp_enabled=False`
 
 Además, tras una entrada por cross EMA, un toque a la EMA slow cierra una parte
 configurable de la posición (`close_on_ema_slow_touch_exit_pct`, 100 = cierre
-total) una sola vez por posición.
+total) una sola vez por posición. La tolerancia `close_on_ema_slow_touch_pct`
+desplaza el nivel de disparo; con `close_on_ema_slow_touch_after=False` (default)
+se aplica antes del toque y con `True` después.
 
 Archivo único con API reutilizable para backtesting y bots.
 
@@ -187,9 +189,11 @@ class Backtester:
         """Nivel de cierre por toque a la EMA slow en la vela ``i``.
 
         Devuelve el precio de disparo con la tolerancia ya aplicada, o ``None``
-        si el cierre por toque no está activo. Para LONG el disparo es
-        ``EMA_slow * (1 + tol)`` y para SHORT ``EMA_slow * (1 - tol)``; con
-        tolerancia 0 es la propia EMA slow.
+        si el cierre por toque no está activo. Con ``close_on_ema_slow_touch_after``
+        en False (default) la tolerancia se aplica ANTES del toque: para LONG el
+        disparo es ``EMA_slow * (1 + tol)`` y para SHORT ``EMA_slow * (1 - tol)``.
+        Con el flag en True se aplica DESPUÉS del toque: LONG ``EMA_slow * (1 - tol)``
+        y SHORT ``EMA_slow * (1 + tol)``. Con tolerancia 0 es la propia EMA slow.
         """
         cfg, pos = self.cfg, self.position
         if pos is None or not cfg.close_on_ema_slow_touch or self.signals is None:
@@ -200,15 +204,20 @@ class Backtester:
         if not np.isfinite(ema_slow) or ema_slow <= 0:
             return None
         tol = max(cfg.close_on_ema_slow_touch_pct, 0.0) / 100.0
-        return ema_slow * (1 + tol) if pos.side == 1 else ema_slow * (1 - tol)
+        offset = -tol if cfg.close_on_ema_slow_touch_after else tol
+        return ema_slow * (1 + offset) if pos.side == 1 else ema_slow * (1 - offset)
 
     def _ema_slow_touch(self, i: int) -> bool:
         """Salida (total o parcial) si el precio toca la EMA slow tras el cross.
 
-        El parámetro `close_on_ema_slow_touch_pct` define la tolerancia en %:
-        para LONG se dispara cuando el mínimo llega a EMA_slow * (1 + tol), y
-        para SHORT cuando el máximo llega a EMA_slow * (1 - tol). Con tolerancia
-        0 el disparo ocurre justo al tocar la EMA slow.
+        El parámetro `close_on_ema_slow_touch_pct` define la tolerancia en % y
+        `close_on_ema_slow_touch_after` su sentido. Por defecto (False) la
+        tolerancia se aplica ANTES del toque: para LONG se dispara cuando el
+        mínimo llega a EMA_slow * (1 + tol), y para SHORT cuando el máximo llega
+        a EMA_slow * (1 - tol). Con el flag en True se aplica DESPUÉS del toque:
+        LONG cuando el mínimo llega a EMA_slow * (1 - tol) y SHORT cuando el
+        máximo llega a EMA_slow * (1 + tol). Con tolerancia 0 el disparo ocurre
+        justo al tocar la EMA slow.
 
         Se cierra `close_on_ema_slow_touch_exit_pct` de la posición: con 100 es
         un cierre total; con un valor menor es una **salida parcial** que sólo
@@ -227,8 +236,9 @@ class Backtester:
             if self.h[i] < trigger:
                 return False
             fill = max(self.o[i], trigger)
+        prefix = "EMA_SLOW_TOUCH_AFTER" if cfg.close_on_ema_slow_touch_after else "EMA_SLOW_TOUCH"
         self.close_position(cfg.close_on_ema_slow_touch_exit_pct, fill, self.times[i],
-                            f"EMA_SLOW_TOUCH_{cfg.close_on_ema_slow_touch_pct:g}%")
+                            f"{prefix}_{cfg.close_on_ema_slow_touch_pct:g}%")
         pos = self.position
         if pos is not None:
             pos.touch_done = True
@@ -308,8 +318,8 @@ class Backtester:
                               for tf in cfg.adx_timeframes)
         adx_base = f"ADX_{adx_labels}_REVERSAL"
         adx_reason = adx_base if cfg.adx_exit_pct >= 100 else f"{adx_base}_{cfg.adx_exit_pct:g}%"
-        weak_tf = cfg.ema_weakening_timeframe or cfg.timeframe
-        weak_base = f"EMA_WEAKENING_{weak_tf.upper()}"
+        weak_tfs = cfg.ema_weakening_timeframes or (cfg.timeframe,)
+        weak_base = "EMA_WEAKENING_" + "_".join(tf.upper() for tf in weak_tfs)
         weak_reason = weak_base if cfg.ema_weakening_exit_pct >= 100 else f"{weak_base}_{cfg.ema_weakening_exit_pct:g}%"
         started = time.perf_counter()
         print(f"[BACKTEST] {n:,} velas {cfg.timeframe}", flush=True)
@@ -387,7 +397,8 @@ def parse_args():
     p.add_argument("--adx-exit-range", type=int, default=d.adx_exit_range,
                    help="Velas durante las que una reversión ADX mantiene activada la salida (default 4).")
     p.add_argument("--ema-weakening-exit", action=argparse.BooleanOptionalAction, default=d.ema_weakening_exit_enabled)
-    p.add_argument("--ema-weakening-timeframe", default=d.ema_weakening_timeframe)
+    p.add_argument("--ema-weakening-timeframe", default=d.ema_weakening_timeframe,
+                   help="Timeframe(s) EMA weakening de salida separados por coma; se combinan con OR (p. ej. 1D,30min).")
     p.add_argument("--ema-weakening-gap-pct", type=float, default=d.ema_weakening_gap_pct)
     p.add_argument("--ema-weakening-exit-pct", type=float, default=d.ema_weakening_exit_pct)
     p.add_argument("--partial-tp", action=argparse.BooleanOptionalAction, default=d.partial_tp_enabled)
@@ -397,6 +408,9 @@ def parse_args():
     p.add_argument("--close-on-ema-slow-touch", action=argparse.BooleanOptionalAction, default=d.close_on_ema_slow_touch)
     p.add_argument("--close-on-ema-slow-touch-pct", type=float, default=d.close_on_ema_slow_touch_pct,
                    help="Tolerancia en %% alrededor de la EMA slow (0.10 = 0.10%%).")
+    p.add_argument("--close-on-ema-slow-touch-after", action=argparse.BooleanOptionalAction,
+                   default=d.close_on_ema_slow_touch_after,
+                   help="Aplica la tolerancia después del toque a la EMA slow (por defecto, antes).")
     p.add_argument("--close-on-ema-slow-touch-exit-pct", type=float, default=d.close_on_ema_slow_touch_exit_pct,
                    help="%% de la posición a cerrar al tocar la EMA slow (100 = cierre total, < 100 = parcial).")
     p.add_argument("--no-long", action="store_true")
@@ -427,6 +441,7 @@ def config_from_args(a) -> Config:
         move_stop_to_breakeven=a.breakeven_stop,
         close_on_ema_slow_touch=a.close_on_ema_slow_touch,
         close_on_ema_slow_touch_pct=a.close_on_ema_slow_touch_pct,
+        close_on_ema_slow_touch_after=a.close_on_ema_slow_touch_after,
         close_on_ema_slow_touch_exit_pct=a.close_on_ema_slow_touch_exit_pct,
         force_close_at_end=not a.no_force_close)
 

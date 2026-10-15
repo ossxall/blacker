@@ -231,6 +231,7 @@ _CONFIG_ENV = {
     # Cierre por toque a la EMA slow (misma lógica que el backtest).
     "close_on_ema_slow_touch": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH", env_bool),
     "close_on_ema_slow_touch_pct": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH_PCT", env_float),
+    "close_on_ema_slow_touch_after": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH_AFTER", env_bool),
     "close_on_ema_slow_touch_exit_pct": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH_EXIT_PCT", env_float),
     # Salidas: las usa `prepare_exits`.
     "adx_exit_enabled": ("STRATEGY_ADX_EXIT", env_bool),
@@ -477,9 +478,10 @@ def build_series_frames(
         lambda: series_frame(strategy, raw, bars, cfg.timeframe, computed))
     add("raw", interval, lambda: series_frame(strategy, raw, raw, interval))
     adx_tfs = cfg.adx_timeframes if cfg.adx_exit_enabled else ()
+    weak_tfs = cfg.ema_weakening_timeframes if cfg.ema_weakening_exit_enabled else ()
     for role, timeframe in (
         *(("adx_exit", tf) for tf in adx_tfs),
-        ("ema_weakening", cfg.ema_weakening_timeframe),
+        *(("ema_weakening", tf) for tf in weak_tfs),
     ):
         if timeframe:
             add(role, timeframe,
