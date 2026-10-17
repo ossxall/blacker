@@ -1,9 +1,11 @@
 from __future__ import annotations
-from typing import Optional
-from strategy.utils import source_minutes, resample_ohlcv
-from strategy.config import Config
+
 import numpy as np
 import pandas as pd
+
+from strategy.config import Config
+from strategy.utils import resample_ohlcv, source_minutes
+
 
 def ema(values: pd.Series, period: int) -> pd.Series:
     if period <= 0:
@@ -17,6 +19,19 @@ def true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarr
     if len(tr):
         tr[0] = high[0] - low[0]
     return tr
+
+
+def atr(bars: pd.DataFrame, length: int = 14) -> pd.Series:
+    """ATR con suavizado Wilder, alineado con el índice de ``bars``.
+
+    Devuelve el Average True Range de ``bars`` (timeframe de la estrategia).
+    Útil como medida de volatilidad relativa: ``atr(bars) / bars.close``.
+    """
+    if length <= 0:
+        raise ValueError("La longitud ATR debe ser positiva.")
+    h, l, c = (bars[k].to_numpy(float) for k in ("high", "low", "close"))
+    tr = true_range(h, l, c)
+    return pd.Series(tr, index=bars.index).ewm(alpha=1 / length, adjust=False).mean()
 
 
 def adx(bars: pd.DataFrame, dilen: int = 14, adxlen: int = 14) -> pd.DataFrame:
@@ -54,7 +69,7 @@ def confirmed_crosses(cross: np.ndarray, side_ok: np.ndarray, bars: int) -> np.n
     out = np.zeros(len(cross), dtype=bool)
     for idx in np.flatnonzero(cross):
         end = idx + bars
-        if end < len(cross) and side_ok[idx:end + 1].all():
+        if end < len(cross) and side_ok[idx : end + 1].all():
             out[end] = True
     return out
 
@@ -63,11 +78,17 @@ def adx_reversal_flags(values: np.ndarray, key_level: float) -> np.ndarray:
     values = np.asarray(values, float)
     flags = np.zeros(len(values), dtype=bool)
     if len(values) >= 3:
-        flags[2:] = (values[2:] < values[1:-1]) & (values[1:-1] > values[:-2]) & (values[1:-1] > key_level)
+        flags[2:] = (
+            (values[2:] < values[1:-1])
+            & (values[1:-1] > values[:-2])
+            & (values[1:-1] > key_level)
+        )
     return flags
 
 
-def ema_weakening_flags(fast: np.ndarray, slow: np.ndarray, gap_pct: float) -> np.ndarray:
+def ema_weakening_flags(
+    fast: np.ndarray, slow: np.ndarray, gap_pct: float
+) -> np.ndarray:
     fast, slow = np.asarray(fast, float), np.asarray(slow, float)
     flags = np.zeros(len(fast), dtype=bool)
     if len(fast) < 2 or gap_pct <= 0:
@@ -78,9 +99,13 @@ def ema_weakening_flags(fast: np.ndarray, slow: np.ndarray, gap_pct: float) -> n
     return flags
 
 
-def align_closed_flags(source_index: pd.DatetimeIndex, flags: np.ndarray,
-                       target_index: pd.DatetimeIndex, source_tf: str,
-                       target_tf: str) -> np.ndarray:
+def align_closed_flags(
+    source_index: pd.DatetimeIndex,
+    flags: np.ndarray,
+    target_index: pd.DatetimeIndex,
+    source_tf: str,
+    target_tf: str,
+) -> np.ndarray:
     """Para cada cierre del timeframe destino, toma la última barra fuente ya cerrada."""
     if not len(target_index) or not len(source_index):
         return np.zeros(len(target_index), dtype=bool)
@@ -91,6 +116,63 @@ def align_closed_flags(source_index: pd.DatetimeIndex, flags: np.ndarray,
     valid = (loc >= 0) & (loc < len(flags))
     out[valid] = np.asarray(flags, bool)[loc[valid]]
     return out
+
+
+def align_closed_values(
+    source_index: pd.DatetimeIndex,
+    values: np.ndarray,
+    target_index: pd.DatetimeIndex,
+    source_tf: str,
+    target_tf: str,
+    fill: float = 0.0,
+) -> np.ndarray:
+    """Como `align_closed_flags` pero para valores numéricos.
+
+    Para cada cierre del timeframe destino toma el valor de la última barra
+    fuente ya cerrada; si no hay ninguna, rellena con ``fill``.
+    """
+    values = np.asarray(values)
+    out = np.full(len(target_index), fill, dtype=float)
+    if not len(target_index) or not len(source_index):
+        return out
+    source_end = (source_index + pd.Timedelta(source_tf)).asi8
+    target_end = (target_index + pd.Timedelta(target_tf)).asi8
+    loc = np.searchsorted(source_end, target_end, side="right") - 1
+    valid = (loc >= 0) & (loc < len(values))
+    out[valid] = values[loc[valid]]
+    return out
+
+
+def htf_trend(
+    bars: pd.DataFrame,
+    timeframe: str,
+    fast_len: int,
+    slow_len: int,
+    strategy_timeframe: str,
+) -> np.ndarray | None:
+    """Tendencia (+1/-1/0) del timeframe superior, alineada a ``bars``.
+
+    Calcula ``EMA(fast_len)`` y ``EMA(slow_len)`` sobre las velas de
+    ``timeframe`` (remuestreadas desde ``bars``) y devuelve ``+1`` cuando la
+    EMA rápida está por encima de la lenta, ``-1`` cuando está por debajo y
+    ``0`` cuando son iguales o no hay dato. Para cada barra de ``bars`` se usa
+    la última vela del HTF ya cerrada (sin look-ahead). Devuelve ``None`` si no
+    hay velas suficientes para sembrar las EMAs.
+    """
+    if pd.Timedelta(timeframe) == pd.Timedelta(strategy_timeframe):
+        source, source_tf = bars, strategy_timeframe
+    else:
+        source, source_tf = resample_ohlcv(bars, timeframe), timeframe
+    if len(source) < max(fast_len, slow_len) + 2:
+        return None
+    fast = ema(source.close, fast_len).to_numpy(float)
+    slow = ema(source.close, slow_len).to_numpy(float)
+    trend = np.where(fast > slow, 1.0, np.where(fast < slow, -1.0, 0.0))
+    if source.index.equals(bars.index):
+        return trend
+    return align_closed_values(
+        source.index, trend, bars.index, source_tf, strategy_timeframe
+    )
 
 
 def spread_flags(flags: np.ndarray, window: int) -> np.ndarray:
@@ -108,19 +190,24 @@ def spread_flags(flags: np.ndarray, window: int) -> np.ndarray:
     return (cumulative[idx + 1] - cumulative[start]) > 0
 
 
-def _adx_exit_flags(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config,
-                    timeframe: str) -> Optional[np.ndarray]:
+def _adx_exit_flags(
+    raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config, timeframe: str
+) -> np.ndarray | None:
     """Flags de reversión ADX para un único timeframe, alineadas a ``bars``."""
     if pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(timeframe):
         return None
     low = resample_ohlcv(raw, timeframe)
     if len(low) < cfg.adx_dilen + cfg.adx_adxlen + 2:
         return None
-    flags = adx_reversal_flags(adx(low, cfg.adx_dilen, cfg.adx_adxlen)["adx"].to_numpy(), cfg.adx_key_level)
+    flags = adx_reversal_flags(
+        adx(low, cfg.adx_dilen, cfg.adx_adxlen)["adx"].to_numpy(), cfg.adx_key_level
+    )
     return align_closed_flags(low.index, flags, bars.index, timeframe, cfg.timeframe)
 
 
-def build_adx_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:
+def build_adx_exit(
+    raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config
+) -> np.ndarray | None:
     """Salida ADX combinando con OR todos los ``cfg.adx_timeframes``.
 
     Devuelve ``None`` si no se pudo calcular ninguno (deshabilitado, sin datos
@@ -143,24 +230,33 @@ def build_adx_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Option
     return spread_flags(combined, cfg.adx_exit_range)
 
 
-def _weakening_exit_flags(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config,
-                          timeframe: str) -> Optional[np.ndarray]:
+def _weakening_exit_flags(
+    raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config, timeframe: str
+) -> np.ndarray | None:
     """Flags de weakening para un único timeframe, alineadas a ``bars``."""
-    if pd.Timedelta(timeframe) == pd.Timedelta(cfg.timeframe) or pd.Timedelta(minutes=source_minutes(raw)) >= pd.Timedelta(timeframe):
+    if pd.Timedelta(timeframe) == pd.Timedelta(cfg.timeframe) or pd.Timedelta(
+        minutes=source_minutes(raw)
+    ) >= pd.Timedelta(timeframe):
         source_bars, source_tf = bars, cfg.timeframe
     else:
         source_bars, source_tf = resample_ohlcv(raw, timeframe), timeframe
     if len(source_bars) < cfg.ema_slow + 2:
         return None
-    flags = ema_weakening_flags(ema(source_bars.close, cfg.ema_fast).to_numpy(),
-                                ema(source_bars.close, cfg.ema_slow).to_numpy(),
-                                cfg.ema_weakening_gap_pct)
+    flags = ema_weakening_flags(
+        ema(source_bars.close, cfg.ema_fast).to_numpy(),
+        ema(source_bars.close, cfg.ema_slow).to_numpy(),
+        cfg.ema_weakening_gap_pct,
+    )
     if source_bars.index.equals(bars.index):
         return flags
-    return align_closed_flags(source_bars.index, flags, bars.index, source_tf, cfg.timeframe)
+    return align_closed_flags(
+        source_bars.index, flags, bars.index, source_tf, cfg.timeframe
+    )
 
 
-def build_weakening_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> Optional[np.ndarray]:
+def build_weakening_exit(
+    raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config
+) -> np.ndarray | None:
     """Salida EMA weakening combinando con OR todos los ``cfg.ema_weakening_timeframes``.
 
     Devuelve ``None`` si no se pudo calcular ninguno (deshabilitado, sin datos
@@ -171,7 +267,7 @@ def build_weakening_exit(raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config) -> 
         return None
     combined = np.zeros(len(bars), dtype=bool)
     built = False
-    for timeframe in (cfg.ema_weakening_timeframes or (cfg.timeframe,)):
+    for timeframe in cfg.ema_weakening_timeframes or (cfg.timeframe,):
         flags = _weakening_exit_flags(raw, bars, cfg, timeframe)
         if flags is None:
             continue

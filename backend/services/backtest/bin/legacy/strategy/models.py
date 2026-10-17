@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 import pandas as pd
+
 
 @dataclass
 class Position:

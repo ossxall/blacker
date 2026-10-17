@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-import random
 
 import numpy as np
 import pandas as pd
@@ -39,7 +39,7 @@ def position_stats(pos: pd.DataFrame) -> dict:
         streak = streak + 1 if value < 0 else 0
         best = max(best, streak)
     r = pos.r_multiple.dropna()
-    return {"positions": int(len(pnl)), "wins": int((pnl > 0).sum()), "losses": int((pnl < 0).sum()),
+    return {"positions": len(pnl), "wins": int((pnl > 0).sum()), "losses": int((pnl < 0).sum()),
             "win_rate_pct": float((pnl > 0).mean() * 100), "profit_factor": gp / gl if gl else None,
             "net_pnl": float(pnl.sum()), "avg_pnl": float(pnl.mean()),
             "expectancy_r": float(r.mean()) if len(r) else None, "max_consecutive_losses": int(best)}
@@ -84,7 +84,7 @@ def calculate_metrics(trades: pd.DataFrame, equity: pd.DataFrame, capital: float
             "max_dd_peak_vs_capital_pct": peak_pct, "max_dd_trough_vs_capital_pct": trough_pct,
             "min_equity": min_eq, "min_equity_vs_capital_pct": min_pct,
             "return_over_maxdd": (net / capital * 100) / abs(max_dd) if max_dd < 0 else None,
-            "sharpe_daily_365": sharpe, "sortino_daily_365": sortino, "legs": int(len(trades)), **stats}
+            "sharpe_daily_365": sharpe, "sortino_daily_365": sortino, "legs": len(trades), **stats}
 
 
 def jsonable(obj):
@@ -102,7 +102,7 @@ def dataset_quality(data: pd.DataFrame) -> dict:
     delta = data.index.to_series().diff().dropna().dt.total_seconds() / 60
     median = float(delta.median())
     gaps = delta[delta > median]
-    return {"bars": int(len(data)), "gaps_gt_1bar": int(len(gaps)),
+    return {"bars": len(data), "gaps_gt_1bar": len(gaps),
             "max_gap_minutes": float(gaps.max()) if len(gaps) else median}
 
 

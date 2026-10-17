@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 import pandas as pd
 
 
@@ -36,10 +38,35 @@ class Config:
     entry_adx_len: int = 14
     entry_adx_min: float = 20.0
 
+    # Filtro de tendencia de timeframe superior (HTF). Solo se permite la
+    # entrada si la tendencia de `entry_htf_trend_timeframe` coincide con el
+    # lado del cruce. La tendencia del HTF se mide con la EMA rápida y lenta de
+    # la estrategia (`ema_fast`/`ema_slow`, por defecto EMA55/EMA200) sobre las
+    # velas del HTF. Evita operar contra la tendencia mayor, que es el patrón
+    # que más entradas falsas genera. Desactivado por defecto.
+    entry_htf_trend_enabled: bool = True
+    entry_htf_trend_timeframe: str = "1D"
+
+    # Filtro "no perseguir": descarta entradas cuando el precio ya está
+    # demasiado extendido respecto a la EMA lenta, en la dirección del cruce
+    # (LONG: close por encima; SHORT: close por debajo). `0` desactiva el
+    # filtro; p. ej. 0.04 descarta entradas a más de un 4% de la EMA lenta.
+    entry_max_dist_slow_pct: float = 0.0
+
+    # Filtro de volatilidad nativo del timeframe de la estrategia (30min):
+    # descarta la entrada cuando el ATR relativo (ATR/close) alcanza
+    # `entry_atr_max_pct`. Con `stop_loss_pct=0.01` (stop del 1%), un valor de
+    # 0.01 evita entrar cuando el ruido de una sola vela ya iguala el stop, que
+    # es el patrón de las entradas falsas rápidas (el precio revierte y toca el
+    # stop en 1-2 velas). Un valor menor (p. ej. 0.008) filtra más pero recorta
+    # más retorno; `0` desactiva el filtro.
+    entry_atr_max_pct: float = 0.0
+    entry_atr_len: int = 14
+
     adx_exit_enabled: bool = True
     # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
     # ["1D", "30min"]; la salida ADX se dispara si hay reversión en cualquiera.
-    adx_timeframe: str | list[str] | tuple[str, ...] = ("1D")
+    adx_timeframe: str | list[str] | tuple[str, ...] = "1D"
     # Ventana (en velas del timeframe de la estrategia) durante la cual una
     # reversión ADX mantiene activada la salida.
     adx_exit_range: int = 9
@@ -63,7 +90,7 @@ class Config:
     # stop-loss consecutivos) a cambio de recortar parte del retorno.
     partial_tp_enabled: bool = True
     partial_tp_r: float = 1.0
-    partial_tp_pct: float = 50.0
+    partial_tp_pct: float = 25.0
     move_stop_to_breakeven: bool = True
 
     # Salida si el precio toca la EMA slow después de una entrada por cross EMA.
@@ -75,11 +102,21 @@ class Config:
     # (100 = cierre total; < 100 = salida parcial, una sola vez por posición).
     close_on_ema_slow_touch: bool = True
     close_on_ema_slow_touch_pct: float = 0.1  # Tolerancia en % (0.10 = 0.10%)
-    close_on_ema_slow_touch_after: bool = False  # False = antes del toque; True = después
-    close_on_ema_slow_touch_exit_pct: float = 50.0  # % de la posición a cerrar en el toque
+    close_on_ema_slow_touch_after: bool = (
+        False  # False = antes del toque; True = después
+    )
+    close_on_ema_slow_touch_exit_pct: float = (
+        25.0  # % de la posición a cerrar en el toque
+    )
+    # Throttle de riesgo por racha de pérdidas / drawdown de equity.
+    # Cuando se cumplen las condiciones, el riesgo por operación se multiplica
+    # por el factor correspondiente (0 = no entrar).
+    risk_throttle_streak_k: int = 1
+    risk_throttle_streak_scale: float = 0.75
+    risk_throttle_dd_pct: float = 5.0
+    risk_throttle_dd_scale: float = 0.75
 
     force_close_at_end: bool = True
-    timestamp_is_close: bool = False
 
     @property
     def adx_timeframes(self) -> tuple[str, ...]:
@@ -114,8 +151,23 @@ class Config:
             raise ValueError("Comisiones, slippage y stop no pueden ser negativos.")
         if self.confirm_bars < 0:
             raise ValueError("confirm_bars no puede ser negativo.")
-        if self.entry_adx_enabled and (self.entry_adx_len <= 0 or self.entry_adx_min < 0):
+        if self.entry_adx_enabled and (
+            self.entry_adx_len <= 0 or self.entry_adx_min < 0
+        ):
             raise ValueError("Configuración de ADX de entrada inválida.")
+        if self.entry_htf_trend_enabled:
+            if pd.Timedelta(self.entry_htf_trend_timeframe) < pd.Timedelta(
+                self.timeframe
+            ):
+                raise ValueError("entry_htf_trend_timeframe debe ser >= timeframe.")
+        if self.entry_max_dist_slow_pct < 0:
+            raise ValueError("entry_max_dist_slow_pct no puede ser negativo.")
+        if self.entry_atr_max_pct < 0:
+            raise ValueError("entry_atr_max_pct no puede ser negativo.")
+        if self.entry_atr_max_pct > 0 and self.entry_atr_len <= 0:
+            raise ValueError(
+                "entry_atr_len debe ser > 0 si entry_atr_max_pct está activo."
+            )
         if self.adx_exit_enabled:
             if min(self.adx_dilen, self.adx_adxlen) <= 0 or self.adx_key_level < 0:
                 raise ValueError("Configuración de ADX de salida inválida.")
@@ -124,7 +176,10 @@ class Config:
             if self.adx_exit_range < 1:
                 raise ValueError("adx_exit_range debe ser >= 1.")
         if self.ema_weakening_exit_enabled:
-            if self.ema_weakening_gap_pct <= 0 or not 0 < self.ema_weakening_exit_pct <= 100:
+            if (
+                self.ema_weakening_gap_pct <= 0
+                or not 0 < self.ema_weakening_exit_pct <= 100
+            ):
                 raise ValueError("Configuración de weakening inválida.")
         if self.partial_tp_enabled:
             if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:
@@ -133,6 +188,16 @@ class Config:
             if self.close_on_ema_slow_touch_pct < 0:
                 raise ValueError("close_on_ema_slow_touch_pct debe ser >= 0.")
             if not 0 < self.close_on_ema_slow_touch_exit_pct <= 100:
-                raise ValueError("close_on_ema_slow_touch_exit_pct debe estar en (0, 100].")
+                raise ValueError(
+                    "close_on_ema_slow_touch_exit_pct debe estar en (0, 100]."
+                )
         if not (self.allow_long or self.allow_short):
             raise ValueError("Debe habilitarse LONG, SHORT o ambos.")
+        if self.risk_throttle_streak_k < 0:
+            raise ValueError("risk_throttle_streak_k debe ser >= 0.")
+        if not 0 <= self.risk_throttle_streak_scale <= 1:
+            raise ValueError("risk_throttle_streak_scale debe estar en [0, 1].")
+        if self.risk_throttle_dd_pct < 0:
+            raise ValueError("risk_throttle_dd_pct debe ser >= 0.")
+        if not 0 <= self.risk_throttle_dd_scale <= 1:
+            raise ValueError("risk_throttle_dd_scale debe estar en [0, 1].")
