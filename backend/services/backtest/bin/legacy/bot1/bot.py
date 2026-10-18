@@ -248,6 +248,13 @@ _CONFIG_ENV = {
     "ema_weakening_gap_pct": ("STRATEGY_EMA_WEAKENING_GAP_PCT", env_float),
     "ema_weakening_exit_pct": ("STRATEGY_EMA_WEAKENING_EXIT_PCT", env_float),
     "timestamp_is_close": ("STRATEGY_TIMESTAMP_IS_CLOSE", env_bool),
+    # Entrada parcial + confirmación (scale-in)
+    "entry_partial_enabled": ("STRATEGY_ENTRY_PARTIAL", env_bool),
+    "entry_partial_pct": ("STRATEGY_ENTRY_PARTIAL_PCT", env_float),
+    "entry_confirm_mode": ("STRATEGY_ENTRY_CONFIRM_MODE", env_str),
+    "entry_confirm_bars": ("STRATEGY_ENTRY_CONFIRM_BARS", env_int),
+    "entry_confirm_close_in_dir": ("STRATEGY_ENTRY_CONFIRM_CLOSE_IN_DIR", env_bool),
+    "entry_confirm_retest_tol_pct": ("STRATEGY_ENTRY_CONFIRM_RETEST_TOL_PCT", env_float),
 }
 
 
@@ -574,6 +581,7 @@ def build_events(
     open_pos = engine.position
     entries: dict[int, tuple] = {}              # position_id -> (side, time, price)
     legs: dict[int, list] = {}                  # position_id -> tramos de cierre
+    entry_meta: dict[int, float] = {}           # position_id -> % del objetivo en 1ª entrada
     for trade in engine.trades:
         entries.setdefault(trade.position_id, (trade.side, trade.entry_time, trade.entry_price))
         legs.setdefault(trade.position_id, []).append(trade)
@@ -582,35 +590,79 @@ def build_events(
             open_pos.position_id,
             ("LONG" if open_pos.side == 1 else "SHORT", open_pos.entry_time, open_pos.entry_price),
         )
+    for opened in engine.opened:
+        entries.setdefault(
+            op_id := op["position_id"],  # noqa: F821
+        ) if False else None
+    # El precio/tiempo de entrada real (con precio medio ponderado tras los adds)
+    # y el % del objetivo entrado en la primera fase salen del propio motor.
+    for op in getattr(engine, "opened", []):
+        pid = op["position_id"]
+        entries[pid] = (
+            "LONG" if op["side"] == 1 else "SHORT", op["time"],
+            # Si hubo adds, la entrada media está en los tramos de cierre; si no,
+            # se usa el precio de la primera entrada.
+            entries.get(pid, (None, None, op["price"]))[2] or op["price"],
+        )
+        entry_pct = {pid: op["entry_pct"]}
 
     events: list[dict] = []
 
     # --- Aperturas: una por posición (cerrada o todavía abierta) ---
-    for position_id in sorted(entries):
-        side, entry_time, entry_price = entries[position_id]
+    for pid in sorted(entries):
+        side, entry_time, entry_price = entries[pid]
         signal_time = ts_ms(entry_time)
         events.append(
             make_event(
                 "ENTRY", side, "EMA_CROSS", signal_time - tf_ms, signal_time,
-                entry_price, {"action": "OPEN", "position_id": position_id},
+                entry_price,
+                {
+                    "action": "OPEN",
+                    "position_id": pid,
+                    "entry_pct": float(entry_pct.get(pid, 100.0)),
+                },
+            )
+        )
+
+    # --- Añadidos de entrada parcial (scale-in): completan la posición ---
+    for add in getattr(engine, "adds", []):
+        pid = add["position_id"]
+        side = "LONG" if add["side"] == 1 else "SHORT"
+        signal_time = ts_ms(add["time"])
+        target = add.get("target_quantity") or 0.0
+        add_pct = 100.0 * add["quantity"] / target if target else 100.0
+        events.append(
+            make_event(
+                "ENTRY_ADD", side, "ENTRY_ADD", signal_time - tf_ms, signal_time,
+                add["price"],
+                {
+                    "action": "ADD",
+                    "position_id": pid,
+                    "add_pct": add_pct,
+                    "add_price": opt_float(add["price"]),
+                },
             )
         )
 
     # --- Cierres: un evento por cada tramo ejecutado por el backtest ---
     for position_id in sorted(legs):
-        # En una posición cerrada la suma de tramos es la cantidad inicial; en
-        # una todavía abierta (con parciales) se toma del propio motor.
-        if open_pos is not None and open_pos.position_id == position_id and open_pos.initial_quantity:
-            remaining = open_pos.initial_quantity
+        # Cantidad realmente llenada: suma de tramos cerrados + lo que sigue
+        # abierto (con `target_quantity` puede haber un add aún no ejecutado).
+        if open_pos is not None and open_pos.position_id == position_id:
+            filled = sum(leg.quantity for leg in legs[position_id]) + open_pos.quantity
+            remaining_total = open_pos.target_quantity or open_pos.initial_quantity
+            if remaining_total <= 0:
+                remaining_total = filled
         else:
-            remaining = sum(leg.quantity for leg in legs[position_id])
+            filled = sum(leg.quantity for leg in legs[position_id])
+            remaining_total = filled
 
         for leg in legs[position_id]:
             signal_time = ts_ms(leg.exit_time)
             bar_time = signal_time if _reason_is_intrabar(leg.reason) else signal_time - tf_ms
             # El backtest cierra un porcentaje de la posición *restante*; es el
             # que debe aplicar el consumidor sobre su posición.
-            close_pct = 100.0 * leg.quantity / remaining if remaining else 100.0
+            close_pct = 100.0 * leg.quantity / remaining_total if remaining_total else 100.0
             r_multiple = leg.pnl_net / leg.position_risk if leg.position_risk else None
             events.append(
                 make_event(
@@ -625,7 +677,7 @@ def build_events(
                     },
                 )
             )
-            remaining -= leg.quantity
+            remaining_total -= leg.quantity
 
     return events
 

@@ -17,6 +17,14 @@ class Position:
     partial_done: bool = False
     partial2_done: bool = False
     touch_done: bool = False
+    # --- Entrada parcial + confirmación (scale-in) --------------------------
+    # target_quantity = 0 -> modo clásico (entrada completa)
+    target_quantity: float = 0.0        # Cantidad total objetivo planeada
+    partial_entry_done: bool = False    # True si el scale-in está completo
+    entry_partial_pct: float = 100.0    # % del objetivo cubierto en 1ª entrada
+    entry_bar_index: int = -1           # Índice de barra donde se hizo la 1ª entrada
+    last_add_price: float = 0.0         # Precio del último add
+    add_count: int = 0                  # Número de adds realizados
 
 
 @dataclass

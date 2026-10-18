@@ -209,7 +209,11 @@ class Backtester:
         self.position: Optional[Position] = None
         self.pending_target: Optional[int] = None
         self.pending_exit: Optional[tuple[str, float]] = None
+        self.pending_add: Optional[tuple[int, float]] = None  # (bar_index_a_ejecutar, % de lo que falta)
         self.trades: list[Trade] = []
+        # Aperturas y añadidos de entrada parcial (scale-in) para reportar/públicar.
+        self.opened: list[dict] = []
+        self.adds: list[dict] = []
         self.trade_id = self.position_id = 0
         self.eq_time, self.eq_cash, self.eq_value, self.eq_side, self.eq_qty = [], [], [], [], []
         # Protección de riesgo: estado del límite mensual, de la pausa por
@@ -237,24 +241,64 @@ class Backtester:
         stop_exec = self._price(self._stop_price(side, entry, pct), -side)
         return abs(stop_exec - entry) + (entry + abs(stop_exec)) * self.cfg.commission_bps / 10_000
 
-    def open_position(self, side: int, raw_price: float, ts: pd.Timestamp):
+    def open_position(self, side: int, raw_price: float, ts: pd.Timestamp, partial_pct: float = 100.0):
         if self.position is not None or self.cash <= 0:
             return
         price = self._price(raw_price, side)
         if not np.isfinite(price) or price <= 0:
             return
-        pct = self.cfg.stop_loss_pct
-        risk_unit = self._risk_per_unit(side, price, pct) if pct > 0 else 0.0
+        pct_sl = self.cfg.stop_loss_pct
+        risk_unit = self._risk_per_unit(side, price, pct_sl) if pct_sl > 0 else 0.0
         by_risk = self.cash * self.cfg.risk_pct * self._risk_multiplier() / risk_unit if risk_unit > 0 else np.inf
         by_lev = self.cash * self.cfg.max_leverage / price
-        qty = min(by_risk, by_lev)
-        if not np.isfinite(qty) or qty <= 0:
+        qty_total = min(by_risk, by_lev)
+        if not np.isfinite(qty_total) or qty_total <= 0:
             return
-        fee = self._fee(price * qty)
+        if partial_pct >= 99.999:
+            qty_init = qty_total
+            target_q = 0.0
+            pe_done = True
+            ep_pct = 100.0
+        else:
+            if not (0 < partial_pct < 100):
+                qty_init = qty_total
+                target_q = 0.0
+                pe_done = True
+                ep_pct = 100.0
+            else:
+                qty_init = qty_total * partial_pct / 100.0
+                target_q = qty_total
+                pe_done = False
+                ep_pct = partial_pct
+        fee = self._fee(price * qty_init)
         self.cash -= fee
         self.position_id += 1
         self._position_pnl = 0.0
-        self.position = Position(self.position_id, side, qty, qty, price, ts, fee, pct, qty * risk_unit)
+        self.position = Position(
+            position_id=self.position_id,
+            side=side,
+            quantity=qty_init,
+            initial_quantity=qty_total,  # total objetivo (coherente con prorrateo de fees)
+            entry_price=price,
+            entry_time=ts,
+            entry_fee=fee,
+            stop_pct=pct_sl,
+            risk_amount=qty_total * risk_unit if risk_unit > 0 else 0.0,
+            breakeven=False,
+            partial_done=False,
+            partial2_done=False,
+            touch_done=False,
+            target_quantity=target_q,
+            partial_entry_done=pe_done,
+            entry_partial_pct=ep_pct,
+            entry_bar_index=self._bar_index,
+            last_add_price=price if qty_init >= qty_total else 0.0,
+            add_count=0,
+        )
+        self.opened.append({
+            "position_id": self.position_id, "time": ts, "price": price, "side": side,
+            "quantity": qty_init, "entry_pct": ep_pct, "target_quantity": target_q or qty_total,
+        })
 
     def close_position(self, percent: float, raw_price: float, ts: pd.Timestamp, reason: str):
         pos = self.position
@@ -462,11 +506,118 @@ class Backtester:
         if self.verbose: print(f"[STOP] {self.times[i]} fill={fill:.8f}", flush=True)
         return True
 
+    def add_position(self, percent_of_remaining: float, raw_price: float, ts: pd.Timestamp):
+        """Añade a la posición abierta. `percent_of_remaining` % de lo que falta
+        para alcanzar `target_quantity` (respecto al restante)."""
+        pos = self.position
+        if pos is None:
+            return
+        if not 0 < percent_of_remaining <= 100:
+            raise ValueError("percent_of_remaining debe estar en (0, 100]")
+        if pos.target_quantity <= 0:
+            pos.partial_entry_done = True
+            return
+        remaining_target = pos.target_quantity - pos.quantity
+        if remaining_target <= 1e-12:
+            pos.quantity = max(pos.quantity, pos.target_quantity)
+            pos.target_quantity = pos.quantity
+            pos.partial_entry_done = True
+            return
+        qty_add = remaining_target * percent_of_remaining / 100.0
+        if qty_add <= 1e-12:
+            return
+        side = pos.side
+        price = self._price(raw_price, side)
+        if not np.isfinite(price) or price <= 0:
+            return
+        fee_add = self._fee(price * qty_add)
+        self.cash -= fee_add
+        total_qty_new = pos.quantity + qty_add
+        if total_qty_new > 0:
+            pos.entry_price = (pos.entry_price * pos.quantity + price * qty_add) / total_qty_new
+        pos.quantity = total_qty_new
+        pos.entry_fee += fee_add
+        pos.add_count += 1
+        pos.last_add_price = price
+        self.adds.append({
+            "position_id": pos.position_id, "time": ts, "price": price,
+            "quantity": qty_add, "target_quantity": pos.target_quantity, "side": pos.side,
+        })
+        if pos.quantity >= pos.target_quantity - 1e-12:
+            pos.quantity = pos.target_quantity
+            pos.partial_entry_done = True
+
+    def _should_add_partial(self, i: int) -> bool:
+        pos = self.position
+        if pos is None or pos.target_quantity <= 0:
+            return False
+        if pos.partial_entry_done:
+            return False
+        if pos.quantity >= pos.target_quantity - 1e-12:
+            pos.partial_entry_done = True
+            return False
+        cfg = self.cfg
+        if cfg.entry_confirm_mode == "bars":
+            bars_passed = i - pos.entry_bar_index
+            if bars_passed < cfg.entry_confirm_bars:
+                return False
+            if cfg.entry_confirm_close_in_dir:
+                if pos.side == 1:
+                    if self.c[i] < pos.entry_price - 1e-12:
+                        return False
+                else:
+                    if self.c[i] > pos.entry_price + 1e-12:
+                        return False
+            return True
+        elif cfg.entry_confirm_mode == "close_above_ema":
+            if self.signals is None:
+                return False
+            if "ema_fast" not in self.signals.columns or "ema_slow" not in self.signals.columns:
+                return False
+            ef = float(self.signals["ema_fast"].iloc[i])
+            es = float(self.signals["ema_slow"].iloc[i])
+            if not (np.isfinite(ef) and np.isfinite(es)):
+                return False
+            if pos.side == 1:
+                if self.c[i] > ef and self.c[i] > es:
+                    return True
+            else:
+                if self.c[i] < ef and self.c[i] < es:
+                    return True
+            return False
+        elif cfg.entry_confirm_mode == "pullback_retest":
+            if self.signals is None:
+                return False
+            if "ema_slow" not in self.signals.columns:
+                return False
+            es = float(self.signals["ema_slow"].iloc[i])
+            if not np.isfinite(es) or es <= 0:
+                return False
+            tol = max(cfg.entry_confirm_retest_tol_pct, 0.0) / 100.0
+            if pos.side == 1:
+                if self.c[i] > es and self.c[i] >= self.o[i]:
+                    if self.l[i] <= es * (1 + tol * 0.25):
+                        return True
+                    if i - pos.entry_bar_index >= 1:
+                        return self.c[i] > es
+            else:
+                if self.c[i] < es and self.c[i] <= self.o[i]:
+                    if self.h[i] >= es * (1 - tol * 0.25):
+                        return True
+                    if i - pos.entry_bar_index >= 1:
+                        return self.c[i] < es
+            return False
+        return False
+
     def _execute_target(self, i: int, target: int):
         if self.position is not None and self.position.side != target:
             self.close_position(100, self.o[i], self.times[i], CROSS_REASON)
         if self.position is None:
-            self.open_position(target, self.o[i], self.times[i])
+            if self.cfg.entry_partial_enabled:
+                partial_pct = self.cfg.entry_partial_pct
+            else:
+                partial_pct = 100.0
+            self.open_position(target, self.o[i], self.times[i], partial_pct=partial_pct)
 
     def _equity_value(self, close: float) -> float:
         """Equity mark-to-market al precio ``close`` (caja + posición a precio de liquidación)."""
@@ -508,6 +659,14 @@ class Backtester:
                 month_key = key
                 self.halt_until = None
                 month_start_equity = self._equity_value(self.c[i - 1]) if i else cfg.initial_capital
+            # 1) Ejecutar add pendiente (decidido al cierre de vela anterior)
+            if self.pending_add is not None:
+                exec_i, pct_rem = self.pending_add
+                if exec_i == i:
+                    self.add_position(pct_rem, self.o[i], self.times[i])
+                    self.pending_add = None
+
+            # 2) Ejecutar target/exit pendientes (decididos al cierre anterior)
             if self.pending_target is not None:
                 self._execute_target(i, self.pending_target)
                 self.pending_target = None
@@ -517,12 +676,19 @@ class Backtester:
                 self.close_position(pct, self.o[i], self.times[i], reason)
                 self.pending_exit = None
 
+            # 3) Gestión de stops y TP parciales
             stop_hit = self._stop(i, self._ema_slow_touch_level(i))
             if not stop_hit:
                 # Tras una salida parcial por toque a la EMA slow, si la vela
                 # también recorrió hasta el stop, se cierra el resto al stop.
                 if self._manage(i) and self.position is not None:
                     stop_hit = self._stop(i)
+
+            # 4) Añadir entrada parcial pendiente (scale-in) — decidido al cierre de i
+            if not stop_hit and self.position is not None and self.cfg.entry_partial_enabled:
+                if self._should_add_partial(i):
+                    # Ejecutar resto completo en apertura de i+1
+                    self.pending_add = (i + 1, 100.0)
 
             # Límite de pérdida mensual: si la equity cae por debajo del umbral
             # respecto al inicio del mes, se protege el mes completo (se cierra
@@ -625,6 +791,21 @@ def parse_args():
     p.add_argument("--partial-tp2-r", type=float, default=d.partial_tp2_r)
     p.add_argument("--partial-tp2-pct", type=float, default=d.partial_tp2_pct)
     p.add_argument("--breakeven-stop", action=argparse.BooleanOptionalAction, default=d.move_stop_to_breakeven)
+    # Entrada parcial + confirmación
+    p.add_argument("--entry-partial", action=argparse.BooleanOptionalAction, default=d.entry_partial_enabled,
+                   help="Activa/desactiva entrada parcial 50%%/50%% (scale-in) con lógica de confirmación (por defecto activado).")
+    p.add_argument("--entry-partial-pct", type=float, default=d.entry_partial_pct,
+                   help="%% de la posición a entrar en la primera fase (default 50).")
+    p.add_argument("--entry-confirm-mode", choices=("bars", "close_above_ema", "pullback_retest"),
+                   default=d.entry_confirm_mode,
+                   help="Modo de confirmación para añadir el resto (default 'bars').")
+    p.add_argument("--entry-confirm-bars", type=int, default=d.entry_confirm_bars,
+                   help="Velas tras entrada parcial antes de confirmar (modo 'bars', default 2).")
+    p.add_argument("--entry-confirm-close-in-dir", action=argparse.BooleanOptionalAction,
+                   default=d.entry_confirm_close_in_dir,
+                   help="Exige cierre en dirección para confirmar (modo 'bars').")
+    p.add_argument("--entry-confirm-retest-tol-pct", type=float, default=d.entry_confirm_retest_tol_pct,
+                   help="Tolerancia %% para pullback_retest (default 0.10%%).")
     p.add_argument("--close-on-ema-slow-touch", action=argparse.BooleanOptionalAction, default=d.close_on_ema_slow_touch)
     p.add_argument("--close-on-ema-slow-touch-pct", type=float, default=d.close_on_ema_slow_touch_pct,
                    help="Tolerancia en %% alrededor de la EMA slow (0.10 = 0.10%%).")
@@ -690,6 +871,12 @@ def config_from_args(a) -> Config:
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
         partial_tp2_r=a.partial_tp2_r, partial_tp2_pct=a.partial_tp2_pct,
         move_stop_to_breakeven=a.breakeven_stop,
+        entry_partial_enabled=a.entry_partial,
+        entry_partial_pct=a.entry_partial_pct,
+        entry_confirm_mode=a.entry_confirm_mode,
+        entry_confirm_bars=a.entry_confirm_bars,
+        entry_confirm_close_in_dir=a.entry_confirm_close_in_dir,
+        entry_confirm_retest_tol_pct=a.entry_confirm_retest_tol_pct,
         close_on_ema_slow_touch=a.close_on_ema_slow_touch,
         close_on_ema_slow_touch_pct=a.close_on_ema_slow_touch_pct,
         close_on_ema_slow_touch_after=a.close_on_ema_slow_touch_after,

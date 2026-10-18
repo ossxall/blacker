@@ -83,6 +83,16 @@ class Config:
     close_on_ema_slow_touch_after: bool = False  # False = antes del toque; True = después
     close_on_ema_slow_touch_exit_pct: float = 50.0  # % de la posición a cerrar en el toque
 
+    # --- Entrada parcial + confirmación (scale-in) --------------------------
+    # Abre `entry_partial_pct` % de la posición en la señal y añade el resto
+    # cuando se cumpla `entry_confirm_mode`. Activado por defecto (50%/50%).
+    entry_partial_enabled: bool = True
+    entry_partial_pct: float = 50.0        # % inicial (0 < pct < 100)
+    entry_confirm_mode: str = "bars"       # "bars" | "close_above_ema" | "pullback_retest"
+    entry_confirm_bars: int = 2            # Nº de velas tras entrada parcial
+    entry_confirm_close_in_dir: bool = True  # Exige cierre en dirección tras confirmación (modo bars)
+    entry_confirm_retest_tol_pct: float = 0.10  # Tolerancia % para pullback_retest
+
     # --- Filtro de régimen -------------------------------------------------
     # Sólo se admiten entradas alineadas con la tendencia del timeframe
     # superior `trend_timeframe`:
@@ -212,6 +222,15 @@ class Config:
                 raise ValueError("close_on_ema_slow_touch_pct debe ser >= 0.")
             if not 0 < self.close_on_ema_slow_touch_exit_pct <= 100:
                 raise ValueError("close_on_ema_slow_touch_exit_pct debe estar en (0, 100].")
+        if self.entry_partial_enabled:
+            if not (0 < self.entry_partial_pct < 100):
+                raise ValueError("entry_partial_pct debe estar en (0, 100).")
+            if self.entry_confirm_mode not in ("bars", "close_above_ema", "pullback_retest"):
+                raise ValueError("entry_confirm_mode debe ser 'bars', 'close_above_ema' o 'pullback_retest'.")
+            if self.entry_confirm_bars < 0:
+                raise ValueError("entry_confirm_bars no puede ser negativo.")
+            if self.entry_confirm_retest_tol_pct < 0:
+                raise ValueError("entry_confirm_retest_tol_pct no puede ser negativo.")
         if not (self.allow_long or self.allow_short):
             raise ValueError("Debe habilitarse LONG, SHORT o ambos.")
         if self.trend_filter not in ("off", "cross", "slow"):
