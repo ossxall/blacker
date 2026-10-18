@@ -227,6 +227,8 @@ _CONFIG_ENV = {
     "partial_tp_enabled": ("STRATEGY_PARTIAL_TP", env_bool),
     "partial_tp_r": ("STRATEGY_PARTIAL_TP_R", env_float),
     "partial_tp_pct": ("STRATEGY_PARTIAL_TP_PCT", env_float),
+    "partial_tp2_r": ("STRATEGY_PARTIAL_TP2_R", env_float),
+    "partial_tp2_pct": ("STRATEGY_PARTIAL_TP2_PCT", env_float),
     "move_stop_to_breakeven": ("STRATEGY_MOVE_STOP_TO_BREAKEVEN", env_bool),
     # Cierre por toque a la EMA slow (misma lógica que el backtest).
     "close_on_ema_slow_touch": ("STRATEGY_CLOSE_ON_EMA_SLOW_TOUCH", env_bool),

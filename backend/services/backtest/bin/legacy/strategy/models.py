@@ -15,6 +15,7 @@ class Position:
     risk_amount: float
     breakeven: bool = False
     partial_done: bool = False
+    partial2_done: bool = False
     touch_done: bool = False
 
 

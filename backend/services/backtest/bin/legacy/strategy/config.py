@@ -63,7 +63,12 @@ class Config:
     # stop-loss consecutivos) a cambio de recortar parte del retorno.
     partial_tp_enabled: bool = True
     partial_tp_r: float = 1.0
-    partial_tp_pct: float = 50.0
+    partial_tp_pct: float = 25.0
+    # Second partial take-profit (optional). If enabled (>0), it triggers at
+    # partial_tp2_r (R-multiple of initial risk) closing partial_tp2_pct of
+    # the position. Partial 2 is intended to be at larger distance than TP1.
+    partial_tp2_r: float = 2.0
+    partial_tp2_pct: float = 25.0
     move_stop_to_breakeven: bool = True
 
     # Salida si el precio toca la EMA slow después de una entrada por cross EMA.
@@ -197,6 +202,11 @@ class Config:
         if self.partial_tp_enabled:
             if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:
                 raise ValueError("Configuración de take-profit parcial inválida.")
+        if self.partial_tp2_r > 0 or self.partial_tp2_pct > 0:
+            if self.partial_tp2_r <= 0 or not 0 < self.partial_tp2_pct <= 100:
+                raise ValueError("Configuración de take-profit parcial 2 inválida.")
+            if self.partial_tp2_r <= self.partial_tp_r:
+                raise ValueError("partial_tp2_r debe ser mayor que partial_tp_r.")
         if self.close_on_ema_slow_touch:
             if self.close_on_ema_slow_touch_pct < 0:
                 raise ValueError("close_on_ema_slow_touch_pct debe ser >= 0.")

@@ -410,22 +410,35 @@ class Backtester:
             return False
         if self._ema_slow_touch(i):
             return True
-        if not cfg.partial_tp_enabled or pos.partial_done:
+        if not cfg.partial_tp_enabled:
             return False
         risk_unit = self._risk_unit(pos)
         if risk_unit <= 0:
             return False
-        trigger = pos.entry_price + pos.side * cfg.partial_tp_r * risk_unit
-        hit = self.h[i] >= trigger if pos.side == 1 else self.l[i] <= trigger
-        if not hit:
-            return False
-        fill = max(trigger, self.o[i]) if pos.side == 1 else min(trigger, self.o[i])
-        self.close_position(cfg.partial_tp_pct, fill, self.times[i], f"PARTIAL_TP_{cfg.partial_tp_r:g}R")
-        pos = self.position
-        if pos is not None:
-            pos.partial_done = True
-            if cfg.move_stop_to_breakeven:
-                pos.breakeven = True
+        pos_after = pos
+        # TP2 primero si no hecho y trigger alcanzado (mayor distancia)
+        if cfg.partial_tp2_r > 0 and not pos.partial2_done:
+            trigger2 = pos.entry_price + pos.side * cfg.partial_tp2_r * risk_unit
+            hit2 = self.h[i] >= trigger2 if pos.side == 1 else self.l[i] <= trigger2
+            if hit2:
+                fill2 = max(trigger2, self.o[i]) if pos.side == 1 else min(trigger2, self.o[i])
+                self.close_position(cfg.partial_tp2_pct, fill2, self.times[i], f"PARTIAL_TP2_{cfg.partial_tp2_r:g}R")
+                pos_after = self.position
+                if pos_after is not None:
+                    pos_after.partial2_done = True
+                return False
+        # TP1
+        if not pos.partial_done:
+            trigger = pos.entry_price + pos.side * cfg.partial_tp_r * risk_unit
+            hit = self.h[i] >= trigger if pos.side == 1 else self.l[i] <= trigger
+            if hit:
+                fill = max(trigger, self.o[i]) if pos.side == 1 else min(trigger, self.o[i])
+                self.close_position(cfg.partial_tp_pct, fill, self.times[i], f"PARTIAL_TP_{cfg.partial_tp_r:g}R")
+                pos_after = self.position
+                if pos_after is not None:
+                    pos_after.partial_done = True
+                    if cfg.move_stop_to_breakeven:
+                        pos_after.breakeven = True
         return False
 
     def _stop(self, i: int, touch_level: Optional[float] = None) -> bool:
@@ -609,6 +622,8 @@ def parse_args():
     p.add_argument("--partial-tp", action=argparse.BooleanOptionalAction, default=d.partial_tp_enabled)
     p.add_argument("--partial-tp-r", type=float, default=d.partial_tp_r)
     p.add_argument("--partial-tp-pct", type=float, default=d.partial_tp_pct)
+    p.add_argument("--partial-tp2-r", type=float, default=d.partial_tp2_r)
+    p.add_argument("--partial-tp2-pct", type=float, default=d.partial_tp2_pct)
     p.add_argument("--breakeven-stop", action=argparse.BooleanOptionalAction, default=d.move_stop_to_breakeven)
     p.add_argument("--close-on-ema-slow-touch", action=argparse.BooleanOptionalAction, default=d.close_on_ema_slow_touch)
     p.add_argument("--close-on-ema-slow-touch-pct", type=float, default=d.close_on_ema_slow_touch_pct,
@@ -673,6 +688,7 @@ def config_from_args(a) -> Config:
         ema_weakening_exit_enabled=a.ema_weakening_exit, ema_weakening_timeframe=a.ema_weakening_timeframe,
         ema_weakening_gap_pct=a.ema_weakening_gap_pct, ema_weakening_exit_pct=a.ema_weakening_exit_pct,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
+        partial_tp2_r=a.partial_tp2_r, partial_tp2_pct=a.partial_tp2_pct,
         move_stop_to_breakeven=a.breakeven_stop,
         close_on_ema_slow_touch=a.close_on_ema_slow_touch,
         close_on_ema_slow_touch_pct=a.close_on_ema_slow_touch_pct,
