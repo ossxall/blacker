@@ -38,6 +38,8 @@ class Trade:
 
 TRADE_COLUMNS = list(Trade.__dataclass_fields__)
 CROSS_REASON = "EMA_CROSS_EXIT"
+#: Motivo de salida al superar el límite de pérdida mensual.
+MONTHLY_LIMIT_REASON = "MONTHLY_LOSS_LIMIT"
 DEFAULT_OUTPUT_DIR = "backtest_out"
 
 
