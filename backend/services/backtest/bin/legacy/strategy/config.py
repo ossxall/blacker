@@ -81,7 +81,7 @@ class Config:
     close_on_ema_slow_touch: bool = True
     close_on_ema_slow_touch_pct: float = 0.1  # Tolerancia en % (0.10 = 0.10%)
     close_on_ema_slow_touch_after: bool = False  # False = antes del toque; True = después
-    close_on_ema_slow_touch_exit_pct: float = 50.0  # % de la posición a cerrar en el toque
+    close_on_ema_slow_touch_exit_pct: float = 25.0  # % de la posición a cerrar en el toque
 
     # --- Entrada parcial + confirmación (scale-in) --------------------------
     # Abre `entry_partial_pct` % de la posición en la señal y añade el resto
