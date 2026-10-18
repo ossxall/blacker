@@ -17,12 +17,14 @@ import signal
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 import requests
 import websocket
+
 
 # ============================================================
 # CONFIGURACIÓN

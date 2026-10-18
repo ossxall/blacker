@@ -1,12 +1,10 @@
 from __future__ import annotations
-
-import time
 from pathlib import Path
-
+from typing import Optional
+from strategy.config import Config
+import time
 import numpy as np
 import pandas as pd
-
-from strategy.config import Config
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -62,7 +60,7 @@ def source_minutes(data: pd.DataFrame) -> float:
     return value if np.isfinite(value) and value > 0 else 1.0
 
 
-def resample_ohlcv(data: pd.DataFrame, rule: str, source_interval_minutes: float | None = None) -> pd.DataFrame:
+def resample_ohlcv(data: pd.DataFrame, rule: str, source_interval_minutes: Optional[float] = None) -> pd.DataFrame:
     """Resamplea OHLCV y descarta buckets con menos barras que las esperadas."""
     if data.empty:
         return data.copy()

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import concurrent.futures as futures
 import hashlib
 import os
 import re
@@ -35,10 +36,9 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Iterator, Sequence
-from concurrent import futures
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator, Sequence
 
 try:
     import requests
@@ -222,7 +222,8 @@ def download(url: str, dest: Path, size: int, retries: int) -> tuple[bool, str]:
                     have = 0
                 r.raise_for_status()
                 with open(part, "ab" if have else "wb") as fh:
-                    fh.writelines(r.iter_content(CHUNK))
+                    for chunk in r.iter_content(CHUNK):
+                        fh.write(chunk)
             if not size or part.stat().st_size == size:
                 break
         except (requests.RequestException, OSError) as exc:
