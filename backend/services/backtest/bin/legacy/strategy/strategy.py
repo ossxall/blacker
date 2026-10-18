@@ -925,6 +925,8 @@ def main():
         signals=signals,
         adx_exit=adx_exit,
         weak_exit=weak_exit,
+        opens=engine.opened,
+        adds=engine.adds,
     )
 
 
