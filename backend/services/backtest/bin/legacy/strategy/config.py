@@ -135,7 +135,7 @@ class Config:
     # o, si `monthly_loss_limit_days` > 0, durante ese número de días.
     # Red de seguridad para el peor mes; con `streak_trend_only` activo apenas
     # llega a dispararse (el peor mes cae a ~-2,7%). 0 = desactivado.
-    monthly_loss_limit_pct: float = 4.5
+    monthly_loss_limit_pct: float = 5.0
     monthly_loss_limit_close: bool = True
     monthly_loss_limit_days: int = 0
 

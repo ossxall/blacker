@@ -51,7 +51,7 @@
   "chop_filter": false,
   "chop_timeframe": "1D",
   "chop_adx_min": 25.0,
-  "monthly_loss_limit_pct": 4.5,
+  "monthly_loss_limit_pct": 5.0,
   "monthly_loss_limit_close": true,
   "monthly_loss_limit_days": 0,
   "consecutive_loss_pause": 0,

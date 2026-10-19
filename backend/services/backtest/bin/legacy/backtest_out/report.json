@@ -1,6 +1,6 @@
 {
   "strategy": "strategy2_ema_cross",
-  "generated_at": "2026-10-19T01:29:31.022963+00:00",
+  "generated_at": "2026-10-19T01:38:43.123620+00:00",
   "dataset": {
     "source": "./data/binance/um/BTCUSDT/1m/merged/BTCUSDT-1m.parquet",
     "bars": 118320,
@@ -65,7 +65,7 @@
     "chop_filter": false,
     "chop_timeframe": "1D",
     "chop_adx_min": 25.0,
-    "monthly_loss_limit_pct": 4.5,
+    "monthly_loss_limit_pct": 5.0,
     "monthly_loss_limit_close": true,
     "monthly_loss_limit_days": 0,
     "consecutive_loss_pause": 0,
