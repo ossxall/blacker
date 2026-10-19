@@ -6,7 +6,7 @@ Genera una página HTML interactiva (Plotly). Cada timeframe recibe el mismo
 gráfico completo, con todo lo que traiga el payload:
 
 - precio: velas + EMA rápida/lenta, marcadores de señal (`cross_up`,
-  `cross_down`, `adx_exit`, `weak_exit`) y los trades;
+  `cross_down`, `adx_exit`, `weak_exit`, `rsi_div_exit`) y los trades;
 - trades: entradas (▲ LONG / ▼ SHORT), salidas (■ verde si ganó, rojo si
   perdió; tooltip con razón, PnL, R y % cerrado) y una línea de entrada a cada
   salida;
@@ -34,6 +34,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -42,7 +43,7 @@ DEFAULT_SOURCE = "http://127.0.0.1:8080/series"
 
 UP, DOWN = "#26a69a", "#ef5350"
 FAST, SLOW, NEUTRAL = "#ff9800", "#2962ff", "#7e57c2"
-EXIT_SIGNAL, WEAK_SIGNAL = "#ffeb3b", "#e040fb"
+EXIT_SIGNAL, WEAK_SIGNAL, RSI_DIV_SIGNAL = "#ffeb3b", "#e040fb", "#00bcd4"
 PANEL_HEIGHTS = {"price": 0.55, "adx": 0.15, "volume": 0.15, "target": 0.15}
 
 
@@ -101,6 +102,13 @@ def _num(value, default: float = 0.0) -> float:
     return default if pd.isna(value) else float(value)
 
 
+def _div_flags(frame: pd.DataFrame, value: int) -> pd.Series:
+    """Máscara de divergencia RSI (``rsi_div_exit`` == ``value``; +1 alcista, -1 bajista)."""
+    if "rsi_div_exit" not in frame:
+        return pd.Series(False, index=frame.index)
+    return pd.to_numeric(frame["rsi_div_exit"], errors="coerce").fillna(0) == value
+
+
 def add_signal_markers(fig, frame: pd.DataFrame, row: int) -> None:
     """Marcadores pequeños de las señales de la estrategia, junto a la vela."""
     pad = (frame["high"].max() - frame["low"].min()) * 0.02
@@ -116,6 +124,21 @@ def add_signal_markers(fig, frame: pd.DataFrame, row: int) -> None:
                 go.Scatter(
                     x=frame.index[mask], y=y[mask], mode="markers", name=column,
                     marker=dict(symbol=symbol, size=8, color=color, line=dict(width=1.5, color=color)),
+                ),
+                row=row, col=1,
+            )
+    # Divergencia RSI: la alcista (cierre de SHORT) bajo el mínimo, la bajista
+    # (cierre de LONG) sobre el máximo.
+    for mask, y in (
+        (_div_flags(frame, 1), frame["low"] - 2 * pad),
+        (_div_flags(frame, -1), frame["high"] + 4 * pad),
+    ):
+        if mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=frame.index[mask], y=y[mask], mode="markers", name="rsi_divergence",
+                    marker=dict(symbol="star", size=9, color=RSI_DIV_SIGNAL,
+                                line=dict(width=1.5, color=RSI_DIV_SIGNAL)),
                 ),
                 row=row, col=1,
             )

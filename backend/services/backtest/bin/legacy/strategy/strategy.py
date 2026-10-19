@@ -13,6 +13,13 @@ total) una sola vez por posición. La tolerancia `close_on_ema_slow_touch_pct`
 desplaza el nivel de disparo; con `close_on_ema_slow_touch_after=False` (default)
 se aplica antes del toque y con `True` después.
 
+Y, por último, una **divergencia RSI en contra de la posición cierra el 100 %
+de la misma** (`rsi_divergence_exit_enabled`): la divergencia bajista (precio
+con máximos más altos, RSI con máximos más bajos) cierra un LONG y la alcista
+(precio con mínimos más bajos, RSI con mínimos más altos) cierra un SHORT. El
+pivote de precio se confirma tras `rsi_divergence_pivot` velas y se compara con
+el pivote anterior del mismo tipo en `rsi_divergence_lookback` velas.
+
 Archivo único con API reutilizable para backtesting y bots.
 
 Protecciones de riesgo (ver `Config`; las de régimen y tamaño adaptativo
@@ -65,6 +72,8 @@ from strategy.models import (
     Trade,
     CROSS_REASON,
     MONTHLY_LIMIT_REASON,
+    RSI_DIVERGENCE_BULL_REASON,
+    RSI_DIVERGENCE_BEAR_REASON,
     DEFAULT_OUTPUT_DIR,
     empty_trades,
 )
@@ -75,6 +84,7 @@ from strategy.indicators import (
     align_closed_values,
     build_adx_exit,
     build_weakening_exit,
+    build_rsi_divergence_exit,
 )
 from strategy.utils import (
     load_parquet,
@@ -183,8 +193,18 @@ class EMACrossStrategy:
             "target": np.select([up, down], [1, -1], default=0),
         }, index=bars.index)
 
-    def prepare_exits(self, raw: pd.DataFrame, bars: pd.DataFrame) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        return build_adx_exit(raw, bars, self.cfg), build_weakening_exit(raw, bars, self.cfg)
+    def prepare_exits(self, raw: pd.DataFrame, bars: pd.DataFrame) -> tuple[
+            Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """Señales de salida: (ADX reversal, EMA weakening, divergencia RSI).
+
+        Las tres van en el mismo orden que las consume `Backtester`; cada una
+        es ``None`` si no pudo calcularse (deshabilitada o sin datos).
+        """
+        return (
+            build_adx_exit(raw, bars, self.cfg),
+            build_weakening_exit(raw, bars, self.cfg),
+            build_rsi_divergence_exit(raw, bars, self.cfg),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -196,13 +216,16 @@ class Backtester:
 
     def __init__(self, bars: pd.DataFrame, config: Config, signals: Optional[pd.DataFrame] = None,
                  adx_exit: Optional[np.ndarray] = None, weak_exit: Optional[np.ndarray] = None,
-                 verbose: bool = False):
+                 rsi_div_exit: Optional[np.ndarray] = None, verbose: bool = False):
         self.bars, self.cfg, self.verbose = bars, config, verbose
         self.signals = signals if signals is not None else EMACrossStrategy(config).generate_signals(bars)
         self.adx_exit = np.asarray(adx_exit, bool) if adx_exit is not None else np.zeros(len(bars), bool)
         self.weak_exit = np.asarray(weak_exit, bool) if weak_exit is not None else np.zeros(len(bars), bool)
+        # Divergencia RSI: +1 alcista (cierra SHORT), -1 bajista (cierra LONG), 0 sin señal.
+        self.rsi_div = np.asarray(rsi_div_exit, int) if rsi_div_exit is not None else np.zeros(len(bars), int)
         if len(self.adx_exit) != len(bars): self.adx_exit = np.zeros(len(bars), bool)
         if len(self.weak_exit) != len(bars): self.weak_exit = np.zeros(len(bars), bool)
+        if len(self.rsi_div) != len(bars): self.rsi_div = np.zeros(len(bars), int)
         self.o, self.h, self.l, self.c = (bars[k].to_numpy(float) for k in ("open", "high", "low", "close"))
         self.times = bars.index
         self.cash = config.initial_capital
@@ -442,6 +465,25 @@ class Backtester:
         if pos is not None:
             pos.touch_done = True
         return True
+
+    def _rsi_divergence_reason(self, i: int) -> Optional[str]:
+        """Motivo de salida total si hay divergencia RSI en contra de la posición.
+
+        La divergencia **bajista** de la vela ``i`` (``self.rsi_div[i] == -1``:
+        precio con máximos más altos, RSI con máximos más bajos) cierra un LONG
+        y la **alcista** (``== 1``: precio con mínimos más bajos, RSI con
+        mínimos más altos) cierra un SHORT. Devuelve el motivo (``RSI_DIVERGENCE_*``)
+        o ``None`` si no hay divergencia contra la posición abierta.
+        """
+        pos = self.position
+        if pos is None or i >= len(self.rsi_div):
+            return None
+        flag = int(self.rsi_div[i])
+        if flag < 0 and pos.side == 1:
+            return RSI_DIVERGENCE_BEAR_REASON
+        if flag > 0 and pos.side == -1:
+            return RSI_DIVERGENCE_BULL_REASON
+        return None
 
     def _manage(self, i: int) -> bool:
         """Take-profit parcial y salida por toque a la EMA slow.
@@ -734,6 +776,11 @@ class Backtester:
                     self.pending_exit = (weak_reason, cfg.ema_weakening_exit_pct)
                 elif self.position is not None and self.adx_exit[i]:
                     self.pending_exit = (adx_reason, cfg.adx_exit_pct)
+                elif self.position is not None:
+                    # Divergencia RSI en contra de la posición: cierre total.
+                    div_reason = self._rsi_divergence_reason(i)
+                    if div_reason is not None:
+                        self.pending_exit = (div_reason, 100.0)
 
             self._mark(self.times[i] + pd.Timedelta(cfg.timeframe), self.c[i])
             if (i + 1) % max(1, n // 10) == 0 or i == n - 1:
@@ -785,6 +832,18 @@ def parse_args():
                    help="Timeframe(s) EMA weakening de salida separados por coma; se combinan con OR (p. ej. 1D,30min).")
     p.add_argument("--ema-weakening-gap-pct", type=float, default=d.ema_weakening_gap_pct)
     p.add_argument("--ema-weakening-exit-pct", type=float, default=d.ema_weakening_exit_pct)
+    p.add_argument("--rsi-divergence-exit", action=argparse.BooleanOptionalAction,
+                   default=d.rsi_divergence_exit_enabled,
+                   help="Cierra el 100%% de la posición ante una divergencia RSI en su contra "
+                        "(bajista contra LONG, alcista contra SHORT).")
+    p.add_argument("--rsi-divergence-timeframe", default=d.rsi_divergence_timeframe,
+                   help="Timeframe(s) de divergencia RSI separados por coma; se combinan con OR (p. ej. 1D,30min).")
+    p.add_argument("--rsi-divergence-len", type=int, default=d.rsi_divergence_len,
+                   help="Periodo del RSI (Wilder, default 14).")
+    p.add_argument("--rsi-divergence-pivot", type=int, default=d.rsi_divergence_pivot,
+                   help="Velas a cada lado para confirmar un pivote de precio (default 5).")
+    p.add_argument("--rsi-divergence-lookback", type=int, default=d.rsi_divergence_lookback,
+                   help="Velas hacia atrás para emparejar el pivote con el anterior (default 60).")
     p.add_argument("--partial-tp", action=argparse.BooleanOptionalAction, default=d.partial_tp_enabled)
     p.add_argument("--partial-tp-r", type=float, default=d.partial_tp_r)
     p.add_argument("--partial-tp-pct", type=float, default=d.partial_tp_pct)
@@ -868,6 +927,11 @@ def config_from_args(a) -> Config:
         adx_exit_range=a.adx_exit_range,
         ema_weakening_exit_enabled=a.ema_weakening_exit, ema_weakening_timeframe=a.ema_weakening_timeframe,
         ema_weakening_gap_pct=a.ema_weakening_gap_pct, ema_weakening_exit_pct=a.ema_weakening_exit_pct,
+        rsi_divergence_exit_enabled=a.rsi_divergence_exit,
+        rsi_divergence_timeframe=a.rsi_divergence_timeframe,
+        rsi_divergence_len=a.rsi_divergence_len,
+        rsi_divergence_pivot=a.rsi_divergence_pivot,
+        rsi_divergence_lookback=a.rsi_divergence_lookback,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
         partial_tp2_r=a.partial_tp2_r, partial_tp2_pct=a.partial_tp2_pct,
         move_stop_to_breakeven=a.breakeven_stop,
@@ -906,12 +970,14 @@ def main():
         raise ValueError(f"Dataset insuficiente para EMA{cfg.ema_slow}: {len(bars)} velas.")
     strategy = EMACrossStrategy(cfg)
     signals = strategy.generate_signals(bars)
-    adx_exit, weak_exit = strategy.prepare_exits(raw, bars)
+    adx_exit, weak_exit, rsi_div_exit = strategy.prepare_exits(raw, bars)
     if cfg.adx_exit_enabled:
         print(f"[ADX] {'disponible' if adx_exit is not None else 'sin datos suficientes/timeframe incompatible'}", flush=True)
     if cfg.ema_weakening_exit_enabled:
         print(f"[WEAKENING] {'disponible' if weak_exit is not None else 'sin datos suficientes'}", flush=True)
-    engine = Backtester(bars, cfg, signals, adx_exit, weak_exit, args.verbose)
+    if cfg.rsi_divergence_exit_enabled:
+        print(f"[RSI DIV] {'disponible' if rsi_div_exit is not None else 'sin datos suficientes/timeframe incompatible'}", flush=True)
+    engine = Backtester(bars, cfg, signals, adx_exit, weak_exit, rsi_div_exit, verbose=args.verbose)
     trades, equity = engine.run()
     generate_report(
         trades, equity, cfg, bars, args.parquet,
@@ -925,6 +991,7 @@ def main():
         signals=signals,
         adx_exit=adx_exit,
         weak_exit=weak_exit,
+        rsi_div_exit=rsi_div_exit,
         opens=engine.opened,
         adds=engine.adds,
     )

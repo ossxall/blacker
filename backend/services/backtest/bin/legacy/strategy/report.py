@@ -200,6 +200,7 @@ def plot_equity(curve: pd.DataFrame, path: str | Path, capital: float, dpi: int 
 UP_COLOR, DOWN_COLOR = "#26a69a", "#ef5350"
 FAST_COLOR, SLOW_COLOR, NEUTRAL_COLOR = "#ff9800", "#2962ff", "#7e57c2"
 ADX_EXIT_COLOR, WEAK_EXIT_COLOR = "#ffeb3b", "#e040fb"
+RSI_DIV_COLOR = "#00bcd4"
 STOP_COLOR, TARGET_COLOR, BREAKEVEN_COLOR = "#ff5252", "#00e676", "#b0bec5"
 EMA_SLOW_TOUCH_COLOR = "#00e5ff"
 
@@ -368,6 +369,7 @@ def build_backtest_figure(
     equity: pd.DataFrame | None = None,
     adx_exit: np.ndarray | None = None,
     weak_exit: np.ndarray | None = None,
+    rsi_div_exit: np.ndarray | None = None,
     raw: pd.DataFrame | None = None,
     source: str = "",
     title: str | None = None,
@@ -381,7 +383,8 @@ def build_backtest_figure(
     Cubre la totalidad de la serie e incluye:
 
     * velas del timeframe de la estrategia y las EMAs rápida/lenta;
-    * señales de cruce (`cross_up`/`cross_down`) y salidas (`adx_exit`/`weak_exit`);
+    * señales de cruce (`cross_up`/`cross_down`) y salidas (`adx_exit`,
+      `weak_exit` y `rsi_div_exit`, estas últimas con marcador propio);
     * trades: entradas, salidas, unión entrada→salida, stop-loss, breakeven,
       take-profit parcial y salidas por toque a la EMA slow (motivo
       ``EMA_SLOW_TOUCH_*``), estas últimas con un marcador propio;
@@ -413,15 +416,16 @@ def build_backtest_figure(
     except ImportError as exc:  # pragma: no cover
         raise ImportError("Se requiere plotly (`pip install plotly`) para el gráfico del backtest.") from exc
 
-    if signals is None or adx_exit is None or weak_exit is None:
+    if signals is None or adx_exit is None or weak_exit is None or rsi_div_exit is None:
         from strategy.strategy import EMACrossStrategy
         engine = EMACrossStrategy(cfg)
         if signals is None:
             signals = engine.generate_signals(bars)
-        if raw is not None and (adx_exit is None or weak_exit is None):
-            auto_adx, auto_weak = engine.prepare_exits(raw, bars)
+        if raw is not None and (adx_exit is None or weak_exit is None or rsi_div_exit is None):
+            auto_adx, auto_weak, auto_div = engine.prepare_exits(raw, bars)
             adx_exit = auto_adx if adx_exit is None else adx_exit
             weak_exit = auto_weak if weak_exit is None else weak_exit
+            rsi_div_exit = auto_div if rsi_div_exit is None else rsi_div_exit
 
     # Recorte opcional a una ventana temporal (p. ej. un mes). Los indicadores se
     # calculan sobre la serie completa y recién después se recorta para mostrar.
@@ -436,6 +440,8 @@ def build_backtest_figure(
             adx_exit = np.asarray(adx_exit, bool)[keep]
         if weak_exit is not None:
             weak_exit = np.asarray(weak_exit, bool)[keep]
+        if rsi_div_exit is not None:
+            rsi_div_exit = np.asarray(rsi_div_exit, int)[keep]
         if trades is not None and not trades.empty:
             trades = trades[(trades["entry_time"] < win_end) & (trades["exit_time"] >= win_start)]
         if equity is not None and not equity.empty:
@@ -444,10 +450,14 @@ def build_backtest_figure(
     n = len(bars)
     adx_flags = np.asarray(adx_exit, bool) if adx_exit is not None else np.zeros(n, bool)
     weak_flags = np.asarray(weak_exit, bool) if weak_exit is not None else np.zeros(n, bool)
+    div_flags = np.asarray(rsi_div_exit, int) if rsi_div_exit is not None else np.zeros(n, int)
     if len(adx_flags) != n:
         adx_flags = np.zeros(n, bool)
     if len(weak_flags) != n:
         weak_flags = np.zeros(n, bool)
+    if len(div_flags) != n:
+        div_flags = np.zeros(n, int)
+    div_bull, div_bear = div_flags > 0, div_flags < 0
 
     adx_tfs, weak_tfs = _higher_timeframes(raw, cfg)
     if window is not None:
@@ -558,6 +568,8 @@ def build_backtest_figure(
     for mask, y, symbol, color, label in (
         (adx_flags, bars_high + 2 * pad, "x", ADX_EXIT_COLOR, "salida ADX"),
         (weak_flags, bars_high + 3 * pad, "diamond", WEAK_EXIT_COLOR, "salida weakening"),
+        (div_bull, bars_low - 2 * pad, "star", RSI_DIV_COLOR, "divergencia RSI alcista"),
+        (div_bear, bars_high + 4 * pad, "star", RSI_DIV_COLOR, "divergencia RSI bajista"),
     ):
         if mask.any():
             fig.add_trace(_marker_trace(bars_x[mask], y[mask], label, symbol, color, 8),
@@ -909,6 +921,7 @@ def build_monthly_backtest_htmls(
     equity: pd.DataFrame | None = None,
     adx_exit: np.ndarray | None = None,
     weak_exit: np.ndarray | None = None,
+    rsi_div_exit: np.ndarray | None = None,
     raw: pd.DataFrame | None = None,
     source: str = "",
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
@@ -937,7 +950,7 @@ def build_monthly_backtest_htmls(
             month_positions = int(overlap["position_id"].nunique())
         build_backtest_figure(
             bars, cfg, signals=signals, trades=trades, equity=equity,
-            adx_exit=adx_exit, weak_exit=weak_exit, raw=raw, source=source,
+            adx_exit=adx_exit, weak_exit=weak_exit, rsi_div_exit=rsi_div_exit, raw=raw, source=source,
             title=f"{source or 'backtest'} · {label} · {month_positions} posiciones",
             window=(start, end), html_path=target, opens=opens, adds=adds,
         )
@@ -955,6 +968,7 @@ def generate_report(trades: pd.DataFrame, equity: pd.DataFrame, cfg: Config, dat
                     plot_dpi: int = 150, raw: pd.DataFrame | None = None,
                     signals: pd.DataFrame | None = None, adx_exit: np.ndarray | None = None,
                     weak_exit: np.ndarray | None = None,
+                    rsi_div_exit: np.ndarray | None = None,
                     plotly_path: str | Path | None = None,
                     opens: list | None = None,
                     adds: list | None = None) -> dict:
@@ -978,7 +992,7 @@ def generate_report(trades: pd.DataFrame, equity: pd.DataFrame, cfg: Config, dat
                     cfg.initial_capital, plot_dpi)
         build_monthly_backtest_htmls(
             data, cfg, signals=signals, trades=trades, equity=equity,
-            adx_exit=adx_exit, weak_exit=weak_exit, raw=raw, source=source,
+            adx_exit=adx_exit, weak_exit=weak_exit, rsi_div_exit=rsi_div_exit, raw=raw, source=source,
             output_dir=output_dir, index_path=plotly_path, opens=opens, adds=adds,
         )
     return metrics

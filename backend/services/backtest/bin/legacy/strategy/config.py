@@ -56,6 +56,21 @@ class Config:
     ema_weakening_gap_pct: float = 0.0001
     ema_weakening_exit_pct: float = 25.0
 
+    # --- Salida por divergencia RSI ----------------------------------------
+    # Cierra el 100% de la posición cuando aparece una divergencia RSI en su
+    # contra: la **bajista** (precio con máximos más altos, RSI con máximos más
+    # bajos) cierra un LONG y la **alcista** (precio con mínimos más bajos, RSI
+    # con mínimos más altos) cierra un SHORT. Un pivote de precio se confirma
+    # tras `rsi_divergence_pivot` velas a cada lado y se compara con el pivote
+    # anterior del mismo tipo dentro de `rsi_divergence_lookback` velas; la
+    # señal se emite al confirmarse el pivote, sin lookahead.
+    rsi_divergence_exit_enabled: bool = True
+    # Uno o varios timeframes (combinados con OR), como en las otras salidas.
+    rsi_divergence_timeframe: str | list[str] | tuple[str, ...] = "1D"
+    rsi_divergence_len: int = 14       # Periodo del RSI (Wilder)
+    rsi_divergence_pivot: int = 5      # Velas a cada lado para confirmar un pivote
+    rsi_divergence_lookback: int = 60  # Ventana hacia atrás para el pivote previo
+
     # Gestión de salida orientada a reducir la racha de pérdidas en whipsaw:
     # al alcanzar `partial_tp_r` veces el riesgo inicial se asegura beneficio
     # cerrando `partial_tp_pct` de la posición y, opcionalmente, se mueve el
@@ -174,6 +189,11 @@ class Config:
         """Timeframes de weakening normalizados (uno o varios); la salida usa OR entre ellos."""
         return timeframe_tuple(self.ema_weakening_timeframe)
 
+    @property
+    def rsi_divergence_timeframes(self) -> tuple[str, ...]:
+        """Timeframes de divergencia RSI normalizados; la salida usa OR entre ellos."""
+        return timeframe_tuple(self.rsi_divergence_timeframe)
+
     def __post_init__(self):
         if min(self.ema_fast, self.ema_slow) <= 0 or self.ema_fast >= self.ema_slow:
             raise ValueError("Se requiere 0 < ema_fast < ema_slow.")
@@ -189,6 +209,11 @@ class Config:
         for timeframe in self.ema_weakening_timeframes:
             if pd.Timedelta(timeframe) <= pd.Timedelta(0):
                 raise ValueError(f"ema_weakening_timeframe inválido: {timeframe!r}.")
+        if self.rsi_divergence_exit_enabled and not self.rsi_divergence_timeframes:
+            raise ValueError("rsi_divergence_timeframe no puede estar vacío.")
+        for timeframe in self.rsi_divergence_timeframes:
+            if pd.Timedelta(timeframe) <= pd.Timedelta(0):
+                raise ValueError(f"rsi_divergence_timeframe inválido: {timeframe!r}.")
         if self.initial_capital <= 0 or self.max_leverage <= 0:
             raise ValueError("Capital y leverage deben ser positivos.")
         if not 0 < self.risk_pct <= 0.2:
@@ -209,6 +234,13 @@ class Config:
         if self.ema_weakening_exit_enabled:
             if self.ema_weakening_gap_pct <= 0 or not 0 < self.ema_weakening_exit_pct <= 100:
                 raise ValueError("Configuración de weakening inválida.")
+        if self.rsi_divergence_exit_enabled:
+            if self.rsi_divergence_len <= 0:
+                raise ValueError("rsi_divergence_len debe ser positivo.")
+            if self.rsi_divergence_pivot < 1:
+                raise ValueError("rsi_divergence_pivot debe ser >= 1.")
+            if self.rsi_divergence_lookback < 1:
+                raise ValueError("rsi_divergence_lookback debe ser >= 1.")
         if self.partial_tp_enabled:
             if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:
                 raise ValueError("Configuración de take-profit parcial inválida.")

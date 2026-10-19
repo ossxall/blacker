@@ -49,6 +49,10 @@ TRADE_COLUMNS = list(Trade.__dataclass_fields__)
 CROSS_REASON = "EMA_CROSS_EXIT"
 #: Motivo de salida al superar el límite de pérdida mensual.
 MONTHLY_LIMIT_REASON = "MONTHLY_LOSS_LIMIT"
+#: Salida total por divergencia RSI en contra de la posición: la bajista cierra
+#: un LONG (`RSI_DIVERGENCE_BEAR`) y la alcista cierra un SHORT.
+RSI_DIVERGENCE_BULL_REASON = "RSI_DIVERGENCE_BULL"
+RSI_DIVERGENCE_BEAR_REASON = "RSI_DIVERGENCE_BEAR"
 DEFAULT_OUTPUT_DIR = "backtest_out"
 
 

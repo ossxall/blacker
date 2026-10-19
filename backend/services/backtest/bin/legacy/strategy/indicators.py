@@ -13,6 +13,27 @@ def ema(values: pd.Series, period: int) -> pd.Series:
     return values.ewm(alpha=2 / (period + 1), adjust=False).mean()
 
 
+def rsi(values: pd.Series, length: int = 14) -> pd.Series:
+    """RSI (suavizado Wilder) alineado con el índice de entrada.
+
+    Devuelve el RSI de ``values`` en ``[0, 100]``; con media de pérdidas a cero
+    se devuelve 100 (mercado sin caídas) y con ganancias y pérdidas a cero, 50
+    (mercado plano, sin señal direccional).
+    """
+    if length <= 0:
+        raise ValueError("La longitud RSI debe ser positiva.")
+    delta = values.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1 / length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, adjust=False).mean()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    out[avg_loss == 0] = 100.0
+    out[(avg_gain == 0) & (avg_loss == 0)] = 50.0
+    return out
+
+
 def true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
     prev = np.r_[np.nan, close[:-1]]
     tr = np.maximum.reduce([high - low, np.abs(high - prev), np.abs(low - prev)])
@@ -276,3 +297,113 @@ def build_weakening_exit(
     if not built:
         return None
     return combined
+
+
+def rsi_divergence_flags(
+    high: np.ndarray,
+    low: np.ndarray,
+    rsi_values: np.ndarray,
+    pivot: int,
+    lookback: int,
+) -> np.ndarray:
+    """Divergencias RSI respecto a los pivotes previos del precio.
+
+    Devuelve ``+1`` en divergencia **alcista** (el precio hace mínimos más
+    bajos pero el RSI mínimos más altos), ``-1`` en **bajista** (el precio hace
+    máximos más altos pero el RSI máximos más bajos) y ``0`` sin señal.
+
+    Un pivote es un máximo/mínimo local estricto respecto de las ``pivot``
+    velas a su izquierda (los empates con la derecha se resuelven en la barra
+    más a la izquierda, para no duplicar señales). Sólo se compara con el pivote
+    anterior del mismo tipo dentro de ``lookback`` velas y el flag se emite en
+    la vela que **confirma** el pivote (índice del pivote + ``pivot``), de modo
+    que en esa vela sólo se usan datos ya cerrados: no hay lookahead. Si
+    coinciden divergencias alcista y bajista en la misma vela, gana la bajista.
+    """
+    high = np.asarray(high, float)
+    low = np.asarray(low, float)
+    rsi_values = np.asarray(rsi_values, float)
+    n = len(high)
+    flags = np.zeros(n, dtype=int)
+    if pivot < 1 or lookback < 1 or len(low) != n or len(rsi_values) != n or n < 2 * pivot + 1:
+        return flags
+    # Máximo/mínimo de las `pivot` velas a cada lado (excluida la propia).
+    # Para el lado derecho se recorre la serie con `.iloc[::-1]`, que invierte
+    # el orden pero conserva las etiquetas del índice.
+    high_s, low_s = pd.Series(high), pd.Series(low)
+    left_high = high_s.rolling(pivot).max().shift(1)
+    left_low = low_s.rolling(pivot).min().shift(1)
+    right_high = high_s.iloc[::-1].rolling(pivot).max().shift(1).iloc[::-1]
+    right_low = low_s.iloc[::-1].rolling(pivot).min().shift(1).iloc[::-1]
+    swing_high = ((high_s > left_high) & (high_s >= right_high)).fillna(False).to_numpy(bool)
+    swing_low = ((low_s < left_low) & (low_s <= right_low)).fillna(False).to_numpy(bool)
+    prev_high = prev_low = None
+    for confirm in range(2 * pivot, n):
+        p = confirm - pivot  # pivote que acaba de confirmarse en esta vela
+        if swing_high[p]:
+            if (prev_high is not None and p - prev_high <= lookback
+                    and high[p] > high[prev_high] and rsi_values[p] < rsi_values[prev_high]):
+                flags[confirm] = -1  # máximos al alza con el RSI a la baja
+            prev_high = p
+        if swing_low[p]:
+            if (prev_low is not None and p - prev_low <= lookback
+                    and low[p] < low[prev_low] and rsi_values[p] > rsi_values[prev_low]
+                    and flags[confirm] == 0):
+                flags[confirm] = 1  # mínimos a la baja con el RSI al alza
+            prev_low = p
+    return flags
+
+
+def _rsi_divergence_flags(
+    raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config, timeframe: str
+) -> np.ndarray | None:
+    """Flags de divergencia RSI para un único timeframe, alineadas a ``bars``."""
+    if pd.Timedelta(timeframe) == pd.Timedelta(cfg.timeframe) or pd.Timedelta(
+        minutes=source_minutes(raw)
+    ) >= pd.Timedelta(timeframe):
+        source_bars, source_tf = bars, cfg.timeframe
+    else:
+        source_bars, source_tf = resample_ohlcv(raw, timeframe), timeframe
+    if len(source_bars) < 2 * cfg.rsi_divergence_pivot + 1:
+        return None
+    flags = rsi_divergence_flags(
+        source_bars["high"].to_numpy(float),
+        source_bars["low"].to_numpy(float),
+        rsi(source_bars.close, cfg.rsi_divergence_len).to_numpy(float),
+        cfg.rsi_divergence_pivot,
+        cfg.rsi_divergence_lookback,
+    )
+    if source_bars.index.equals(bars.index):
+        return flags
+    aligned = align_closed_values(
+        source_bars.index, flags, bars.index, source_tf, cfg.timeframe
+    )
+    return np.nan_to_num(aligned, nan=0.0).astype(int)
+
+
+def build_rsi_divergence_exit(
+    raw: pd.DataFrame, bars: pd.DataFrame, cfg: Config
+) -> np.ndarray | None:
+    """Salida por divergencia RSI combinando con OR todos los timeframes.
+
+    Devuelve ``None`` si no se pudo calcular ninguna (deshabilitado, sin datos
+    suficientes o timeframes incompatibles); si al menos una es válida, devuelve
+    un array entero alineado a ``bars`` con ``+1`` (divergencia alcista),
+    ``-1`` (bajista) y ``0`` (sin señal). Al coincidir ambas direcciones gana
+    la bajista.
+    """
+    if not cfg.rsi_divergence_exit_enabled or bars.empty:
+        return None
+    bull = np.zeros(len(bars), bool)
+    bear = np.zeros(len(bars), bool)
+    built = False
+    for timeframe in cfg.rsi_divergence_timeframes or (cfg.timeframe,):
+        flags = _rsi_divergence_flags(raw, bars, cfg, timeframe)
+        if flags is None:
+            continue
+        built = True
+        bull |= flags > 0
+        bear |= flags < 0
+    if not built:
+        return None
+    return bull.astype(int) - bear.astype(int)

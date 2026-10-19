@@ -9,8 +9,8 @@ Lee la data OHLCV almacenada por `feed.py` en `data/feed.db` (1m por defecto) y
 - Remuestrea a `STRATEGY_TIMEFRAME`, calcula señales y salidas con
   `EMACrossStrategy` y ejecuta el `Backtester` sobre las velas cerradas.
 - Por cada acción que tomaría el backtest (apertura, reversal, cierre por
-  EMA_CROSS, ADX_REVERSAL, EMA_WEAKENING, STOP_LOSS, BREAKEVEN, PARTIAL_TP,
-  EMA_SLOW_TOUCH)
+  EMA_CROSS, ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE, STOP_LOSS, BREAKEVEN,
+  PARTIAL_TP, EMA_SLOW_TOUCH)
   guarda un evento en `signal.db`.
 
 Reglas de diseño
@@ -35,8 +35,9 @@ ordena por `(signal_time, bar_time, event)` con `EXIT` antes que `ENTRY`:
 
 - `ENTRY`: `signal_time = bar_time + timeframe` (se ejecuta en la apertura
   siguiente a la vela de la señal).
-- `EXIT` por EMA_CROSS / ADX / EMA_WEAKENING: también `signal_time = bar_time
-  + timeframe` (se decide al cierre y se ejecuta en la apertura siguiente).
+- `EXIT` por EMA_CROSS / ADX / EMA_WEAKENING / RSI_DIVERGENCE: también
+  `signal_time = bar_time + timeframe` (se decide al cierre y se ejecuta en la
+  apertura siguiente).
 - `EXIT` por STOP_LOSS / BREAKEVEN / PARTIAL_TP / EMA_SLOW_TOUCH: ocurre dentro
   de la vela, por eso `signal_time == bar_time`. Si coincide con una apertura,
   la apertura va primero (bar_time menor).
@@ -247,6 +248,12 @@ _CONFIG_ENV = {
     "ema_weakening_timeframe": ("STRATEGY_EMA_WEAKENING_TIMEFRAME", env_str),
     "ema_weakening_gap_pct": ("STRATEGY_EMA_WEAKENING_GAP_PCT", env_float),
     "ema_weakening_exit_pct": ("STRATEGY_EMA_WEAKENING_EXIT_PCT", env_float),
+    # Salida total por divergencia RSI en contra de la posición.
+    "rsi_divergence_exit_enabled": ("STRATEGY_RSI_DIVERGENCE_EXIT", env_bool),
+    "rsi_divergence_timeframe": ("STRATEGY_RSI_DIVERGENCE_TIMEFRAME", env_str),
+    "rsi_divergence_len": ("STRATEGY_RSI_DIVERGENCE_LEN", env_int),
+    "rsi_divergence_pivot": ("STRATEGY_RSI_DIVERGENCE_PIVOT", env_int),
+    "rsi_divergence_lookback": ("STRATEGY_RSI_DIVERGENCE_LOOKBACK", env_int),
     "timestamp_is_close": ("STRATEGY_TIMESTAMP_IS_CLOSE", env_bool),
     # Entrada parcial + confirmación (scale-in)
     "entry_partial_enabled": ("STRATEGY_ENTRY_PARTIAL", env_bool),
@@ -442,12 +449,13 @@ def series_frame(
 ) -> pd.DataFrame:
     """OHLCV de `bars` + las series de la estrategia (señales y salidas).
 
-    `computed` = (signals, adx_exit, weak_exit) si ya se calcularon para
-    `bars`; si no, se calculan aquí. Si el cálculo falla, devuelve solo OHLCV.
+    `computed` = (signals, adx_exit, weak_exit, rsi_div_exit) si ya se
+    calcularon para `bars`; si no, se calculan aquí. Si el cálculo falla,
+    devuelve solo OHLCV.
     """
     frame = bars.copy()
     try:
-        signals, adx_exit, weak_exit = computed or (
+        signals, adx_exit, weak_exit, rsi_div_exit = computed or (
             strategy.generate_signals(bars),
             *strategy.prepare_exits(raw, bars),
         )
@@ -457,7 +465,11 @@ def series_frame(
     for col in signals.columns:
         if col not in frame.columns:
             frame[col] = signals[col].to_numpy()
-    for col, arr in (("adx_exit", adx_exit), ("weak_exit", weak_exit)):
+    for col, arr in (
+        ("adx_exit", adx_exit),
+        ("weak_exit", weak_exit),
+        ("rsi_div_exit", rsi_div_exit),
+    ):
         if arr is not None and len(arr) == len(frame):
             frame[col] = np.asarray(arr)
     return frame
@@ -523,6 +535,7 @@ def build_events(
     signals: pd.DataFrame,
     adx_exit: np.ndarray | None,
     weak_exit: np.ndarray | None,
+    rsi_div_exit: np.ndarray | None,
     cfg: Config,
     symbol: str,
     interval: str,
@@ -532,15 +545,15 @@ def build_events(
     Reutiliza el motor `Backtester` de `strategy/strategy.py` sobre las velas
     cerradas, de modo que el bot publica exactamente las acciones que tomaría
     el backtest: aperturas (incluidas reversals), cierres por EMA_CROSS,
-    ADX_REVERSAL, EMA_WEAKENING, y las salidas por STOP_LOSS, BREAKEVEN,
-    PARTIAL_TP y EMA_SLOW_TOUCH. La posición abierta al final de los datos no se cierra
-    (`force_close_at_end=False`): en vivo sigue vigente.
+    ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE, y las salidas por STOP_LOSS,
+    BREAKEVEN, PARTIAL_TP y EMA_SLOW_TOUCH. La posición abierta al final de los
+    datos no se cierra (`force_close_at_end=False`): en vivo sigue vigente.
     """
     if len(bars) < 2:
         return []
 
     engine = Backtester(
-        bars, replace(cfg, force_close_at_end=False), signals, adx_exit, weak_exit
+        bars, replace(cfg, force_close_at_end=False), signals, adx_exit, weak_exit, rsi_div_exit
     )
     # `Backtester.run` imprime progreso; lo silenciamos para no ensuciar el log.
     with contextlib.redirect_stdout(io.StringIO()):
@@ -768,12 +781,15 @@ class SignalBot:
             return 0
 
         signals = self.strategy.generate_signals(bars)
-        adx_exit, weak_exit = self.strategy.prepare_exits(raw, bars)
+        adx_exit, weak_exit, rsi_div_exit = self.strategy.prepare_exits(raw, bars)
         events = build_events(
-            bars, signals, adx_exit, weak_exit, self.cfg, self.symbol, self.interval
+            bars, signals, adx_exit, weak_exit, rsi_div_exit,
+            self.cfg, self.symbol, self.interval
         )
         # El endpoint muestra todos los trades del backtest (sin filtro live-only).
-        self._publish_snapshot(raw, bars, (signals, adx_exit, weak_exit), events)
+        self._publish_snapshot(
+            raw, bars, (signals, adx_exit, weak_exit, rsi_div_exit), events
+        )
         if self.live_since_ms is not None:
             # live-only: descarta las señales anteriores al arranque.
             events = [e for e in events if e["bar_time"] >= self.live_since_ms]
