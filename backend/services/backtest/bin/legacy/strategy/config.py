@@ -29,7 +29,7 @@ class Config:
     slippage_bps: float = 0.0
     risk_pct: float = 0.01
     max_leverage: float = 1.0
-    stop_loss_pct: float = 0.009
+    stop_loss_pct: float = 0.01
 
     confirm_bars: int = 4
     entry_adx_enabled: bool = True
