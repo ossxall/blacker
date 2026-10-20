@@ -9,7 +9,7 @@
   "slippage_bps": 0.0,
   "risk_pct": 0.01,
   "max_leverage": 1.0,
-  "stop_loss_pct": 0.009,
+  "stop_loss_pct": 0.01,
   "confirm_bars": 4,
   "entry_adx_enabled": true,
   "entry_adx_len": 14,
