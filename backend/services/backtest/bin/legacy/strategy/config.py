@@ -133,19 +133,43 @@ class Config:
     # equity al inicio del mes calendario, se dejan de abrir posiciones (y, con
     # monthly_loss_limit_close, se cierra la abierta) hasta el siguiente mes
     # o, si `monthly_loss_limit_days` > 0, durante ese número de días.
-    # Red de seguridad para el peor mes; con `streak_trend_only` activo apenas
-    # llega a dispararse (el peor mes cae a ~-2,7%). 0 = desactivado.
+    # Red de seguridad para el peor mes. Con los defaults apenas llega a
+    # dispararse (1 vez en 82 meses), por eso arranca holgado en 5.0 y el
+    # trabajo de recortar meses rojos lo hacen `monthly_trend_gate_pct` y
+    # `adaptive_risk_window`; bajarlo (p. ej. 2) mejora el peor mes pero
+    # recorta el acumulado de meses negativos. 0 = desactivado.
     monthly_loss_limit_pct: float = 5.0
     monthly_loss_limit_close: bool = True
     monthly_loss_limit_days: int = 0
 
+    # --- Gate y escalado de riesgo por mes ---------------------------------
+    # Palancas para recortar los meses en rojo sin apagar la estrategia:
+    # actúan sobre el drawdown *acumulado del mes calendario* (equity mark-to-
+    # market respecto a la equity del cierre del mes anterior), no sobre la
+    # racha de posiciones.
+    #
+    # `monthly_trend_gate_pct`: cuando el mes acumula una pérdida ≥ X %, las
+    # nuevas entradas sólo se abren a favor del sesgo de tendencia de
+    # `trend_timeframe` (mismo requisito que `streak_trend_only`, pero activado
+    # por el mes en rojo). En los meses en verde no toca nada, así que no
+    # recorta los cruces ganadores. 0 = desactivado.
+    monthly_trend_gate_pct: float = 0.0
+    # `monthly_gate_mode`: "trend" exige sólo alineación con la tendencia y
+    # "all" bloquea cualquier entrada mientras el mes esté en rojo.
+    monthly_gate_mode: str = "trend"
+    # `monthly_risk_scaling`: escala `risk_pct` con el drawdown del mes:
+    # dd = 0 -> 1, dd >= `monthly_loss_limit_pct` -> `monthly_risk_scaling_min`
+    # (y ahí ya corta el guard duro). Reduce el tamaño de las posiciones que se
+    # abren en la segunda mitad de un mes rojo, donde salen las pérdidas que
+    # profundizan el mes. Con el límite mensual a 0 se usa un 2 % de referencia.
+    monthly_risk_scaling: bool = False
+    monthly_risk_scaling_min: float = 0.35
+
     # --- Pausa tras rachas de pérdidas -------------------------------------
     # Tras `consecutive_loss_pause` posiciones consecutivas en pérdida no se
     # abren nuevas durante `consecutive_loss_pause_bars` velas (96 velas de
-    # 30min = 48h). Evita re-entrar en pleno whipsaw. Con `streak_trend_only`
-    # activo la pausa no baja más la racha máxima (queda en 5) y cuesta entre
-    # 60 y 110 puntos de rendimiento, así que arranca desactivada (0); se
-    # conserva como palanca opcional para mercados muy violentos.
+    # 30min = 48h). Evita re-entrar en pleno whipsaw. Medido: no baja la racha
+    # máxima y cuesta rendimiento, así que arranca desactivada (0).
     consecutive_loss_pause: int = 0
     consecutive_loss_pause_bars: int = 96
 
@@ -170,8 +194,13 @@ class Config:
     # --- Tamaño de posición adaptativo -------------------------------------
     # `risk_pct` se multiplica por `clamp(1 + k * (win_rate últimas n posiciones
     # - 0.5), min, max)`: en rachas de pérdidas se arriesga menos y en rachas
-    # ganadoras (mercado en tendencia) se arriesga más. 0 = desactivado.
-    adaptive_risk_window: int = 0
+    # ganadoras (mercado en tendencia) se arriesga más. Los meses rojos suelen
+    # ser rachas frías, así que recorta el riesgo justo cuando salen las
+    # pérdidas: con `adaptive_risk_window=20` y `k=2` el peor mes pasa de
+    # -3,15% a -2,49%, el acumulado de meses negativos de -28,6% a -26,1% y el
+    # PF de 2,43 a 2,50, a cambio de ~38 puntos de rendimiento total. 0 =
+    # desactivado (tamaño fijo).
+    adaptive_risk_window: int = 20
     adaptive_risk_k: float = 2.0
     adaptive_risk_min: float = 0.5
     adaptive_risk_max: float = 1.5
@@ -278,6 +307,15 @@ class Config:
             raise ValueError("monthly_loss_limit_pct no puede ser negativo.")
         if self.monthly_loss_limit_days < 0:
             raise ValueError("monthly_loss_limit_days no puede ser negativo.")
+        if self.monthly_trend_gate_pct < 0:
+            raise ValueError("monthly_trend_gate_pct no puede ser negativo.")
+        if self.monthly_trend_gate_pct > 0 and self.trend_filter == "off" and not self.streak_trend_only:
+            raise ValueError("monthly_trend_gate_pct requiere trend_filter != 'off' o streak_trend_only "
+                             "(sin sesgo de tendencia no hay nada que exigir a la entrada).")
+        if self.monthly_gate_mode not in ("trend", "all"):
+            raise ValueError("monthly_gate_mode debe ser 'trend' o 'all'.")
+        if not 0.0 <= self.monthly_risk_scaling_min <= 1.0:
+            raise ValueError("monthly_risk_scaling_min debe estar en [0, 1].")
         if self.consecutive_loss_pause < 0 or self.consecutive_loss_pause_bars < 1:
             raise ValueError("consecutive_loss_pause debe ser >= 0 y ..._bars >= 1.")
         if self.consecutive_loss_skip_signals < 0:

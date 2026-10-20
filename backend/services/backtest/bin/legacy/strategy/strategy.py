@@ -22,16 +22,26 @@ el pivote anterior del mismo tipo en `rsi_divergence_lookback` velas.
 
 Archivo único con API reutilizable para backtesting y bots.
 
-Protecciones de riesgo (ver `Config`; las de régimen y tamaño adaptativo
-arrancan desactivadas, la de racha y la mensual vienen activas):
+Protecciones de riesgo (ver `Config`; el filtro de régimen y el escalado de
+riesgo por mes arrancan desactivados, la de racha, la mensual y el tamaño
+adaptativo vienen activos):
 
 * `streak_trend_only` (default True): tras una posición cerrada en pérdida,
   la siguiente entrada sólo se abre si la señal coincide con el sesgo de
   tendencia de `trend_timeframe` (vela superior ya cerrada, sin lookahead).
   Corta las rachas de -1R del whipsaw sin recortar los cruces en tendencia.
-* `monthly_loss_limit_pct` (default 4.5): si la equity cae más de X% por
+* `monthly_loss_limit_pct` (default 5.0): si la equity cae más de X% por
   debajo de la equity al inicio del mes calendario se cierra la posición (opcional)
   y no se abren nuevas hasta el siguiente mes (o `monthly_loss_limit_days` días).
+* `monthly_trend_gate_pct` (default 0 = off) + `monthly_gate_mode` ("trend" |
+  "all"): con el mes acumulando ≥ X% de pérdida, las nuevas entradas sólo se
+  abren a favor del sesgo de tendencia (o se bloquean todas, en modo "all").
+  Sobre el drawdown del mes, no sobre la racha de posiciones: en meses en
+  verde no toca nada, así que no recorta los cruces ganadores.
+* `monthly_risk_scaling` (default off) + `monthly_risk_scaling_min` (0.35):
+  el tamaño de cada nueva posición baja en proporción al drawdown del mes
+  (dd 0 → 1, dd `monthly_loss_limit_pct` → mínimo), para que las entradas de
+  la segunda mitad de un mes rojo no profundicen el mes.
 * `consecutive_loss_pause` (default 0) + `consecutive_loss_pause_bars` (96):
   espera de 48h (en 30min) antes de volver a entrar tras cada posición cerrada
   en pérdida. Con `streak_trend_only` activo no baja la racha y cuesta
@@ -39,13 +49,25 @@ arrancan desactivadas, la de racha y la mensual vienen activas):
 * `trend_filter` ("off" | "cross" | "slow") y `chop_filter`: filtro de régimen
   permanente; sólo se opera en la dirección de la tendencia de `trend_timeframe`
   / con el ADX de `chop_timeframe` por encima del mínimo.
-* `adaptive_risk_window`: escala `risk_pct` con el win rate de las últimas n
-  posiciones (penaliza rachas frías y reutiliza en cálidas).
+* `adaptive_risk_window` (default 20) + `adaptive_risk_k`: escala `risk_pct`
+  con el win rate de las últimas n posiciones: penaliza las rachas frías
+  (donde se concentran los meses rojos) y reutiliza el tamaño en las cálidas.
 
-Sobre BTCUSDT 2020-2026 (30min), con los defaults, frente a no tener
-protección alguna: racha máxima de pérdidas 7 -> 5 (lo mismo en train y en
-test), peor mes -4,75% -> -2,65%, PF 1,76 -> 2,07, expectancy 0,29R -> 0,40R,
-max drawdown -10,95% -> -10,68% y rendimiento total 327,6% -> 362,5%.
+Reducción de meses rojos (BTCUSDT 2020-2026, 30min, 82 meses). Partiendo del
+uso previo (`streak_trend_only`, `monthly_loss_limit_pct=5`, `adaptive_risk_window=0`):
+
+| variante                                   | meses en rojo | peor mes | suma meses rojos | retorno | max DD | PF   |
+|--------------------------------------------|---------------|----------|------------------|---------|--------|------|
+| sin tamaño adaptativo                      | 25 (30,5 %)   | -3,15 %  | -28,6 %          | 477,9 % | -8,70% | 2,43 |
+| `adaptive_risk_window=20` (**default**)    | 25 (30,5 %)   | -2,49 %  | -26,1 %          | 439,8 % | -7,96% | 2,49 |
+| `+ monthly_trend_gate_pct=0.3`             | 25 (30,5 %)   | -2,17 %  | -25,5 %          | 495,6 % | -8,23% | 2,52 |
+| `+ monthly_trend_gate_pct=0.4`             | 25 (30,5 %)   | -2,45 %  | -24,0 %          | 447,2 % | -7,46% | 2,58 |
+
+El mismo recorte se repite en train (2020-2023) y test (2024-2026) y con costes
+realistas (comisión 4 bps + slippage 2 bps), donde el tamaño adaptativo también
+mejora el drawdown (-10,1 % -> -8,2 %). El `monthly_trend_gate_pct` es más
+dependiente del régimen: se probó con costes y con `trend_filter="cross"`, donde
+no aporta, por eso arranca desactivado.
 
 Uso:
     python strategy2_refactored.py data.parquet --output-dir backtest_out
@@ -249,6 +271,12 @@ class Backtester:
         self.streak_in_loss = False
         self._position_pnl = 0.0
         self._recent_wins: list[bool] = []
+        # Estado mensual compartido por `run`, el gate de entradas y el
+        # escalado de riesgo: equity de referencia del mes y del cierre
+        # anterior (sin lookahead: se usa en la apertura de la vela siguiente).
+        self.month_start_equity = config.initial_capital
+        self._prev_close_equity = config.initial_capital
+        self.month_dd_pct = 0.0
 
     def _price(self, price: float, side: int) -> float:
         slip = self.cfg.slippage_bps / 10_000
@@ -272,7 +300,7 @@ class Backtester:
             return
         pct_sl = self.cfg.stop_loss_pct
         risk_unit = self._risk_per_unit(side, price, pct_sl) if pct_sl > 0 else 0.0
-        by_risk = self.cash * self.cfg.risk_pct * self._risk_multiplier() / risk_unit if risk_unit > 0 else np.inf
+        by_risk = self.cash * self.cfg.risk_pct * self._risk_multiplier() * self._monthly_risk_scale() / risk_unit if risk_unit > 0 else np.inf
         by_lev = self.cash * self.cfg.max_leverage / price
         qty_total = min(by_risk, by_lev)
         if not np.isfinite(qty_total) or qty_total <= 0:
@@ -368,6 +396,29 @@ class Backtester:
         win_rate = sum(wins) / len(wins)
         factor = 1 + cfg.adaptive_risk_k * (win_rate - 0.5)
         return float(min(max(factor, cfg.adaptive_risk_min), cfg.adaptive_risk_max))
+
+    def _monthly_risk_scale(self) -> float:
+        """Escala de tamaño según el drawdown acumulado del mes calendario.
+
+        Con ``monthly_risk_scaling`` desactivado devuelve 1. Si no, devuelve
+        ``1 - clamp(dd/budget, 0, 1) * (1 - monthly_risk_scaling_min)``: al
+        abrir el mes (dd = 0) se arriesga el tamaño habitual y conforme la
+        equity se acerca al límite ``monthly_loss_limit_pct`` el tamaño baja
+        hasta ``monthly_risk_scaling_min``. Corta las pérdidas que profundizan
+        un mes ya en rojo sin cerrar posiciones ni bloquear entradas.
+
+        Usa la equity del **cierre de la vela anterior** (``_prev_close_equity``),
+        la última conocida al ejecutar la apertura de la vela actual, así que
+        no hay lookahead.
+        """
+        cfg = self.cfg
+        if not cfg.monthly_risk_scaling or self.month_start_equity <= 0:
+            return 1.0
+        budget = cfg.monthly_loss_limit_pct / 100 if cfg.monthly_loss_limit_pct > 0 else 0.02
+        dd = max(0.0, 1.0 - self._prev_close_equity / self.month_start_equity)
+        used = min(dd / budget, 1.0)
+        floor = min(max(cfg.monthly_risk_scaling_min, 0.0), 1.0)
+        return float(1.0 - used * (1.0 - floor))
 
     def _close_streak(self) -> None:
         """Actualiza la racha de pérdidas y arma la pausa de entrada si procede.
@@ -701,6 +752,7 @@ class Backtester:
                 month_key = key
                 self.halt_until = None
                 month_start_equity = self._equity_value(self.c[i - 1]) if i else cfg.initial_capital
+                self.month_start_equity = month_start_equity
             # 1) Ejecutar add pendiente (decidido al cierre de vela anterior)
             if self.pending_add is not None:
                 exec_i, pct_rem = self.pending_add
@@ -732,11 +784,19 @@ class Backtester:
                     # Ejecutar resto completo en apertura de i+1
                     self.pending_add = (i + 1, 100.0)
 
+            # Equity mark-to-market del cierre de la vela y pérdida acumulada
+            # del mes: base del guard duro, del gate de entradas y de la
+            # referencia de riesgo del mes siguiente.
+            equity_now = self._equity_value(self.c[i])
+            if month_start_equity > 0:
+                self.month_dd_pct = max(0.0, (1.0 - equity_now / month_start_equity) * 100.0)
+            self._prev_close_equity = equity_now
+
             # Límite de pérdida mensual: si la equity cae por debajo del umbral
             # respecto al inicio del mes, se protege el mes completo (se cierra
             # la posición, si la hay, y no se abren nuevas hasta el próximo mes).
             if cfg.monthly_loss_limit_pct > 0 and self.halt_until is None:
-                if self._equity_value(self.c[i]) <= month_start_equity * (1 - cfg.monthly_loss_limit_pct / 100):
+                if equity_now <= month_start_equity * (1 - cfg.monthly_loss_limit_pct / 100):
                     if cfg.monthly_loss_limit_days > 0:
                         self.halt_until = self.times[i] + pd.Timedelta(days=cfg.monthly_loss_limit_days)
                         scope = f"{cfg.monthly_loss_limit_days} días"
@@ -756,6 +816,14 @@ class Backtester:
                 if target == -1 and not cfg.allow_short: target = 0
                 current = self.position.side if self.position else 0
                 if target and target != current and not self.entries_blocked():
+                    bias_val = int(self.signals["trend_bias"].iloc[i])
+                    # Gate mensual: con el mes en pérdida ≥ umbral se frenan las
+                    # entradas (todas o sólo las contra tendencia) para que un
+                    # mes rojo no se profundice con nuevas trampas de whipsaw.
+                    month_red = (cfg.monthly_trend_gate_pct > 0
+                                 and self.month_dd_pct >= cfg.monthly_trend_gate_pct)
+                    blocked_month = month_red and (cfg.monthly_gate_mode == "all"
+                                                   or bias_val != target)
                     if self.skip_signals_left > 0:
                         # Tras una pérdida se ignoran las primeras señales: en
                         # whipsaw la siguiente señal suele ser otra trampa.
@@ -763,8 +831,12 @@ class Backtester:
                         if self.verbose:
                             print(f"[SKIP] {self.times[i]} señal ignorada "
                                   f"({self.skip_signals_left} restantes)", flush=True)
-                    elif (cfg.streak_trend_only and self.streak_in_loss
-                          and int(self.signals["trend_bias"].iloc[i]) != target):
+                    elif blocked_month:
+                        if self.verbose:
+                            print(f"[GATE] {self.times[i]} mes {self.month_dd_pct:.2f}% en rojo: "
+                                  f"señal {target:+d} bloqueada (modo {cfg.monthly_gate_mode})",
+                                  flush=True)
+                    elif cfg.streak_trend_only and self.streak_in_loss and bias_val != target:
                         # Tras una pérdida sólo se entra con la tendencia mayor.
                         if self.verbose:
                             print(f"[RACHA] {self.times[i]} señal {target:+d} "
@@ -892,6 +964,18 @@ def parse_args():
                    help="Cierra la posición abierta al alcanzar el límite mensual.")
     p.add_argument("--monthly-loss-limit-days", type=int, default=d.monthly_loss_limit_days,
                    help="Días sin entradas tras el límite mensual (0 = hasta el próximo mes).")
+    p.add_argument("--monthly-trend-gate-pct", type=float, default=d.monthly_trend_gate_pct,
+                   help="%% de pérdida mensual acumulada a partir de la cual las entradas sólo se abren "
+                        "a favor de la tendencia (0 = desactivado).")
+    p.add_argument("--monthly-gate-mode", choices=("trend", "all"), default=d.monthly_gate_mode,
+                   help="'trend' exige alineación con la tendencia; 'all' bloquea toda entrada "
+                        "mientras el mes está en rojo.")
+    p.add_argument("--monthly-risk-scaling", action=argparse.BooleanOptionalAction,
+                   default=d.monthly_risk_scaling,
+                   help="Escala el tamaño de las posiciones con el drawdown del mes, hasta "
+                        "--monthly-risk-scaling-min al llegar al límite mensual.")
+    p.add_argument("--monthly-risk-scaling-min", type=float, default=d.monthly_risk_scaling_min,
+                   help="Tamaño mínimo (fracción de risk_pct) al fondo del drawdown mensual (default 0.35).")
     p.add_argument("--consecutive-loss-pause", type=int, default=d.consecutive_loss_pause,
                    help="Pausa las entradas tras N posiciones consecutivas en pérdida (0 = desactivado).")
     p.add_argument("--consecutive-loss-pause-bars", type=int, default=d.consecutive_loss_pause_bars,
@@ -950,6 +1034,10 @@ def config_from_args(a) -> Config:
         monthly_loss_limit_pct=a.monthly_loss_limit_pct,
         monthly_loss_limit_close=a.monthly_loss_limit_close,
         monthly_loss_limit_days=a.monthly_loss_limit_days,
+        monthly_trend_gate_pct=a.monthly_trend_gate_pct,
+        monthly_gate_mode=a.monthly_gate_mode,
+        monthly_risk_scaling=a.monthly_risk_scaling,
+        monthly_risk_scaling_min=a.monthly_risk_scaling_min,
         consecutive_loss_pause=a.consecutive_loss_pause,
         consecutive_loss_pause_bars=a.consecutive_loss_pause_bars,
         consecutive_loss_skip_signals=a.consecutive_loss_skip_signals,
