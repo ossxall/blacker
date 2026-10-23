@@ -59,7 +59,7 @@ class Config:
     ema_weakening_fast: int = 21
     ema_weakening_slow: int = 55
     ema_weakening_gap_pct: float = 0.0001
-    ema_weakening_exit_pct: float = 50.0
+    ema_weakening_exit_pct: float = 100.0
 
     # --- Salida por divergencia RSI ----------------------------------------
     # Cierra el 100% de la posición cuando aparece una divergencia RSI en su
