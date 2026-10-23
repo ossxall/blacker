@@ -52,9 +52,14 @@ class Config:
     # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
     # ["1D", "30min"]; la salida weakening se dispara si hay debilitamiento en
     # cualquiera de ellos.
-    ema_weakening_timeframe: str | list[str] | tuple[str, ...] = "30min"
+    ema_weakening_timeframe: str | list[str] | tuple[str, ...] = "60min"
+    # Longitudes de las EMAs propias de la salida weakening. Si son > 0 se usan
+    # en lugar de `ema_fast`/`ema_slow` (permiten elegir el periodo sin tocar el
+    # cruce de entrada); con 0 se reutilizan los del cruce.
+    ema_weakening_fast: int = 21
+    ema_weakening_slow: int = 55
     ema_weakening_gap_pct: float = 0.0001
-    ema_weakening_exit_pct: float = 25.0
+    ema_weakening_exit_pct: float = 50.0
 
     # --- Salida por divergencia RSI ----------------------------------------
     # Cierra el 100% de la posición cuando aparece una divergencia RSI en su
@@ -219,6 +224,17 @@ class Config:
         return timeframe_tuple(self.ema_weakening_timeframe)
 
     @property
+    def ema_weakening_lengths(self) -> tuple[int, int]:
+        """Longitudes (fast, slow) de las EMAs de la salida weakening.
+
+        Usa `ema_weakening_fast`/`ema_weakening_slow` cuando están definidas
+        (> 0); si no, cae a las EMAs del cruce (`ema_fast`/`ema_slow`).
+        """
+        fast = self.ema_weakening_fast if self.ema_weakening_fast > 0 else self.ema_fast
+        slow = self.ema_weakening_slow if self.ema_weakening_slow > 0 else self.ema_slow
+        return fast, slow
+
+    @property
     def rsi_divergence_timeframes(self) -> tuple[str, ...]:
         """Timeframes de divergencia RSI normalizados; la salida usa OR entre ellos."""
         return timeframe_tuple(self.rsi_divergence_timeframe)
@@ -263,6 +279,11 @@ class Config:
         if self.ema_weakening_exit_enabled:
             if self.ema_weakening_gap_pct <= 0 or not 0 < self.ema_weakening_exit_pct <= 100:
                 raise ValueError("Configuración de weakening inválida.")
+            if min(self.ema_weakening_fast, self.ema_weakening_slow) < 0:
+                raise ValueError("ema_weakening_fast/ema_weakening_slow no pueden ser negativas.")
+            if self.ema_weakening_slow > 0 and self.ema_weakening_fast > 0 \
+                    and self.ema_weakening_fast >= self.ema_weakening_slow:
+                raise ValueError("Se requiere ema_weakening_fast < ema_weakening_slow (o 0 para usar las del cruce).")
         if self.rsi_divergence_exit_enabled:
             if self.rsi_divergence_len <= 0:
                 raise ValueError("rsi_divergence_len debe ser positivo.")

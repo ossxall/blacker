@@ -251,14 +251,15 @@ def _higher_timeframes(raw: pd.DataFrame | None, cfg: Config) -> tuple[list[dict
 
     weak_tfs: list[dict] = []
     if cfg.ema_weakening_exit_enabled:
+        weak_fast, weak_slow = cfg.ema_weakening_lengths
         for tf in cfg.ema_weakening_timeframes or (cfg.timeframe,):
             if pd.Timedelta(tf) == pd.Timedelta(cfg.timeframe) or source_td >= pd.Timedelta(tf):
                 continue
             low = resample_ohlcv(raw, tf)
-            if len(low) < cfg.ema_slow + 2:
+            if len(low) < weak_slow + 2:
                 continue
-            fast = ema(low.close, cfg.ema_fast).to_numpy(float)
-            slow = ema(low.close, cfg.ema_slow).to_numpy(float)
+            fast = ema(low.close, weak_fast).to_numpy(float)
+            slow = ema(low.close, weak_slow).to_numpy(float)
             weak_tfs.append({"timeframe": tf, "bars": low, "ema_fast": fast, "ema_slow": slow,
                              "gap_pct": cfg.ema_weakening_gap_pct,
                              "weakening": ema_weakening_flags(fast, slow, cfg.ema_weakening_gap_pct)})

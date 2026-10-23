@@ -246,6 +246,8 @@ _CONFIG_ENV = {
     "adx_exit_range": ("STRATEGY_ADX_EXIT_RANGE", env_int),
     "ema_weakening_exit_enabled": ("STRATEGY_EMA_WEAKENING_EXIT", env_bool),
     "ema_weakening_timeframe": ("STRATEGY_EMA_WEAKENING_TIMEFRAME", env_str),
+    "ema_weakening_fast": ("STRATEGY_EMA_WEAKENING_FAST", env_int),
+    "ema_weakening_slow": ("STRATEGY_EMA_WEAKENING_SLOW", env_int),
     "ema_weakening_gap_pct": ("STRATEGY_EMA_WEAKENING_GAP_PCT", env_float),
     "ema_weakening_exit_pct": ("STRATEGY_EMA_WEAKENING_EXIT_PCT", env_float),
     # Salida total por divergencia RSI en contra de la posición.

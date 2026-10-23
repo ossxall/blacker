@@ -13,6 +13,13 @@ total) una sola vez por posición. La tolerancia `close_on_ema_slow_touch_pct`
 desplaza el nivel de disparo; con `close_on_ema_slow_touch_after=False` (default)
 se aplica antes del toque y con `True` después.
 
+La salida por debilitamiento de las EMAs (`ema_weakening_exit_enabled`) cierra
+`ema_weakening_exit_pct` % de la posición cuando el cruce de las EMAs del
+timeframe `ema_weakening_timeframe` se estrecha por debajo de
+`ema_weakening_gap_pct` (paso de separado a convergido). Sus periodos son
+independientes de los del cruce de entrada: `ema_weakening_fast` /
+`ema_weakening_slow` (0 = reutilizar `ema_fast` / `ema_slow`).
+
 Y, por último, una **divergencia RSI en contra de la posición cierra el 100 %
 de la misma** (`rsi_divergence_exit_enabled`): la divergencia bajista (precio
 con máximos más altos, RSI con máximos más bajos) cierra un LONG y la alcista
@@ -737,7 +744,11 @@ class Backtester:
         adx_base = f"ADX_{adx_labels}_REVERSAL"
         adx_reason = adx_base if cfg.adx_exit_pct >= 100 else f"{adx_base}_{cfg.adx_exit_pct:g}%"
         weak_tfs = cfg.ema_weakening_timeframes or (cfg.timeframe,)
+        weak_fast, weak_slow = cfg.ema_weakening_lengths
         weak_base = "EMA_WEAKENING_" + "_".join(tf.upper() for tf in weak_tfs)
+        weak_len = f"EMA{weak_fast}/{weak_slow}"
+        if (weak_fast, weak_slow) != (cfg.ema_fast, cfg.ema_slow):
+            weak_base = f"{weak_base}_{weak_len}"
         weak_reason = weak_base if cfg.ema_weakening_exit_pct >= 100 else f"{weak_base}_{cfg.ema_weakening_exit_pct:g}%"
         started = time.perf_counter()
         print(f"[BACKTEST] {n:,} velas {cfg.timeframe}", flush=True)
@@ -903,6 +914,10 @@ def parse_args():
     p.add_argument("--ema-weakening-timeframe", default=d.ema_weakening_timeframe,
                    help="Timeframe(s) EMA weakening de salida separados por coma; se combinan con OR (p. ej. 1D,30min).")
     p.add_argument("--ema-weakening-gap-pct", type=float, default=d.ema_weakening_gap_pct)
+    p.add_argument("--ema-weakening-fast", type=int, default=d.ema_weakening_fast,
+                   help="Longitud de la EMA rápida de la salida weakening (0 = usar --ema-fast).")
+    p.add_argument("--ema-weakening-slow", type=int, default=d.ema_weakening_slow,
+                   help="Longitud de la EMA lenta de la salida weakening (0 = usar --ema-slow).")
     p.add_argument("--ema-weakening-exit-pct", type=float, default=d.ema_weakening_exit_pct)
     p.add_argument("--rsi-divergence-exit", action=argparse.BooleanOptionalAction,
                    default=d.rsi_divergence_exit_enabled,
@@ -1010,6 +1025,7 @@ def config_from_args(a) -> Config:
         adx_adxlen=a.adx_adxlen, adx_key_level=a.adx_key_level, adx_exit_pct=a.adx_exit_pct,
         adx_exit_range=a.adx_exit_range,
         ema_weakening_exit_enabled=a.ema_weakening_exit, ema_weakening_timeframe=a.ema_weakening_timeframe,
+        ema_weakening_fast=a.ema_weakening_fast, ema_weakening_slow=a.ema_weakening_slow,
         ema_weakening_gap_pct=a.ema_weakening_gap_pct, ema_weakening_exit_pct=a.ema_weakening_exit_pct,
         rsi_divergence_exit_enabled=a.rsi_divergence_exit,
         rsi_divergence_timeframe=a.rsi_divergence_timeframe,

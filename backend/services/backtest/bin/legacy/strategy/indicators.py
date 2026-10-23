@@ -261,11 +261,12 @@ def _weakening_exit_flags(
         source_bars, source_tf = bars, cfg.timeframe
     else:
         source_bars, source_tf = resample_ohlcv(raw, timeframe), timeframe
-    if len(source_bars) < cfg.ema_slow + 2:
+    fast_len, slow_len = cfg.ema_weakening_lengths
+    if len(source_bars) < slow_len + 2:
         return None
     flags = ema_weakening_flags(
-        ema(source_bars.close, cfg.ema_fast).to_numpy(),
-        ema(source_bars.close, cfg.ema_slow).to_numpy(),
+        ema(source_bars.close, fast_len).to_numpy(),
+        ema(source_bars.close, slow_len).to_numpy(),
         cfg.ema_weakening_gap_pct,
     )
     if source_bars.index.equals(bars.index):
