@@ -52,7 +52,7 @@ class Config:
     # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
     # ["1D", "30min"]; la salida weakening se dispara si hay debilitamiento en
     # cualquiera de ellos.
-    ema_weakening_timeframe: str | list[str] | tuple[str, ...] = "4h"
+    ema_weakening_timeframe: str | list[str] | tuple[str, ...] = ("4h", "1D")
     # Longitudes de las EMAs propias de la salida weakening. Si son > 0 se usan
     # en lugar de `ema_fast`/`ema_slow` (permiten elegir el periodo sin tocar el
     # cruce de entrada); con 0 se reutilizan los del cruce.

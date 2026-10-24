@@ -22,7 +22,10 @@
   "adx_key_level": 23.0,
   "adx_exit_pct": 100.0,
   "ema_weakening_exit_enabled": true,
-  "ema_weakening_timeframe": "4h",
+  "ema_weakening_timeframe": [
+    "4h",
+    "1D"
+  ],
   "ema_weakening_fast": 21,
   "ema_weakening_slow": 55,
   "ema_weakening_gap_pct": 0.0001,
