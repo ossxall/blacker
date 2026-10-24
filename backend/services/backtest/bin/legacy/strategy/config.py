@@ -99,7 +99,7 @@ class Config:
     # `..._exit_pct` es el % de la posición que se cierra al tocar la EMA
     # (100 = cierre total; < 100 = salida parcial, una sola vez por posición).
     close_on_ema_slow_touch: bool = True
-    close_on_ema_slow_touch_pct: float = 0.1  # Tolerancia en % (0.10 = 0.10%)
+    close_on_ema_slow_touch_pct: float = 0.01  # Tolerancia en % (0.10 = 0.10%)
     close_on_ema_slow_touch_after: bool = False  # False = antes del toque; True = después
     close_on_ema_slow_touch_exit_pct: float = 25.0  # % de la posición a cerrar en el toque
 
