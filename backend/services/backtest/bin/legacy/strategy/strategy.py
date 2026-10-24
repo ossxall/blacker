@@ -13,6 +13,12 @@ total) una sola vez por posición. La tolerancia `close_on_ema_slow_touch_pct`
 desplaza el nivel de disparo; con `close_on_ema_slow_touch_after=False` (default)
 se aplica antes del toque y con `True` después.
 
+Cuando la entrada se completa por confirmación (scale-in), una salida parcial
+adicional cierra `entry_confirm_move_exit_portion_pct` % de la posición si el
+precio se mueve `entry_confirm_move_exit_pct` % en contra del precio de la
+entrada de confirmación (`entry_confirm_move_exit_enabled`; 50 % a 0,3 % por
+defecto, una sola vez por posición).
+
 La salida por debilitamiento de las EMAs (`ema_weakening_exit_enabled`) cierra
 `ema_weakening_exit_pct` % de la posición cuando el cruce de las EMAs del
 timeframe `ema_weakening_timeframe` se estrecha por debajo de
@@ -235,6 +241,15 @@ class EMACrossStrategy:
             build_rsi_divergence_exit(raw, bars, self.cfg),
         )
 
+    def prepare_confirm_exit(self, raw: pd.DataFrame, bars: pd.DataFrame) -> Optional[np.ndarray]:
+        cfg = self.cfg
+        enabled = getattr(cfg, "entry_confirm_move_exit_enabled", None)
+        if enabled is None:
+            enabled = getattr(cfg, "confirm_entry_adverse_exit_enabled", True)
+        if not enabled or bars.empty:
+            return np.zeros(len(bars), bool)
+        return np.zeros(len(bars), bool)
+
 
 # ---------------------------------------------------------------------------
 # Motor de ejecución
@@ -353,6 +368,7 @@ class Backtester:
             entry_bar_index=self._bar_index,
             last_add_price=price if qty_init >= qty_total else 0.0,
             add_count=0,
+            confirm_exit_done=False,
         )
         self.opened.append({
             "position_id": self.position_id, "time": ts, "price": price, "side": side,
@@ -525,6 +541,66 @@ class Backtester:
             pos.touch_done = True
         return True
 
+    def _confirm_move_exit_level(self) -> Optional[float]:
+        """Nivel de salida parcial si el precio va en contra de la confirmación.
+
+        Devuelve el precio de disparo calculado desde el precio de la entrada
+        de confirmación (``pos.last_add_price``), o ``None`` si la regla no
+        está activa, la posición todavía no se confirmó, ya se aplicó una vez
+        o la entrada fue completa (sin add de confirmación).
+        """
+        cfg, pos = self.cfg, self.position
+        if pos is None:
+            return None
+        enabled = getattr(cfg, "entry_confirm_move_exit_enabled", None)
+        if enabled is None:
+            enabled = getattr(cfg, "confirm_entry_adverse_exit_enabled", True)
+        if not enabled or getattr(pos, "confirm_exit_done", False):
+            return None
+        if pos.add_count <= 0 or pos.last_add_price <= 0:
+            return None
+        move_pct = getattr(cfg, "entry_confirm_move_exit_pct", None)
+        if move_pct is None:
+            move_pct = getattr(cfg, "confirm_entry_adverse_move_pct", 0.5)
+        pct = max(float(move_pct), 0.0) / 100.0
+        return pos.last_add_price * (1 - pct) if pos.side == 1 else pos.last_add_price * (1 + pct)
+
+
+    def _confirm_move_exit(self, i: int) -> bool:
+        """Salida parcial cuando el precio se mueve en contra de la confirmación.
+
+        Tras completarse la entrada por confirmación, si el precio recorre
+        ``entry_confirm_move_exit_pct`` % en contra de ``pos.last_add_price``,
+        se cierra ``entry_confirm_move_exit_portion_pct`` % de la posición
+        restante. Sólo se aplica una vez por posición (``pos.confirm_exit_done``)
+        y se resuelve intrabar, como el stop.
+        """
+        cfg, pos = self.cfg, self.position
+        trigger = self._confirm_move_exit_level()
+        if pos is None or trigger is None:
+            return False
+        if pos.side == 1:
+            if self.l[i] > trigger:
+                return False
+            fill = min(self.o[i], trigger)
+        else:
+            if self.h[i] < trigger:
+                return False
+            fill = max(self.o[i], trigger)
+        exit_pct = getattr(cfg, "entry_confirm_move_exit_portion_pct", None)
+        if exit_pct is None:
+            exit_pct = getattr(cfg, "confirm_entry_adverse_exit_pct", 50.0)
+        move_pct = getattr(cfg, "entry_confirm_move_exit_pct", None)
+        if move_pct is None:
+            move_pct = getattr(cfg, "confirm_entry_adverse_move_pct", 0.5)
+        self.close_position(float(exit_pct), fill, self.times[i],
+                            f"CONFIRM_MOVE_AGAINST_{float(move_pct):g}%")
+        pos = self.position
+        if pos is not None:
+            pos.confirm_exit_done = True
+        return True
+
+
     def _rsi_divergence_reason(self, i: int) -> Optional[str]:
         """Motivo de salida total si hay divergencia RSI en contra de la posición.
 
@@ -545,15 +621,19 @@ class Backtester:
         return None
 
     def _manage(self, i: int) -> bool:
-        """Take-profit parcial y salida por toque a la EMA slow.
+        """Take-profit parcial y salidas parciales por precio.
 
-        Devuelve ``True`` si el toque a la EMA slow cerró (parte de) la posición,
-        para que `run` pueda resolver el resto del stop en la misma vela.
+        Gestiona, en orden: toque a la EMA slow, movimiento adverso desde la
+        entrada de confirmación y take-profits parciales. Devuelve ``True`` si
+        una salida parcial cerró (parte de) la posición, para que `run` pueda
+        resolver el resto del stop en la misma vela.
         """
         cfg, pos = self.cfg, self.position
         if pos is None:
             return False
         if self._ema_slow_touch(i):
+            return True
+        if self._confirm_move_exit(i):
             return True
         if not cfg.partial_tp_enabled:
             return False
@@ -586,20 +666,24 @@ class Backtester:
                         pos_after.breakeven = True
         return False
 
-    def _stop(self, i: int, touch_level: Optional[float] = None) -> bool:
+    def _stop(self, i: int, touch_level: Optional[float] = None,
+              confirm_level: Optional[float] = None) -> bool:
         pos = self.position
         if pos is None or pos.stop_pct <= 0: return False
         stop = pos.entry_price if pos.breakeven else self._stop_price(pos.side, pos.entry_price, pos.stop_pct)
         hit = self.l[i] <= stop if pos.side == 1 else self.h[i] >= stop
         if not hit: return False
-        # Si en la misma vela también se toca la EMA slow y ésta se alcanza antes
-        # que el stop (está más cerca de la entrada), gana el toque: el stop se
-        # pospone y `_manage` cerrará por EMA_SLOW_TOUCH. En salida parcial el
-        # resto se cierra al stop en la misma vela (ver `run`).
-        if touch_level is not None and not pos.touch_done:
-            touch_hit = self.l[i] <= touch_level if pos.side == 1 else self.h[i] >= touch_level
-            touch_first = touch_level >= stop if pos.side == 1 else touch_level <= stop
-            if touch_hit and touch_first:
+        # Si en la misma vela también se toca la EMA slow o el nivel de salida
+        # por confirmación y éste se alcanza antes que el stop (está más cerca
+        # de la entrada), gana la salida parcial: el stop se pospone y
+        # `_manage` cerrará por EMA_SLOW_TOUCH o CONFIRM_MOVE_AGAINST. En salida
+        # parcial el resto se cierra al stop en la misma vela (ver `run`).
+        for level, done in ((touch_level, pos.touch_done), (confirm_level, pos.confirm_exit_done)):
+            if level is None or done:
+                continue
+            level_hit = self.l[i] <= level if pos.side == 1 else self.h[i] >= level
+            level_first = level >= stop if pos.side == 1 else level <= stop
+            if level_hit and level_first:
                 return False
         fill = min(self.o[i], stop) if pos.side == 1 else max(self.o[i], stop)
         reason = "BREAKEVEN" if pos.breakeven else f"STOP_LOSS_{pos.stop_pct*100:.2f}%"
@@ -801,8 +885,9 @@ class Backtester:
                 self.close_position(pct, self.o[i], self.times[i], reason)
                 self.pending_exit = None
 
-            # 3) Gestión de stops y TP parciales
-            stop_hit = self._stop(i, self._ema_slow_touch_level(i))
+            # 3) Gestión de stops y salidas parciales
+            confirm_level = self._confirm_move_exit_level()
+            stop_hit = self._stop(i, self._ema_slow_touch_level(i), confirm_level)
             if not stop_hit:
                 # Tras una salida parcial por toque a la EMA slow, si la vela
                 # también recorrió hasta el stop, se cierra el resto al stop.
@@ -974,6 +1059,21 @@ def parse_args():
                    help="Tolerancia %% para pullback_retest (default 0.10%%).")
     p.add_argument("--entry-confirm-max-move-pct", type=float, default=d.entry_confirm_max_move_pct,
                    help="Bloquea añadir el resto si el precio se ha movido en contra más de X%% desde la entrada parcial (0 = desactivado).")
+    p.add_argument("--entry-confirm-move-exit", action=argparse.BooleanOptionalAction,
+                   default=getattr(d, "entry_confirm_move_exit_enabled", getattr(d, "confirm_entry_adverse_exit_enabled", True)),
+                   help="Salida parcial si el precio se mueve en contra de la entrada de confirmación.")
+    p.add_argument("--entry-confirm-move-exit-pct", type=float, default=getattr(d, "entry_confirm_move_exit_pct", getattr(d, "confirm_entry_adverse_move_pct", 0.5)),
+                   help="%% de movimiento adverso desde la entrada de confirmación para disparar la salida (default 0.5).")
+    p.add_argument("--entry-confirm-move-exit-portion-pct", type=float,
+                   default=getattr(d, "entry_confirm_move_exit_portion_pct", getattr(d, "confirm_entry_adverse_exit_pct", 50.0)),
+                   help="%% de la posición restante a cerrar en esa salida (default 50).")
+    p.add_argument("--confirm-adverse-exit", action=argparse.BooleanOptionalAction,
+                   default=getattr(d, "confirm_entry_adverse_exit_enabled", getattr(d, "entry_confirm_move_exit_enabled", True)),
+                   help="Salida parcial después de la entrada por confirmación si el precio va en contra.")
+    p.add_argument("--confirm-adverse-move-pct", type=float, default=getattr(d, "confirm_entry_adverse_move_pct", 0.5),
+                   help="%% adverso desde la entrada de confirmación para disparar la salida (default 0.5).")
+    p.add_argument("--confirm-adverse-exit-pct", type=float, default=getattr(d, "confirm_entry_adverse_exit_pct", 50.0),
+                   help="%% de la posición a cerrar (default 50).")
     p.add_argument("--close-on-ema-slow-touch", action=argparse.BooleanOptionalAction, default=d.close_on_ema_slow_touch)
     p.add_argument("--close-on-ema-slow-touch-pct", type=float, default=d.close_on_ema_slow_touch_pct,
                    help="Tolerancia en %% alrededor de la EMA slow (0.10 = 0.10%%).")
@@ -1064,6 +1164,9 @@ def config_from_args(a) -> Config:
         entry_confirm_close_in_dir=a.entry_confirm_close_in_dir,
         entry_confirm_retest_tol_pct=a.entry_confirm_retest_tol_pct,
         entry_confirm_max_move_pct=a.entry_confirm_max_move_pct,
+        entry_confirm_move_exit_enabled=getattr(a, "confirm_adverse_exit", getattr(a, "entry_confirm_move_exit", True)),
+        entry_confirm_move_exit_pct=getattr(a, "confirm_adverse_move_pct", getattr(a, "entry_confirm_move_exit_pct", 0.5)),
+        entry_confirm_move_exit_portion_pct=getattr(a, "confirm_adverse_exit_pct", getattr(a, "entry_confirm_move_exit_portion_pct", 50.0)),
         close_on_ema_slow_touch=a.close_on_ema_slow_touch,
         close_on_ema_slow_touch_pct=a.close_on_ema_slow_touch_pct,
         close_on_ema_slow_touch_after=a.close_on_ema_slow_touch_after,

@@ -25,6 +25,7 @@ class Position:
     entry_bar_index: int = -1           # Índice de barra donde se hizo la 1ª entrada
     last_add_price: float = 0.0         # Precio del último add
     add_count: int = 0                  # Número de adds realizados
+    confirm_exit_done: bool = False     # Salida parcial por movimiento adverso desde la confirmación
 
 
 @dataclass

@@ -10,7 +10,7 @@ Lee la data OHLCV almacenada por `feed.py` en `data/feed.db` (1m por defecto) y
   `EMACrossStrategy` y ejecuta el `Backtester` sobre las velas cerradas.
 - Por cada acción que tomaría el backtest (apertura, reversal, cierre por
   EMA_CROSS, ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE, STOP_LOSS, BREAKEVEN,
-  PARTIAL_TP, EMA_SLOW_TOUCH)
+  PARTIAL_TP, EMA_SLOW_TOUCH, CONFIRM_MOVE_AGAINST)
   guarda un evento en `signal.db`.
 
 Reglas de diseño
@@ -22,8 +22,8 @@ Reglas de diseño
 - Las decisiones se conocen al cierre de la vela y se ejecutan en la apertura
   siguiente (igual que el backtest); por eso se guardan `bar_time` (vela de la
   señal) y `signal_time` (momento de ejecución). Las salidas por stop/breakeven/
-  partial/toque a la EMA slow se disparan dentro de la vela, por lo que
-  `bar_time == signal_time`.
+  partial/toque a la EMA slow/movimiento adverso desde la confirmación se
+  disparan dentro de la vela, por lo que `bar_time == signal_time`.
 - `force_close_at_end` se desactiva: en vivo una posición abierta no debe
   cerrarse artificialmente al final de los datos disponibles.
 
@@ -38,9 +38,10 @@ ordena por `(signal_time, bar_time, event)` con `EXIT` antes que `ENTRY`:
 - `EXIT` por EMA_CROSS / ADX / EMA_WEAKENING / RSI_DIVERGENCE: también
   `signal_time = bar_time + timeframe` (se decide al cierre y se ejecuta en la
   apertura siguiente).
-- `EXIT` por STOP_LOSS / BREAKEVEN / PARTIAL_TP / EMA_SLOW_TOUCH: ocurre dentro
-  de la vela, por eso `signal_time == bar_time`. Si coincide con una apertura,
-  la apertura va primero (bar_time menor).
+- `EXIT` por STOP_LOSS / BREAKEVEN / PARTIAL_TP / EMA_SLOW_TOUCH /
+  CONFIRM_MOVE_AGAINST: ocurre dentro de la vela, por eso `signal_time ==
+  bar_time`. Si coincide con una apertura, la apertura va primero (bar_time
+  menor).
 
 El `payload` de cada `EXIT` incluye `action` (`CLOSE`/`PARTIAL_CLOSE`),
 `close_pct` (porcentaje de la posición *restante* a cerrar, igual que el
@@ -264,6 +265,10 @@ _CONFIG_ENV = {
     "entry_confirm_bars": ("STRATEGY_ENTRY_CONFIRM_BARS", env_int),
     "entry_confirm_close_in_dir": ("STRATEGY_ENTRY_CONFIRM_CLOSE_IN_DIR", env_bool),
     "entry_confirm_retest_tol_pct": ("STRATEGY_ENTRY_CONFIRM_RETEST_TOL_PCT", env_float),
+    "entry_confirm_max_move_pct": ("STRATEGY_ENTRY_CONFIRM_MAX_MOVE_PCT", env_float),
+    "entry_confirm_move_exit_enabled": ("STRATEGY_ENTRY_CONFIRM_MOVE_EXIT", env_bool),
+    "entry_confirm_move_exit_pct": ("STRATEGY_ENTRY_CONFIRM_MOVE_EXIT_PCT", env_float),
+    "entry_confirm_move_exit_portion_pct": ("STRATEGY_ENTRY_CONFIRM_MOVE_EXIT_PORTION_PCT", env_float),
 }
 
 
@@ -528,8 +533,9 @@ def events_to_trades(events: list[dict]) -> list[dict]:
 
 
 def _reason_is_intrabar(reason: str) -> bool:
-    """Stop, breakeven, take-profit parcial y toque a la EMA slow se disparan dentro de la vela."""
-    return reason.startswith(("STOP_LOSS", "PARTIAL_TP", "EMA_SLOW_TOUCH")) or reason == "BREAKEVEN"
+    """Stop, breakeven, take-profit parcial y salidas por precio se disparan dentro de la vela."""
+    return reason.startswith(("STOP_LOSS", "PARTIAL_TP", "EMA_SLOW_TOUCH", "CONFIRM_MOVE_AGAINST")) \
+        or reason == "BREAKEVEN"
 
 
 def build_events(

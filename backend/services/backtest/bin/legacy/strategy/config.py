@@ -114,6 +114,21 @@ class Config:
     entry_confirm_retest_tol_pct: float = 0.10  # Tolerancia % para pullback_retest
     entry_confirm_max_move_pct: float = 0.3  # Si > 0, no añade el resto si el precio se ha movido > X% desde la entrada parcial
 
+    # --- Salida parcial en contra de la entrada de confirmación -------------
+    # Una vez completada la entrada por confirmación (scale-in), si el precio
+    # se mueve `entry_confirm_move_exit_pct` % en contra del precio de esa
+    # entrada de confirmación, se cierra `entry_confirm_move_exit_portion_pct` %
+    # de la posición restante. Se aplica una sola vez por posición. Es una
+    # señal de salida intrabar (stop-like) independiente del stop principal.
+    entry_confirm_move_exit_enabled: bool = True
+    entry_confirm_move_exit_pct: float = 0.6
+    entry_confirm_move_exit_portion_pct: float = 25.0
+    # Alias con nombres más descriptivos solicitados
+    confirm_entry_adverse_exit_enabled: bool = True
+    confirm_entry_adverse_move_pct: float = 0.6
+    confirm_entry_adverse_exit_pct: float = 25.0
+
+
     # --- Filtro de régimen -------------------------------------------------
     # Sólo se admiten entradas alineadas con la tendencia del timeframe
     # superior `trend_timeframe`:
@@ -316,6 +331,11 @@ class Config:
                 raise ValueError("entry_confirm_retest_tol_pct no puede ser negativo.")
             if self.entry_confirm_max_move_pct < 0:
                 raise ValueError("entry_confirm_max_move_pct no puede ser negativo.")
+        if self.entry_confirm_move_exit_enabled:
+            if self.entry_confirm_move_exit_pct <= 0:
+                raise ValueError("entry_confirm_move_exit_pct debe ser positivo.")
+            if not 0 < self.entry_confirm_move_exit_portion_pct <= 100:
+                raise ValueError("entry_confirm_move_exit_portion_pct debe estar en (0, 100].")
         if not (self.allow_long or self.allow_short):
             raise ValueError("Debe habilitarse LONG, SHORT o ambos.")
         if self.trend_filter not in ("off", "cross", "slow"):
