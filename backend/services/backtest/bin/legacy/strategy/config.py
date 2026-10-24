@@ -113,6 +113,9 @@ class Config:
     entry_confirm_close_in_dir: bool = True  # Exige cierre en dirección tras confirmación (modo bars)
     entry_confirm_retest_tol_pct: float = 0.10  # Tolerancia % para pullback_retest
     entry_confirm_max_move_pct: float = 0.3  # Si > 0, no añade el resto si el precio se ha movido > X% desde la entrada parcial
+    # Si la vela donde ocurre la confirmación para añadir el resto cierra en negativo
+    # respecto al precio de entrada parcial, se cierra el 100% de la posición en lugar de hacer scale-in.
+    entry_confirm_close_on_negative: bool = True
 
     # --- Salida parcial en contra de la entrada de confirmación -------------
     # Una vez completada la entrada por confirmación (scale-in), si el precio
@@ -120,11 +123,11 @@ class Config:
     # entrada de confirmación, se cierra `entry_confirm_move_exit_portion_pct` %
     # de la posición restante. Se aplica una sola vez por posición. Es una
     # señal de salida intrabar (stop-like) independiente del stop principal.
-    entry_confirm_move_exit_enabled: bool = True
+    entry_confirm_move_exit_enabled: bool = False
     entry_confirm_move_exit_pct: float = 0.6
     entry_confirm_move_exit_portion_pct: float = 25.0
     # Alias con nombres más descriptivos solicitados
-    confirm_entry_adverse_exit_enabled: bool = True
+    confirm_entry_adverse_exit_enabled: bool = False
     confirm_entry_adverse_move_pct: float = 0.6
     confirm_entry_adverse_exit_pct: float = 25.0
 

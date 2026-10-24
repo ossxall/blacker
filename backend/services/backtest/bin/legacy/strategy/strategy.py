@@ -897,6 +897,12 @@ class Backtester:
             # 4) Añadir entrada parcial pendiente (scale-in) — decidido al cierre de i
             if not stop_hit and self.position is not None and self.cfg.entry_partial_enabled:
                 if self._should_add_partial(i):
+                    pos = self.position
+                    # Si la vela donde ocurre la confirmación cierra en negativo respecto a la entrada parcial, cerrar todo
+                    if getattr(self.cfg, "entry_confirm_close_on_negative", True):
+                        if (pos.side == 1 and self.c[i] < pos.entry_price - 1e-12) or (pos.side == -1 and self.c[i] > pos.entry_price + 1e-12):
+                            self.pending_exit = ("CONFIRM_CLOSE_NEG", 100.0)
+                            continue
                     # Ejecutar resto completo en apertura de i+1
                     self.pending_add = (i + 1, 100.0)
 
