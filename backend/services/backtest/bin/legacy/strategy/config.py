@@ -112,6 +112,7 @@ class Config:
     entry_confirm_bars: int = 2            # Nº de velas tras entrada parcial
     entry_confirm_close_in_dir: bool = True  # Exige cierre en dirección tras confirmación (modo bars)
     entry_confirm_retest_tol_pct: float = 0.10  # Tolerancia % para pullback_retest
+    entry_confirm_max_move_pct: float = 0.3  # Si > 0, no añade el resto si el precio se ha movido > X% desde la entrada parcial
 
     # --- Filtro de régimen -------------------------------------------------
     # Sólo se admiten entradas alineadas con la tendencia del timeframe
@@ -313,6 +314,8 @@ class Config:
                 raise ValueError("entry_confirm_bars no puede ser negativo.")
             if self.entry_confirm_retest_tol_pct < 0:
                 raise ValueError("entry_confirm_retest_tol_pct no puede ser negativo.")
+            if self.entry_confirm_max_move_pct < 0:
+                raise ValueError("entry_confirm_max_move_pct no puede ser negativo.")
         if not (self.allow_long or self.allow_short):
             raise ValueError("Debe habilitarse LONG, SHORT o ambos.")
         if self.trend_filter not in ("off", "cross", "slow"):

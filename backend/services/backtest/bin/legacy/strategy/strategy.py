@@ -266,6 +266,7 @@ class Backtester:
         # Aperturas y añadidos de entrada parcial (scale-in) para reportar/públicar.
         self.opened: list[dict] = []
         self.adds: list[dict] = []
+        self.add_skipped: list[dict] = []
         self.trade_id = self.position_id = 0
         self.eq_time, self.eq_cash, self.eq_value, self.eq_side, self.eq_qty = [], [], [], [], []
         # Protección de riesgo: estado del límite mensual, de la pausa por
@@ -657,6 +658,25 @@ class Backtester:
             pos.partial_entry_done = True
             return False
         cfg = self.cfg
+        if cfg.entry_confirm_max_move_pct > 0 and pos.entry_price > 0:
+            move_pct_against = (self.c[i] / pos.entry_price - 1.0) * 100.0 * pos.side
+            if move_pct_against <= -cfg.entry_confirm_max_move_pct:
+                if self.verbose:
+                    print(f"[SKIP_ADD] {self.times[i]} precio se ha movido {abs(move_pct_against):.2f}% en contra de la entrada, no se añade el resto", flush=True)
+                try:
+                    self.add_skipped.append({
+                        "position_id": pos.position_id,
+                        "time": self.times[i],
+                        "price": float(self.c[i]),
+                        "entry_price": float(pos.entry_price),
+                        "side": pos.side,
+                        "move_pct_against": float(abs(move_pct_against)),
+                        "threshold": float(cfg.entry_confirm_max_move_pct),
+                        "entry_pct": float(pos.entry_partial_pct or 50.0),
+                    })
+                except Exception:
+                    pass
+                return False
         if cfg.entry_confirm_mode == "bars":
             bars_passed = i - pos.entry_bar_index
             if bars_passed < cfg.entry_confirm_bars:
@@ -952,6 +972,8 @@ def parse_args():
                    help="Exige cierre en dirección para confirmar (modo 'bars').")
     p.add_argument("--entry-confirm-retest-tol-pct", type=float, default=d.entry_confirm_retest_tol_pct,
                    help="Tolerancia %% para pullback_retest (default 0.10%%).")
+    p.add_argument("--entry-confirm-max-move-pct", type=float, default=d.entry_confirm_max_move_pct,
+                   help="Bloquea añadir el resto si el precio se ha movido en contra más de X%% desde la entrada parcial (0 = desactivado).")
     p.add_argument("--close-on-ema-slow-touch", action=argparse.BooleanOptionalAction, default=d.close_on_ema_slow_touch)
     p.add_argument("--close-on-ema-slow-touch-pct", type=float, default=d.close_on_ema_slow_touch_pct,
                    help="Tolerancia en %% alrededor de la EMA slow (0.10 = 0.10%%).")
@@ -1041,6 +1063,7 @@ def config_from_args(a) -> Config:
         entry_confirm_bars=a.entry_confirm_bars,
         entry_confirm_close_in_dir=a.entry_confirm_close_in_dir,
         entry_confirm_retest_tol_pct=a.entry_confirm_retest_tol_pct,
+        entry_confirm_max_move_pct=a.entry_confirm_max_move_pct,
         close_on_ema_slow_touch=a.close_on_ema_slow_touch,
         close_on_ema_slow_touch_pct=a.close_on_ema_slow_touch_pct,
         close_on_ema_slow_touch_after=a.close_on_ema_slow_touch_after,
@@ -1098,6 +1121,7 @@ def main():
         rsi_div_exit=rsi_div_exit,
         opens=engine.opened,
         adds=engine.adds,
+        add_skipped=getattr(engine, "add_skipped", None),
     )
 
 
