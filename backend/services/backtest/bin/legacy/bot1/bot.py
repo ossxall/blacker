@@ -788,7 +788,7 @@ class SignalBot:
             )
             return 0
 
-        signals = self.strategy.generate_signals(bars)
+        signals = self.strategy.generate_signals(bars, raw)
         adx_exit, weak_exit, rsi_div_exit = self.strategy.prepare_exits(raw, bars)
         events = build_events(
             bars, signals, adx_exit, weak_exit, rsi_div_exit,

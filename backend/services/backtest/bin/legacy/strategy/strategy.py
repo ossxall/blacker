@@ -96,7 +96,7 @@ API para bots:
     # En ejecución real, actuar en la siguiente apertura/iteración.
 
 Dependencias:
-    pip install "pandas>=2" pyarrow numpy matplotlib
+    pip install "pandas>=2" pyarrow numpy matplotlib TA-Lib
 """
 from __future__ import annotations
 from dataclasses import asdict
@@ -116,7 +116,9 @@ from strategy.indicators import (
     ema,
     adx,
     confirmed_crosses,
+    align_closed_flags,
     align_closed_values,
+    spread_flags,
     build_adx_exit,
     build_weakening_exit,
     build_rsi_divergence_exit,
@@ -124,13 +126,35 @@ from strategy.indicators import (
 from strategy.utils import (
     load_parquet,
     resample_ohlcv,
+    source_minutes,
     to_timeframe
 )
 from strategy.report import generate_report
 import argparse
 import time
+import talib
 import numpy as np
 import pandas as pd
+
+# Patrones de reversión/continuación alcista de TA-Lib. Se combinan con OR:
+# basta con que cualquiera de ellos aparezca en cualquiera de los timeframes.
+LONG_CANDLE_PATTERNS = (
+    "CDLHAMMER",
+    "CDLINVERTEDHAMMER",
+    "CDLPIERCING",
+    "CDLMORNINGSTAR",
+    "CDLMORNINGDOJISTAR",
+    "CDL3WHITESOLDIERS",
+    "CDLHOMINGPIGEON",
+    "CDLMATCHINGLOW",
+    "CDLLADDERBOTTOM",
+    "CDLSTICKSANDWICH",
+    "CDLUNIQUE3RIVER",
+    "CDL3STARSINSOUTH",
+    "CDLCONCEALBABYSWALL",
+    "CDLTAKURI",
+    "CDLMATHOLD",
+)
 
 # ---------------------------------------------------------------------------
 # Estrategia: compartida por backtest y bots
@@ -197,7 +221,79 @@ class EMACrossStrategy:
         aligned = align_closed_values(bars_upper.index, values, bars.index, upper_tf, cfg.timeframe)
         return np.nan_to_num(aligned, nan=-np.inf) >= cfg.chop_adx_min
 
-    def generate_signals(self, bars: pd.DataFrame) -> pd.DataFrame:
+    def _long_candle_confirmation(
+        self, bars: pd.DataFrame, raw: Optional[pd.DataFrame] = None
+    ) -> np.ndarray:
+        """Combina patrones alcistas TA-Lib de los timeframes disponibles.
+
+        Si hay datos fuente más finos (p. ej. 1m para una estrategia de 30m),
+        revisa también 5m/15m. Los patrones se alinean usando únicamente la
+        última vela fuente ya cerrada, por lo que no hay lookahead.
+        """
+        combined = np.zeros(len(bars), dtype=bool)
+        if bars.empty:
+            return combined
+
+        strategy_delta = pd.Timedelta(self.cfg.timeframe)
+        max_pattern_delta = pd.Timedelta("30min")
+        frames: list[tuple[pd.DataFrame, pd.Timedelta]] = []
+        seen: set[tuple[int, int]] = set()
+
+        def add_frame(frame: pd.DataFrame, delta: pd.Timedelta) -> None:
+            if frame.empty or delta <= pd.Timedelta(0):
+                return
+            key = (int(delta.value), int(frame.index[0].value))
+            if key not in seen:
+                seen.add(key)
+                frames.append((frame, delta))
+
+        # El timeframe de la estrategia también se usa si es <= 30m; para
+        # estrategias mayores, la confirmación proviene de los marcos menores.
+        if strategy_delta <= max_pattern_delta:
+            add_frame(bars, strategy_delta)
+
+        if raw is not None and not raw.empty:
+            source_delta = pd.Timedelta(minutes=source_minutes(raw))
+            if source_delta < max_pattern_delta and source_delta < strategy_delta:
+                add_frame(raw, source_delta)
+                for timeframe in ("5min", "15min"):
+                    target_delta = pd.Timedelta(timeframe)
+                    if source_delta < target_delta < min(max_pattern_delta, strategy_delta):
+                        try:
+                            add_frame(resample_ohlcv(raw, timeframe), target_delta)
+                        except ValueError:
+                            continue
+
+        for frame, source_delta in frames:
+            o, h, low, c = (
+                np.ascontiguousarray(frame[column].to_numpy(dtype=np.float64))
+                for column in ("open", "high", "low", "close")
+            )
+            detected = np.zeros(len(frame), dtype=bool)
+            for pattern_name in LONG_CANDLE_PATTERNS:
+                pattern = getattr(talib, pattern_name)(o, h, low, c)
+                detected |= pattern > 0
+
+            # Conserva una señal intrabar hasta el cierre de la vela de
+            # estrategia que la contiene; de otro modo un patrón de 5m/15m
+            # desaparecería antes de cerrar la vela de 30m.
+            if source_delta < strategy_delta:
+                window = max(1, int(np.ceil(strategy_delta / source_delta)))
+                detected = spread_flags(detected, window)
+
+            if frame.index.equals(bars.index) and source_delta == strategy_delta:
+                aligned = detected
+            else:
+                aligned = align_closed_flags(
+                    frame.index, detected, bars.index, source_delta, self.cfg.timeframe
+                )
+            combined |= aligned
+
+        return combined
+
+    def generate_signals(
+        self, bars: pd.DataFrame, raw: Optional[pd.DataFrame] = None
+    ) -> pd.DataFrame:
         cfg = self.cfg
         fast = ema(bars.close, cfg.ema_fast).to_numpy(float)
         slow = ema(bars.close, cfg.ema_slow).to_numpy(float)
@@ -220,9 +316,11 @@ class EMACrossStrategy:
             up, down = up & chop, down & chop
         up &= valid
         down &= valid
+        long_candle_confirmation = self._long_candle_confirmation(bars, raw)
         return pd.DataFrame({
             "ema_fast": fast, "ema_slow": slow, "adx_entry": entry_adx,
             "cross_up": up, "cross_down": down, "valid": valid,
+            "long_candle_confirmation": long_candle_confirmation,
             "trend_bias": bias if bias is not None else np.zeros(len(bars), int),
             "chop_ok": chop if chop is not None else np.ones(len(bars), bool),
             "target": np.select([up, down], [1, -1], default=0),
@@ -778,6 +876,12 @@ class Backtester:
                 except Exception:
                     pass
                 return False
+        # Cualquiera de los patrones alcistas detectados en TA-Lib confirma el
+        # scale-in LONG (OR entre patrones/timeframes y con el modo tradicional).
+        if pos.side == 1 and self.signals is not None \
+                and "long_candle_confirmation" in self.signals.columns \
+                and bool(self.signals["long_candle_confirmation"].iloc[i]):
+            return True
         if cfg.entry_confirm_mode == "bars":
             return self._entry_confirmed_by_bars(i)
         elif cfg.entry_confirm_mode == "close_above_ema":
@@ -1212,7 +1316,7 @@ def main():
     if len(bars) < cfg.ema_slow + 2:
         raise ValueError(f"Dataset insuficiente para EMA{cfg.ema_slow}: {len(bars)} velas.")
     strategy = EMACrossStrategy(cfg)
-    signals = strategy.generate_signals(bars)
+    signals = strategy.generate_signals(bars, raw)
     adx_exit, weak_exit, rsi_div_exit = strategy.prepare_exits(raw, bars)
     if cfg.adx_exit_enabled:
         print(f"[ADX] {'disponible' if adx_exit is not None else 'sin datos suficientes/timeframe incompatible'}", flush=True)

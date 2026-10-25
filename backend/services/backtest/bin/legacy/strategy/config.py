@@ -115,7 +115,7 @@ class Config:
     entry_confirm_max_move_pct: float = 0.3  # Si > 0, no añade el resto si el precio se ha movido > X% desde la entrada parcial
     # Si la vela donde ocurre la confirmación para añadir el resto cierra en negativo
     # respecto al precio de entrada parcial, se cierra el 100% de la posición en lugar de hacer scale-in.
-    entry_confirm_close_on_negative: bool = True
+    entry_confirm_close_on_negative: bool = False
 
     # --- Salida parcial en contra de la entrada de confirmación -------------
     # Una vez completada la entrada por confirmación (scale-in), si el precio
