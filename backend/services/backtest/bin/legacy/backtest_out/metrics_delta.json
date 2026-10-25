@@ -1,27 +1,27 @@
 {
-  "generated_at": "2026-10-24T19:04:59.703233+00:00",
+  "generated_at": "2026-10-25T01:58:23.021601+00:00",
   "previous_available": true,
   "delta": {
     "avg_pnl": {
-      "previous": 100.12550945403366,
+      "previous": 115.0348759906151,
       "current": 115.0348759906151,
-      "delta": 14.909366536581445,
-      "delta_pct": 14.890677328764198,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "expectancy_r": {
-      "previous": 0.45380821129418947,
+      "previous": 0.4814059656446045,
       "current": 0.4814059656446045,
-      "delta": 0.02759775435041506,
-      "delta_pct": 6.081369544132006,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "final_equity": {
-      "previous": 49849.952762705434,
+      "previous": 55783.88064426482,
       "current": 55783.88064426482,
-      "delta": 5933.927881559386,
-      "delta_pct": 11.90357774220154,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "initial_capital": {
       "previous": 10000.0,
@@ -31,18 +31,18 @@
       "changed": false
     },
     "legs": {
-      "previous": 940,
+      "previous": 824,
       "current": 824,
-      "delta": -116,
-      "delta_pct": -12.340425531914894,
-      "changed": true
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "losses": {
-      "previous": 175,
+      "previous": 173,
       "current": 173,
-      "delta": -2,
-      "delta_pct": -1.1428571428571428,
-      "changed": true
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "max_consecutive_losses": {
       "previous": 5,
@@ -52,39 +52,39 @@
       "changed": false
     },
     "max_dd_peak_equity": {
-      "previous": 25245.3817898196,
+      "previous": 27759.49614138329,
       "current": 27759.49614138329,
-      "delta": 2514.1143515636904,
-      "delta_pct": 9.958709963251684,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "max_dd_peak_vs_capital_pct": {
-      "previous": 152.453817898196,
+      "previous": 177.5949614138329,
       "current": 177.5949614138329,
-      "delta": 25.141143515636884,
-      "delta_pct": 16.490989771358414,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "max_dd_trough_equity": {
-      "previous": 23407.105415348742,
+      "previous": 25476.032672481877,
       "current": 25476.032672481877,
-      "delta": 2068.927257133135,
-      "delta_pct": 8.838885545311712,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "max_dd_trough_vs_capital_pct": {
-      "previous": 134.07105415348744,
+      "previous": 154.76032672481875,
       "current": 154.76032672481875,
-      "delta": 20.689272571331315,
-      "delta_pct": 15.43157298341653,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "max_drawdown_pct": {
-      "previous": -7.281634279787985,
+      "previous": -8.225882261231943,
       "current": -8.225882261231943,
-      "delta": -0.9442479814439579,
-      "delta_pct": -12.967528238337328,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "min_equity": {
       "previous": 9990.474075377719,
@@ -101,11 +101,11 @@
       "changed": false
     },
     "net_pnl": {
-      "previous": 39849.9527627054,
+      "previous": 45783.88064426481,
       "current": 45783.88064426481,
-      "delta": 5933.927881559415,
-      "delta_pct": 14.890677328764198,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "positions": {
       "previous": 398,
@@ -115,53 +115,53 @@
       "changed": false
     },
     "profit_factor": {
-      "previous": 2.642171966505874,
+      "previous": 2.5800039303681737,
       "current": 2.5800039303681737,
-      "delta": -0.06216803613770017,
-      "delta_pct": -2.352914076971074,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "return_over_maxdd": {
-      "previous": 54.726660570305,
+      "previous": 55.65832234195877,
       "current": 55.65832234195877,
-      "delta": 0.9316617716537721,
-      "delta_pct": 1.702391050257682,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "return_pct": {
-      "previous": 398.49952762705436,
+      "previous": 457.8388064426482,
       "current": 457.8388064426482,
-      "delta": 59.33927881559384,
-      "delta_pct": 14.890677328764108,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "sharpe_daily_365": {
-      "previous": 2.1041749091556854,
+      "previous": 2.1635357292230313,
       "current": 2.1635357292230313,
-      "delta": 0.05936082006734589,
-      "delta_pct": 2.8210972295627657,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "sortino_daily_365": {
-      "previous": 5.088966200561511,
+      "previous": 5.110772937920955,
       "current": 5.110772937920955,
-      "delta": 0.021806737359444384,
-      "delta_pct": 0.4285101629686252,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "win_rate_pct": {
-      "previous": 56.03015075376885,
+      "previous": 56.53266331658291,
       "current": 56.53266331658291,
-      "delta": 0.5025125628140614,
-      "delta_pct": 0.8968609865470692,
-      "changed": true
+      "delta": 0.0,
+      "delta_pct": 0.0,
+      "changed": false
     },
     "wins": {
-      "previous": 223,
+      "previous": 225,
       "current": 225,
-      "delta": 2,
-      "delta_pct": 0.8968609865470852,
-      "changed": true
+      "delta": 0,
+      "delta_pct": 0.0,
+      "changed": false
     }
   }
 }

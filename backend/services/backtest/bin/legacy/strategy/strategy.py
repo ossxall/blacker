@@ -732,7 +732,24 @@ class Backtester:
             pos.quantity = pos.target_quantity
             pos.partial_entry_done = True
 
+    def _entry_confirmed_by_bars(self, i: int) -> bool:
+        """Confirma el scale-in tras N cierres y, opcionalmente, a favor de la entrada.
+
+        La vela de la primera entrada tiene antigüedad cero. Por tanto, con la
+        configuración recomendada (``entry_confirm_bars=2``) la confirmación se
+        evalúa en el segundo cierre posterior y `run` ejecuta el resto en la
+        apertura de la vela siguiente. La dirección se mide desde el precio de
+        entrada inicial, no desde el cierre anterior ni el color de la vela.
+        """
+        cfg, pos = self.cfg, self.position
+        if pos is None or i - pos.entry_bar_index < cfg.entry_confirm_bars:
+            return False
+        if not cfg.entry_confirm_close_in_dir:
+            return True
+        return (self.c[i] - pos.entry_price) * pos.side >= -1e-12
+
     def _should_add_partial(self, i: int) -> bool:
+        """Indica si al cierre de ``i`` debe programarse el resto de la entrada."""
         pos = self.position
         if pos is None or pos.target_quantity <= 0:
             return False
@@ -762,17 +779,7 @@ class Backtester:
                     pass
                 return False
         if cfg.entry_confirm_mode == "bars":
-            bars_passed = i - pos.entry_bar_index
-            if bars_passed < cfg.entry_confirm_bars:
-                return False
-            if cfg.entry_confirm_close_in_dir:
-                if pos.side == 1:
-                    if self.c[i] < pos.entry_price - 1e-12:
-                        return False
-                else:
-                    if self.c[i] > pos.entry_price + 1e-12:
-                        return False
-            return True
+            return self._entry_confirmed_by_bars(i)
         elif cfg.entry_confirm_mode == "close_above_ema":
             if self.signals is None:
                 return False
