@@ -116,9 +116,7 @@ from strategy.indicators import (
     ema,
     adx,
     confirmed_crosses,
-    align_closed_flags,
     align_closed_values,
-    spread_flags,
     build_adx_exit,
     build_weakening_exit,
     build_rsi_divergence_exit,
@@ -136,8 +134,9 @@ import talib
 import numpy as np
 import pandas as pd
 
-# Patrones de reversión/continuación alcista de TA-Lib. Se combinan con OR:
-# basta con que cualquiera de ellos aparezca en cualquiera de los timeframes.
+# Patrones unidireccionales según la clasificación solicitada. Los patrones
+# bidireccionales se interpretan por el signo que devuelve TA-Lib. Los dojis
+# se publican como información, pero nunca confirman una entrada por sí solos.
 LONG_CANDLE_PATTERNS = (
     "CDLHAMMER",
     "CDLINVERTEDHAMMER",
@@ -154,6 +153,61 @@ LONG_CANDLE_PATTERNS = (
     "CDLCONCEALBABYSWALL",
     "CDLTAKURI",
     "CDLMATHOLD",
+)
+
+SHORT_CANDLE_PATTERNS = (
+    "CDLHANGINGMAN",
+    "CDLSHOOTINGSTAR",
+    "CDLDARKCLOUDCOVER",
+    "CDLEVENINGSTAR",
+    "CDLEVENINGDOJISTAR",
+    "CDL3BLACKCROWS",
+    "CDLIDENTICAL3CROWS",
+    "CDL2CROWS",
+    "CDLUPSIDEGAP2CROWS",
+    "CDLADVANCEBLOCK",
+    "CDLSTALLEDPATTERN",
+    "CDLINNECK",
+    "CDLONNECK",
+    "CDLTHRUSTING",
+)
+
+SIGNED_CANDLE_PATTERNS = (
+    "CDLENGULFING",
+    "CDLHARAMI",
+    "CDLHARAMICROSS",
+    "CDL3INSIDE",
+    "CDL3OUTSIDE",
+    "CDL3LINESTRIKE",
+    "CDLABANDONEDBABY",
+    "CDLKICKING",
+    "CDLKICKINGBYLENGTH",
+    "CDLBREAKAWAY",
+    "CDLCOUNTERATTACK",
+    "CDLDOJISTAR",
+    "CDLTRISTAR",
+    "CDLHIKKAKE",
+    "CDLHIKKAKEMOD",
+    "CDLSEPARATINGLINES",
+    "CDLTASUKIGAP",
+    "CDLGAPSIDESIDEWHITE",
+    "CDLXSIDEGAP3METHODS",
+    "CDLRISEFALL3METHODS",
+    "CDLBELTHOLD",
+    "CDLMARUBOZU",
+    "CDLCLOSINGMARUBOZU",
+    "CDLLONGLINE",
+    "CDLSHORTLINE",
+    "CDLSPINNINGTOP",
+    "CDLHIGHWAVE",
+)
+
+NEUTRAL_CANDLE_PATTERNS = (
+    "CDLDOJI",
+    "CDLDRAGONFLYDOJI",
+    "CDLGRAVESTONEDOJI",
+    "CDLLONGLEGGEDDOJI",
+    "CDLRICKSHAWMAN",
 )
 
 # ---------------------------------------------------------------------------
@@ -221,21 +275,21 @@ class EMACrossStrategy:
         aligned = align_closed_values(bars_upper.index, values, bars.index, upper_tf, cfg.timeframe)
         return np.nan_to_num(aligned, nan=-np.inf) >= cfg.chop_adx_min
 
-    def _long_candle_confirmation(
+    def _candle_confirmations(
         self, bars: pd.DataFrame, raw: Optional[pd.DataFrame] = None
-    ) -> np.ndarray:
-        """Combina patrones alcistas TA-Lib de los timeframes disponibles.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Detecta confirmaciones LONG/SHORT y dojis neutrales en varios marcos.
 
-        Si hay datos fuente más finos (p. ej. 1m para una estrategia de 30m),
-        revisa también 5m/15m. Los patrones se alinean usando únicamente la
-        última vela fuente ya cerrada, por lo que no hay lookahead.
+        Los patrones de marcos distintos se asignan al cierre de estrategia que
+        los contiene. Dentro de un mismo marco prevalece el patrón más reciente;
+        entre marcos, prevalece el marco mayor. Así se evita que una señal menor
+        y antigua sobreescriba contexto reciente, sin usar velas abiertas.
         """
-        combined = np.zeros(len(bars), dtype=bool)
+        empty = np.zeros(len(bars), dtype=bool)
         if bars.empty:
-            return combined
+            return empty.copy(), empty.copy(), empty.copy()
 
         strategy_delta = pd.Timedelta(self.cfg.timeframe)
-        max_pattern_delta = pd.Timedelta("30min")
         frames: list[tuple[pd.DataFrame, pd.Timedelta]] = []
         seen: set[tuple[int, int]] = set()
 
@@ -247,49 +301,102 @@ class EMACrossStrategy:
                 seen.add(key)
                 frames.append((frame, delta))
 
-        # El timeframe de la estrategia también se usa si es <= 30m; para
-        # estrategias mayores, la confirmación proviene de los marcos menores.
-        if strategy_delta <= max_pattern_delta:
-            add_frame(bars, strategy_delta)
+        # El marco de estrategia tiene la máxima prioridad y sigue siendo útil
+        # aunque sea mayor que 30m.
+        add_frame(bars, strategy_delta)
 
         if raw is not None and not raw.empty:
             source_delta = pd.Timedelta(minutes=source_minutes(raw))
-            if source_delta < max_pattern_delta and source_delta < strategy_delta:
+            # En estrategias de 5m o menos no hay agregados estándar inferiores;
+            # usar el origen. En marcos mayores, evitar el ruido de velas de 1m
+            # cuando se pueden construir agregados de 5m/15m/30m.
+            if source_delta < strategy_delta and (
+                source_delta >= pd.Timedelta("5min")
+                or strategy_delta <= pd.Timedelta("5min")
+            ):
                 add_frame(raw, source_delta)
-                for timeframe in ("5min", "15min"):
-                    target_delta = pd.Timedelta(timeframe)
-                    if source_delta < target_delta < min(max_pattern_delta, strategy_delta):
-                        try:
-                            add_frame(resample_ohlcv(raw, timeframe), target_delta)
-                        except ValueError:
-                            continue
+            for timeframe in ("5min", "15min", "30min", "1h", "4h", "1D"):
+                target_delta = pd.Timedelta(timeframe)
+                if source_delta < target_delta < strategy_delta:
+                    try:
+                        add_frame(resample_ohlcv(raw, timeframe), target_delta)
+                    except ValueError:
+                        continue
 
-        for frame, source_delta in frames:
+        def align_latest(values: np.ndarray, source_index: pd.DatetimeIndex,
+                         source_delta: pd.Timedelta) -> np.ndarray:
+            """Último evento cerrado de cada timeframe al cierre de estrategia."""
+            values = np.asarray(values)
+            if source_index.equals(bars.index) and source_delta == strategy_delta:
+                return values.copy()
+            aligned = np.zeros(len(bars), dtype=values.dtype)
+            source_ends = (source_index + source_delta).asi8
+            target_ends = (bars.index + strategy_delta).asi8
+            target_starts = bars.index.asi8
+            # side=left asigna una vela que cierra exactamente junto con la
+            # estrategia a esa misma barra (y nunca a una anterior).
+            target_locs = np.searchsorted(target_ends, source_ends, side="left")
+            valid = (target_locs < len(bars)) & (source_ends <= target_ends[-1])
+            safe_locs = np.minimum(target_locs, len(bars) - 1)
+            # No arrastrar un patrón anterior al primer intervalo disponible ni
+            # asignar señales que caigan dentro de huecos del timeframe destino.
+            valid &= source_ends > target_starts[safe_locs]
+            for source_loc in np.flatnonzero(valid & (values != 0)):
+                aligned[target_locs[source_loc]] = values[source_loc]
+            return aligned
+
+        # Resolución descendente: una señal direccional del marco más alto gana;
+        # si ese marco no tiene patrón (o tiene conflicto), se consulta el menor.
+        frame_signals: list[tuple[pd.Timedelta, np.ndarray, np.ndarray, np.ndarray]] = []
+        for frame, source_delta in sorted(frames, key=lambda item: item[1], reverse=True):
             o, h, low, c = (
                 np.ascontiguousarray(frame[column].to_numpy(dtype=np.float64))
                 for column in ("open", "high", "low", "close")
             )
-            detected = np.zeros(len(frame), dtype=bool)
+            bullish = np.zeros(len(frame), dtype=bool)
+            bearish = np.zeros(len(frame), dtype=bool)
+            neutral = np.zeros(len(frame), dtype=bool)
             for pattern_name in LONG_CANDLE_PATTERNS:
+                bullish |= getattr(talib, pattern_name)(o, h, low, c) != 0
+            for pattern_name in SHORT_CANDLE_PATTERNS:
+                bearish |= getattr(talib, pattern_name)(o, h, low, c) != 0
+            for pattern_name in SIGNED_CANDLE_PATTERNS:
                 pattern = getattr(talib, pattern_name)(o, h, low, c)
-                detected |= pattern > 0
+                bullish |= pattern > 0
+                bearish |= pattern < 0
+            for pattern_name in NEUTRAL_CANDLE_PATTERNS:
+                neutral |= getattr(talib, pattern_name)(o, h, low, c) != 0
 
-            # Conserva una señal intrabar hasta el cierre de la vela de
-            # estrategia que la contiene; de otro modo un patrón de 5m/15m
-            # desaparecería antes de cerrar la vela de 30m.
-            if source_delta < strategy_delta:
-                window = max(1, int(np.ceil(strategy_delta / source_delta)))
-                detected = spread_flags(detected, window)
+            # Un conflicto dentro del mismo marco no aporta dirección. Para
+            # direccionales, conservar sólo el evento más reciente del marco.
+            direction = np.zeros(len(frame), dtype=np.int8)
+            direction[bullish & ~bearish] = 1
+            direction[bearish & ~bullish] = -1
+            direction[bullish & bearish] = 2
+            aligned_direction = align_latest(direction, frame.index, source_delta)
+            aligned_neutral = align_latest(neutral.astype(np.int8), frame.index, source_delta) > 0
+            frame_signals.append((source_delta, aligned_direction == 1,
+                                  aligned_direction == -1, aligned_neutral))
 
-            if frame.index.equals(bars.index) and source_delta == strategy_delta:
-                aligned = detected
-            else:
-                aligned = align_closed_flags(
-                    frame.index, detected, bars.index, source_delta, self.cfg.timeframe
-                )
-            combined |= aligned
+        long_confirmation = np.zeros(len(bars), dtype=bool)
+        short_confirmation = np.zeros(len(bars), dtype=bool)
+        neutral_confirmation = np.zeros(len(bars), dtype=bool)
+        unresolved = np.ones(len(bars), dtype=bool)
+        for _, bullish, bearish, neutral in frame_signals:
+            has_direction = bullish ^ bearish
+            accepted = unresolved & has_direction
+            long_confirmation |= accepted & bullish
+            short_confirmation |= accepted & bearish
+            unresolved &= ~accepted
+            neutral_confirmation |= neutral
 
-        return combined
+        return long_confirmation, short_confirmation, neutral_confirmation
+
+    def _long_candle_confirmation(
+        self, bars: pd.DataFrame, raw: Optional[pd.DataFrame] = None
+    ) -> np.ndarray:
+        """Compatibilidad con consumidores del antiguo detector alcista."""
+        return self._candle_confirmations(bars, raw)[0]
 
     def generate_signals(
         self, bars: pd.DataFrame, raw: Optional[pd.DataFrame] = None
@@ -316,11 +423,14 @@ class EMACrossStrategy:
             up, down = up & chop, down & chop
         up &= valid
         down &= valid
-        long_candle_confirmation = self._long_candle_confirmation(bars, raw)
+        (long_candle_confirmation, short_candle_confirmation,
+         neutral_candle_pattern) = self._candle_confirmations(bars, raw)
         return pd.DataFrame({
             "ema_fast": fast, "ema_slow": slow, "adx_entry": entry_adx,
             "cross_up": up, "cross_down": down, "valid": valid,
             "long_candle_confirmation": long_candle_confirmation,
+            "short_candle_confirmation": short_candle_confirmation,
+            "neutral_candle_pattern": neutral_candle_pattern,
             "trend_bias": bias if bias is not None else np.zeros(len(bars), int),
             "chop_ok": chop if chop is not None else np.ones(len(bars), bool),
             "target": np.select([up, down], [1, -1], default=0),
@@ -876,12 +986,15 @@ class Backtester:
                 except Exception:
                     pass
                 return False
-        # Cualquiera de los patrones alcistas detectados en TA-Lib confirma el
-        # scale-in LONG (OR entre patrones/timeframes y con el modo tradicional).
-        if pos.side == 1 and self.signals is not None \
-                and "long_candle_confirmation" in self.signals.columns \
-                and bool(self.signals["long_candle_confirmation"].iloc[i]):
-            return True
+        # Un patrón direccional puede anticipar el scale-in, pero no debe
+        # añadir riesgo si el cierre ya va contra la entrada parcial cuando la
+        # configuración exige confirmación de precio en dirección.
+        pattern_column = "long_candle_confirmation" if pos.side == 1 else "short_candle_confirmation"
+        if self.signals is not None and pattern_column in self.signals.columns \
+                and bool(self.signals[pattern_column].iloc[i]):
+            move_in_direction = (self.c[i] - pos.entry_price) * pos.side
+            if not cfg.entry_confirm_close_in_dir or move_in_direction >= -1e-12:
+                return True
         if cfg.entry_confirm_mode == "bars":
             return self._entry_confirmed_by_bars(i)
         elif cfg.entry_confirm_mode == "close_above_ema":

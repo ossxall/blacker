@@ -98,7 +98,7 @@ class Config:
     # la aplica DESPUÉS del toque (LONG en EMA*(1-tol), SHORT en EMA*(1+tol)).
     # `..._exit_pct` es el % de la posición que se cierra al tocar la EMA
     # (100 = cierre total; < 100 = salida parcial, una sola vez por posición).
-    close_on_ema_slow_touch: bool = True
+    close_on_ema_slow_touch: bool = False
     close_on_ema_slow_touch_pct: float = 0.01  # Tolerancia en % (0.10 = 0.10%)
     close_on_ema_slow_touch_after: bool = False  # False = antes del toque; True = después
     close_on_ema_slow_touch_exit_pct: float = 25.0  # % de la posición a cerrar en el toque
@@ -110,7 +110,7 @@ class Config:
     entry_partial_pct: float = 50.0        # % inicial (0 < pct < 100)
     entry_confirm_mode: str = "bars"       # "bars" | "close_above_ema" | "pullback_retest"
     entry_confirm_bars: int = 2            # Nº de velas tras entrada parcial
-    entry_confirm_close_in_dir: bool = True  # Exige cierre en dirección tras confirmación (modo bars)
+    entry_confirm_close_in_dir: bool = True  # Exige cierre a favor para barras y patrones
     entry_confirm_retest_tol_pct: float = 0.10  # Tolerancia % para pullback_retest
     entry_confirm_max_move_pct: float = 0.3  # Si > 0, no añade el resto si el precio se ha movido > X% desde la entrada parcial
     # Si la vela donde ocurre la confirmación para añadir el resto cierra en negativo
