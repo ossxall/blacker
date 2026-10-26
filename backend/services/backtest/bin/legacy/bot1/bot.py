@@ -261,6 +261,8 @@ _CONFIG_ENV = {
     "candle_pattern_exit_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_PCT", env_float),
     "candle_pattern_exit_confirm_bars": ("STRATEGY_CANDLE_PATTERN_EXIT_CONFIRM_BARS", env_int),
     "candle_pattern_exit_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_LOSS_PCT", env_float),
+    "candle_pattern_exit_long_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_LONG_LOSS_PCT", env_float),
+    "candle_pattern_exit_short_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_SHORT_LOSS_PCT", env_float),
     "candle_pattern_exit_signed_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_SIGNED_LOSS_PCT", env_float),
     "timestamp_is_close": ("STRATEGY_TIMESTAMP_IS_CLOSE", env_bool),
     # Entrada parcial + confirmación (scale-in)

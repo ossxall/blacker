@@ -159,6 +159,20 @@ def test_signed_patterns_use_stricter_loss_threshold():
     assert trades.reason.tolist() == ["CANDLE_SIGNED_BEAR"]
 
 
+def test_signed_pattern_does_not_exit_before_its_stricter_loss_threshold():
+    engine = prepared_engine(
+        1,
+        signed_bear=[True, False, False],
+        doji=[True, False, False],
+        loss_pct=0.7,
+    )
+
+    trades, _ = engine.run()
+
+    assert trades.empty
+    assert engine.position is not None
+
+
 def test_exit_percentage_scales_out_once_per_position():
     engine = prepared_engine(
         1,

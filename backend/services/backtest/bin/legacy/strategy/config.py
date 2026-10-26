@@ -82,7 +82,12 @@ class Config:
     candle_pattern_exit_enabled: bool = True
     candle_pattern_exit_pct: float = 100.0
     candle_pattern_exit_confirm_bars: int = 4
-    candle_pattern_exit_loss_pct: float = 0.6
+    # Los umbrales direccionales permiten compensar la asimetría LONG/SHORT.
+    # El umbral común es un override retrocompatible; None usa los dos valores.
+    candle_pattern_exit_loss_pct: float | None = None
+    candle_pattern_exit_long_loss_pct: float = 0.65
+    candle_pattern_exit_short_loss_pct: float = 0.6
+    # Bidireccionales: umbral más estricto para compensar el mayor ruido.
     candle_pattern_exit_signed_loss_pct: float = 0.8
 
     # Gestión de salida orientada a reducir la racha de pérdidas en whipsaw:
@@ -267,6 +272,13 @@ class Config:
         """Timeframes de divergencia RSI normalizados; la salida usa OR entre ellos."""
         return timeframe_tuple(self.rsi_divergence_timeframe)
 
+    def candle_pattern_loss_threshold(self, side: int) -> float:
+        """Umbral de pérdida para patrones de reversión; el override común gana."""
+        if self.candle_pattern_exit_loss_pct is not None:
+            return self.candle_pattern_exit_loss_pct
+        return self.candle_pattern_exit_long_loss_pct if side == 1 \
+            else self.candle_pattern_exit_short_loss_pct
+
     def __post_init__(self):
         if min(self.ema_fast, self.ema_slow) <= 0 or self.ema_fast >= self.ema_slow:
             raise ValueError("Se requiere 0 < ema_fast < ema_slow.")
@@ -323,7 +335,15 @@ class Config:
             raise ValueError("candle_pattern_exit_pct debe estar en (0, 100].")
         if self.candle_pattern_exit_confirm_bars < 1:
             raise ValueError("candle_pattern_exit_confirm_bars debe ser >= 1.")
-        if min(self.candle_pattern_exit_loss_pct, self.candle_pattern_exit_signed_loss_pct) < 0:
+        reversal_loss_thresholds = (
+            self.candle_pattern_exit_long_loss_pct,
+            self.candle_pattern_exit_short_loss_pct,
+            self.candle_pattern_exit_signed_loss_pct,
+        )
+        if min(reversal_loss_thresholds) < 0 or (
+            self.candle_pattern_exit_loss_pct is not None
+            and self.candle_pattern_exit_loss_pct < 0
+        ):
             raise ValueError("Los umbrales de pérdida de salidas TA-Lib no pueden ser negativos.")
         if self.partial_tp_enabled:
             if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:

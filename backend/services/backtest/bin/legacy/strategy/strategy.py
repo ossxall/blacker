@@ -916,12 +916,13 @@ class Backtester:
         if pos is None or pos.candle_exit_done or i <= 0:
             return None
         pnl_pct = (self.c[i] / pos.entry_price - 1.0) * pos.side * 100.0
+        reversal_loss_pct = self.cfg.candle_pattern_loss_threshold(pos.side)
         start = max(0, i - self.cfg.candle_pattern_exit_confirm_bars)
         prior = np.arange(start, i)
         if pos.side == 1:
             reversal = prior[self.candle_bear_exit[prior] & self.doji_exit[prior]]
             signed = prior[self.signed_bear_exit[prior] & self.doji_exit[prior]]
-            if len(reversal) and pnl_pct <= -self.cfg.candle_pattern_exit_loss_pct \
+            if len(reversal) and pnl_pct <= -reversal_loss_pct \
                     and np.any(self.c[i] < self.l[reversal]):
                 return "CANDLE_PATTERN_BEAR"
             if len(signed) and pnl_pct <= -self.cfg.candle_pattern_exit_signed_loss_pct \
@@ -930,7 +931,7 @@ class Backtester:
         else:
             reversal = prior[self.candle_bull_exit[prior] & self.doji_exit[prior]]
             signed = prior[self.signed_bull_exit[prior] & self.doji_exit[prior]]
-            if len(reversal) and pnl_pct <= -self.cfg.candle_pattern_exit_loss_pct \
+            if len(reversal) and pnl_pct <= -reversal_loss_pct \
                     and np.any(self.c[i] > self.h[reversal]):
                 return "CANDLE_PATTERN_BULL"
             if len(signed) and pnl_pct <= -self.cfg.candle_pattern_exit_signed_loss_pct \
@@ -1392,7 +1393,13 @@ def parse_args():
                    help="Velas para confirmar la ruptura del extremo del patrón (default 4).")
     p.add_argument("--candle-pattern-exit-loss-pct", type=float,
                    default=d.candle_pattern_exit_loss_pct,
-                   help="Pérdida abierta mínima para patrones de reversión (default 0.6%%).")
+                   help="Override común de pérdida para LONG/SHORT (por defecto usa umbrales por lado).")
+    p.add_argument("--candle-pattern-exit-long-loss-pct", type=float,
+                   default=d.candle_pattern_exit_long_loss_pct,
+                   help="Pérdida abierta mínima para salida LONG (default 0.65%%).")
+    p.add_argument("--candle-pattern-exit-short-loss-pct", type=float,
+                   default=d.candle_pattern_exit_short_loss_pct,
+                   help="Pérdida abierta mínima para salida SHORT (default 0.6%%).")
     p.add_argument("--candle-pattern-exit-signed-loss-pct", type=float,
                    default=d.candle_pattern_exit_signed_loss_pct,
                    help="Pérdida mínima para patrones bidireccionales (default 0.8%%).")
@@ -1518,6 +1525,8 @@ def config_from_args(a) -> Config:
         candle_pattern_exit_pct=a.candle_pattern_exit_pct,
         candle_pattern_exit_confirm_bars=a.candle_pattern_exit_confirm_bars,
         candle_pattern_exit_loss_pct=a.candle_pattern_exit_loss_pct,
+        candle_pattern_exit_long_loss_pct=a.candle_pattern_exit_long_loss_pct,
+        candle_pattern_exit_short_loss_pct=a.candle_pattern_exit_short_loss_pct,
         candle_pattern_exit_signed_loss_pct=a.candle_pattern_exit_signed_loss_pct,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
         partial_tp2_r=a.partial_tp2_r, partial_tp2_pct=a.partial_tp2_pct,
