@@ -26,6 +26,7 @@ class Position:
     last_add_price: float = 0.0         # Precio del último add
     add_count: int = 0                  # Número de adds realizados
     confirm_exit_done: bool = False     # Salida parcial por movimiento adverso desde la confirmación
+    candle_exit_done: bool = False      # Una salida TA-Lib por posición (total o parcial)
 
 
 @dataclass
@@ -59,4 +60,3 @@ DEFAULT_OUTPUT_DIR = "backtest_out"
 
 def empty_trades() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype="object") for c in TRADE_COLUMNS})
-

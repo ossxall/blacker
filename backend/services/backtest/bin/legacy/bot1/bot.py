@@ -257,6 +257,11 @@ _CONFIG_ENV = {
     "rsi_divergence_len": ("STRATEGY_RSI_DIVERGENCE_LEN", env_int),
     "rsi_divergence_pivot": ("STRATEGY_RSI_DIVERGENCE_PIVOT", env_int),
     "rsi_divergence_lookback": ("STRATEGY_RSI_DIVERGENCE_LOOKBACK", env_int),
+    "candle_pattern_exit_enabled": ("STRATEGY_CANDLE_PATTERN_EXIT", env_bool),
+    "candle_pattern_exit_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_PCT", env_float),
+    "candle_pattern_exit_confirm_bars": ("STRATEGY_CANDLE_PATTERN_EXIT_CONFIRM_BARS", env_int),
+    "candle_pattern_exit_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_LOSS_PCT", env_float),
+    "candle_pattern_exit_signed_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_SIGNED_LOSS_PCT", env_float),
     "timestamp_is_close": ("STRATEGY_TIMESTAMP_IS_CLOSE", env_bool),
     # Entrada parcial + confirmación (scale-in)
     "entry_partial_enabled": ("STRATEGY_ENTRY_PARTIAL", env_bool),
@@ -456,16 +461,26 @@ def series_frame(
 ) -> pd.DataFrame:
     """OHLCV de `bars` + las series de la estrategia (señales y salidas).
 
-    `computed` = (signals, adx_exit, weak_exit, rsi_div_exit) si ya se
-    calcularon para `bars`; si no, se calculan aquí. Si el cálculo falla,
-    devuelve solo OHLCV.
+    `computed` incluye las señales, salidas previas y las categorías TA-Lib
+    (reversión, bidireccionales y doji) si ya se calcularon para `bars`.
     """
     frame = bars.copy()
     try:
-        signals, adx_exit, weak_exit, rsi_div_exit = computed or (
-            strategy.generate_signals(bars),
-            *strategy.prepare_exits(raw, bars),
-        )
+        if computed is None:
+            signals = strategy.generate_signals(bars, raw)
+            exits = (
+                *strategy.prepare_exits(raw, bars),
+                *strategy.prepare_candle_exits(bars),
+            )
+        else:
+            signals, *exits = computed
+        if len(exits) == 3:  # Compatibilidad con snapshots/callers antiguos.
+            adx_exit, weak_exit, rsi_div_exit = exits
+            candle_bull_exit = candle_bear_exit = None
+            signed_bull_exit = signed_bear_exit = doji_exit = None
+        else:
+            (adx_exit, weak_exit, rsi_div_exit, candle_bull_exit, candle_bear_exit,
+             signed_bull_exit, signed_bear_exit, doji_exit) = exits
     except Exception:
         logger.exception("No se pudieron calcular las series de %s", name)
         return frame
@@ -476,9 +491,20 @@ def series_frame(
         ("adx_exit", adx_exit),
         ("weak_exit", weak_exit),
         ("rsi_div_exit", rsi_div_exit),
+        ("candle_bull_exit", candle_bull_exit),
+        ("candle_bear_exit", candle_bear_exit),
+        ("signed_bull_exit", signed_bull_exit),
+        ("signed_bear_exit", signed_bear_exit),
+        ("doji_exit", doji_exit),
     ):
         if arr is not None and len(arr) == len(frame):
             frame[col] = np.asarray(arr)
+    if candle_bull_exit is not None and candle_bear_exit is not None \
+            and signed_bull_exit is not None and signed_bear_exit is not None:
+        frame["candle_exit"] = (
+            (np.asarray(candle_bull_exit, bool) | np.asarray(signed_bull_exit, bool)).astype(np.int8)
+            - (np.asarray(candle_bear_exit, bool) | np.asarray(signed_bear_exit, bool)).astype(np.int8)
+        )
     return frame
 
 
@@ -547,21 +573,30 @@ def build_events(
     cfg: Config,
     symbol: str,
     interval: str,
+    candle_bull_exit: np.ndarray | None = None,
+    candle_bear_exit: np.ndarray | None = None,
+    signed_bull_exit: np.ndarray | None = None,
+    signed_bear_exit: np.ndarray | None = None,
+    doji_exit: np.ndarray | None = None,
 ) -> list[dict]:
     """Ejecuta el backtest y traduce cada acción real a un evento.
 
     Reutiliza el motor `Backtester` de `strategy/strategy.py` sobre las velas
     cerradas, de modo que el bot publica exactamente las acciones que tomaría
     el backtest: aperturas (incluidas reversals), cierres por EMA_CROSS,
-    ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE, y las salidas por STOP_LOSS,
-    BREAKEVEN, PARTIAL_TP y EMA_SLOW_TOUCH. La posición abierta al final de los
-    datos no se cierra (`force_close_at_end=False`): en vivo sigue vigente.
+    ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE y patrones TA-Lib confirmados
+    por doji, ruptura del extremo y pérdida abierta; además de STOP_LOSS,
+    BREAKEVEN, PARTIAL_TP y EMA_SLOW_TOUCH. La posición abierta al final no se
+    cierra (`force_close_at_end=False`): en vivo sigue vigente.
     """
     if len(bars) < 2:
         return []
 
     engine = Backtester(
-        bars, replace(cfg, force_close_at_end=False), signals, adx_exit, weak_exit, rsi_div_exit
+        bars, replace(cfg, force_close_at_end=False), signals, adx_exit, weak_exit,
+        rsi_div_exit, candle_bull_exit=candle_bull_exit, candle_bear_exit=candle_bear_exit,
+        signed_bull_exit=signed_bull_exit, signed_bear_exit=signed_bear_exit,
+        doji_exit=doji_exit,
     )
     # `Backtester.run` imprime progreso; lo silenciamos para no ensuciar el log.
     with contextlib.redirect_stdout(io.StringIO()):
@@ -790,13 +825,19 @@ class SignalBot:
 
         signals = self.strategy.generate_signals(bars, raw)
         adx_exit, weak_exit, rsi_div_exit = self.strategy.prepare_exits(raw, bars)
+        (candle_bull_exit, candle_bear_exit, signed_bull_exit,
+         signed_bear_exit, doji_exit) = self.strategy.prepare_candle_exits(bars)
         events = build_events(
             bars, signals, adx_exit, weak_exit, rsi_div_exit,
-            self.cfg, self.symbol, self.interval
+            self.cfg, self.symbol, self.interval,
+            candle_bull_exit=candle_bull_exit, candle_bear_exit=candle_bear_exit,
+            signed_bull_exit=signed_bull_exit, signed_bear_exit=signed_bear_exit,
+            doji_exit=doji_exit,
         )
         # El endpoint muestra todos los trades del backtest (sin filtro live-only).
         self._publish_snapshot(
-            raw, bars, (signals, adx_exit, weak_exit, rsi_div_exit), events
+            raw, bars, (signals, adx_exit, weak_exit, rsi_div_exit, candle_bull_exit,
+                        candle_bear_exit, signed_bull_exit, signed_bear_exit, doji_exit), events
         )
         if self.live_since_ms is not None:
             # live-only: descarta las señales anteriores al arranque.

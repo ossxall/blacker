@@ -109,6 +109,13 @@ def _div_flags(frame: pd.DataFrame, value: int) -> pd.Series:
     return pd.to_numeric(frame["rsi_div_exit"], errors="coerce").fillna(0) == value
 
 
+def _candle_flags(frame: pd.DataFrame, value: int) -> pd.Series:
+    """Máscara direccional TA-Lib (alcista +1, bajista -1)."""
+    if "candle_exit" not in frame:
+        return pd.Series(False, index=frame.index)
+    return pd.to_numeric(frame["candle_exit"], errors="coerce").fillna(0) == value
+
+
 def add_signal_markers(fig, frame: pd.DataFrame, row: int) -> None:
     """Marcadores pequeños de las señales de la estrategia, junto a la vela."""
     pad = (frame["high"].max() - frame["low"].min()) * 0.02
@@ -129,16 +136,24 @@ def add_signal_markers(fig, frame: pd.DataFrame, row: int) -> None:
             )
     # Divergencia RSI: la alcista (cierre de SHORT) bajo el mínimo, la bajista
     # (cierre de LONG) sobre el máximo.
-    for mask, y in (
-        (_div_flags(frame, 1), frame["low"] - 2 * pad),
-        (_div_flags(frame, -1), frame["high"] + 4 * pad),
+    for mask, y, name, symbol, color in (
+        (_div_flags(frame, 1), frame["low"] - 2 * pad,
+         "rsi_divergence_bull", "star", RSI_DIV_SIGNAL),
+        (_div_flags(frame, -1), frame["high"] + 4 * pad,
+         "rsi_divergence_bear", "star", RSI_DIV_SIGNAL),
+        (_candle_flags(frame, 1), frame["low"] - 3 * pad,
+         "candle_pattern_bull", "triangle-up-open", EXIT_SIGNAL),
+        (_candle_flags(frame, -1), frame["high"] + 4 * pad,
+         "candle_pattern_bear", "triangle-down-open", EXIT_SIGNAL),
+        (_flag(frame, "doji_exit"), frame["high"] + 5 * pad,
+         "candle_doji", "circle-open", WEAK_SIGNAL),
     ):
         if mask.any():
             fig.add_trace(
                 go.Scatter(
-                    x=frame.index[mask], y=y[mask], mode="markers", name="rsi_divergence",
-                    marker=dict(symbol="star", size=9, color=RSI_DIV_SIGNAL,
-                                line=dict(width=1.5, color=RSI_DIV_SIGNAL)),
+                    x=frame.index[mask], y=y[mask], mode="markers", name=name,
+                    marker=dict(symbol=symbol, size=9, color=color,
+                                line=dict(width=1.5, color=color)),
                 ),
                 row=row, col=1,
             )
