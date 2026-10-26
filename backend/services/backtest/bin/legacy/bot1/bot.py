@@ -264,6 +264,13 @@ _CONFIG_ENV = {
     "candle_pattern_exit_long_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_LONG_LOSS_PCT", env_float),
     "candle_pattern_exit_short_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_SHORT_LOSS_PCT", env_float),
     "candle_pattern_exit_signed_loss_pct": ("STRATEGY_CANDLE_PATTERN_EXIT_SIGNED_LOSS_PCT", env_float),
+    "ema55_touch_exit_enabled": ("STRATEGY_EMA55_TOUCH_EXIT", env_bool),
+    "ema55_touch_tolerance_pct": ("STRATEGY_EMA55_TOUCH_TOLERANCE_PCT", env_float),
+    "ema55_touch_lookback_bars": ("STRATEGY_EMA55_TOUCH_LOOKBACK_BARS", env_int),
+    "ema55_touch_min_touches": ("STRATEGY_EMA55_TOUCH_MIN_TOUCHES", env_int),
+    "ema55_touch_consecutive": ("STRATEGY_EMA55_TOUCH_CONSECUTIVE", env_int),
+    "ema55_touch_breakout_buffer_pct": ("STRATEGY_EMA55_TOUCH_BREAKOUT_BUFFER_PCT", env_float),
+    "ema55_touch_exit_loss_pct": ("STRATEGY_EMA55_TOUCH_EXIT_LOSS_PCT", env_float),
     "timestamp_is_close": ("STRATEGY_TIMESTAMP_IS_CLOSE", env_bool),
     # Entrada parcial + confirmación (scale-in)
     "entry_partial_enabled": ("STRATEGY_ENTRY_PARTIAL", env_bool),
@@ -586,8 +593,8 @@ def build_events(
     Reutiliza el motor `Backtester` de `strategy/strategy.py` sobre las velas
     cerradas, de modo que el bot publica exactamente las acciones que tomaría
     el backtest: aperturas (incluidas reversals), cierres por EMA_CROSS,
-    ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE y patrones TA-Lib confirmados
-    por doji, ruptura del extremo y pérdida abierta; además de STOP_LOSS,
+    ADX_REVERSAL, EMA_WEAKENING, RSI_DIVERGENCE, EMA55_REPEATED_TOUCH_WEAKNESS
+    y patrones TA-Lib confirmados por doji, ruptura del extremo y pérdida abierta; además de STOP_LOSS,
     BREAKEVEN, PARTIAL_TP y EMA_SLOW_TOUCH. La posición abierta al final no se
     cierra (`force_close_at_end=False`): en vivo sigue vigente.
     """

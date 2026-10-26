@@ -60,6 +60,7 @@ def prepared_engine(
         stop_loss_pct=0,
         monthly_loss_limit_pct=0,
         force_close_at_end=False,
+        ema55_touch_exit_enabled=False,
     )
     signals = pd.DataFrame(
         {"valid": True, "target": 0, "trend_bias": 0}, index=bars.index

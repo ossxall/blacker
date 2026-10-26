@@ -90,6 +90,17 @@ class Config:
     # Bidireccionales: umbral más estricto para compensar el mayor ruido.
     candle_pattern_exit_signed_loss_pct: float = 0.8
 
+    # --- Debilidad LONG en toques repetidos a EMA55 (30m únicamente) --------
+    # Un toque es el rango de la vela intersectando EMA55 ± tolerancia. Se sale
+    # tras 2 toques seguidos o 3 dentro de 5 velas si no hay cierre de ruptura.
+    ema55_touch_exit_enabled: bool = True
+    ema55_touch_tolerance_pct: float = 0.1
+    ema55_touch_lookback_bars: int = 5
+    ema55_touch_min_touches: int = 3
+    ema55_touch_consecutive: int = 2
+    ema55_touch_breakout_buffer_pct: float = 0.1
+    ema55_touch_exit_loss_pct: float = 0.7
+
     # Gestión de salida orientada a reducir la racha de pérdidas en whipsaw:
     # al alcanzar `partial_tp_r` veces el riesgo inicial se asegura beneficio
     # cerrando `partial_tp_pct` de la posición y, opcionalmente, se mueve el
@@ -345,6 +356,12 @@ class Config:
             and self.candle_pattern_exit_loss_pct < 0
         ):
             raise ValueError("Los umbrales de pérdida de salidas TA-Lib no pueden ser negativos.")
+        if (self.ema55_touch_tolerance_pct < 0 or self.ema55_touch_breakout_buffer_pct < 0
+                or self.ema55_touch_exit_loss_pct < 0):
+            raise ValueError("Las tolerancias de EMA55 no pueden ser negativas.")
+        if min(self.ema55_touch_lookback_bars, self.ema55_touch_min_touches,
+               self.ema55_touch_consecutive) < 1:
+            raise ValueError("La ventana y los conteos de toques EMA55 deben ser >= 1.")
         if self.partial_tp_enabled:
             if self.partial_tp_r <= 0 or not 0 < self.partial_tp_pct <= 100:
                 raise ValueError("Configuración de take-profit parcial inválida.")

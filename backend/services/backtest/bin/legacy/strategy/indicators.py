@@ -13,6 +13,28 @@ def ema(values: pd.Series, period: int) -> pd.Series:
     return values.ewm(alpha=2 / (period + 1), adjust=False).mean()
 
 
+def ema_band_touch_flags(
+    bars: pd.DataFrame, period: int = 55, tolerance_pct: float = 0.1
+) -> tuple[np.ndarray, np.ndarray]:
+    """Devuelve (EMA, toques) cuando el rango OHLC se acerca/cruza la banda EMA.
+
+    Una vela toca la EMA si su rango ``[low, high]`` intersecta la banda
+    ``EMA ± tolerance_pct``. Incluye tanto cruces como roces cercanos.
+    """
+    if period <= 0 or tolerance_pct < 0:
+        raise ValueError("Periodo EMA positivo y tolerancia no negativa requeridos.")
+    line = ema(bars["close"], period).to_numpy(float)
+    high = bars["high"].to_numpy(float)
+    low = bars["low"].to_numpy(float)
+    band = np.abs(line) * tolerance_pct / 100.0
+    touched = (
+        np.isfinite(line)
+        & (low <= line + band)
+        & (high >= line - band)
+    )
+    return line, touched
+
+
 def rsi(values: pd.Series, length: int = 14) -> pd.Series:
     """RSI (suavizado Wilder) alineado con el índice de entrada.
 

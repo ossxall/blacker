@@ -120,6 +120,7 @@ from strategy.models import (
 )
 from strategy.indicators import (
     ema,
+    ema_band_touch_flags,
     adx,
     confirmed_crosses,
     align_closed_values,
@@ -546,6 +547,17 @@ class Backtester:
         self.signed_bull_exit = np.asarray(signed_bull_exit, bool) if signed_bull_exit is not None else np.zeros(len(bars), bool)
         self.signed_bear_exit = np.asarray(signed_bear_exit, bool) if signed_bear_exit is not None else np.zeros(len(bars), bool)
         self.doji_exit = np.asarray(doji_exit, bool) if doji_exit is not None else np.zeros(len(bars), bool)
+        self.ema55_touch_exit_active = (
+            config.ema55_touch_exit_enabled
+            and pd.Timedelta(config.timeframe) == pd.Timedelta("30min")
+        )
+        if self.ema55_touch_exit_active:
+            self.ema55_line, self.ema55_touches = ema_band_touch_flags(
+                bars, 55, config.ema55_touch_tolerance_pct
+            )
+        else:
+            self.ema55_line = np.full(len(bars), np.nan, dtype=float)
+            self.ema55_touches = np.zeros(len(bars), dtype=bool)
         if len(self.adx_exit) != len(bars): self.adx_exit = np.zeros(len(bars), bool)
         if len(self.weak_exit) != len(bars): self.weak_exit = np.zeros(len(bars), bool)
         if len(self.rsi_div) != len(bars): self.rsi_div = np.zeros(len(bars), int)
@@ -939,6 +951,42 @@ class Backtester:
                 return "CANDLE_SIGNED_BULL"
         return None
 
+    def _ema55_touch_weakness_exit_reason(self, i: int) -> Optional[str]:
+        """Cierra LONG tras toques repetidos a EMA55 sin ruptura confirmada.
+
+        El toque se cuenta cuando el rango de la vela roza/cruza EMA55 ± banda.
+        Se exige una secuencia de toques o varios dentro de la ventana, y que el
+        cierre actual no haya superado la EMA más allá del buffer de ruptura.
+        La regla sólo está activa en barras de 30 minutos y nunca cierra SHORT.
+        """
+        pos = self.position
+        cfg = self.cfg
+        if (pos is None or pos.side != 1 or not self.ema55_touch_exit_active
+                or i >= len(self.ema55_touches)):
+            return None
+        line = self.ema55_line[i]
+        if not np.isfinite(line):
+            return None
+        open_pnl_pct = (self.c[i] / pos.entry_price - 1.0) * 100.0
+        if open_pnl_pct > -cfg.ema55_touch_exit_loss_pct:
+            return None
+
+        start = max(0, i - cfg.ema55_touch_lookback_bars + 1, pos.entry_bar_index)
+        window = self.ema55_touches[start : i + 1]
+        repeated = int(window.sum()) >= cfg.ema55_touch_min_touches
+        consecutive = 0
+        for touched in self.ema55_touches[i : start - 1 if start else None : -1]:
+            if not touched:
+                break
+            consecutive += 1
+        if not (repeated or consecutive >= cfg.ema55_touch_consecutive):
+            return None
+
+        failed_break_level = line * (1.0 + cfg.ema55_touch_breakout_buffer_pct / 100.0)
+        if self.c[i] > failed_break_level:
+            return None
+        return "EMA55_REPEATED_TOUCH_WEAKNESS"
+
     def _manage(self, i: int) -> bool:
         """Take-profit parcial y salidas parciales por precio.
 
@@ -1316,6 +1364,10 @@ class Backtester:
                         if candle_reason is not None:
                             self.pending_exit = (candle_reason, cfg.candle_pattern_exit_pct)
                             self.position.candle_exit_done = True
+                        else:
+                            ema55_reason = self._ema55_touch_weakness_exit_reason(i)
+                            if ema55_reason is not None:
+                                self.pending_exit = (ema55_reason, 100.0)
 
             self._mark(self.times[i] + pd.Timedelta(cfg.timeframe), self.c[i])
             if (i + 1) % max(1, n // 10) == 0 or i == n - 1:
@@ -1403,6 +1455,27 @@ def parse_args():
     p.add_argument("--candle-pattern-exit-signed-loss-pct", type=float,
                    default=d.candle_pattern_exit_signed_loss_pct,
                    help="Pérdida mínima para patrones bidireccionales (default 0.8%%).")
+    p.add_argument("--ema55-touch-exit", action=argparse.BooleanOptionalAction,
+                   default=d.ema55_touch_exit_enabled,
+                   help="Salida LONG en 30m por toques repetidos a EMA55 sin ruptura.")
+    p.add_argument("--ema55-touch-tolerance-pct", type=float,
+                   default=d.ema55_touch_tolerance_pct,
+                   help="Banda de proximidad para contar un toque a EMA55 (default 0.1%%).")
+    p.add_argument("--ema55-touch-lookback-bars", type=int,
+                   default=d.ema55_touch_lookback_bars,
+                   help="Ventana de conteo de toques (default 5 velas).")
+    p.add_argument("--ema55-touch-min-touches", type=int,
+                   default=d.ema55_touch_min_touches,
+                   help="Toques repetidos requeridos dentro de la ventana (default 3).")
+    p.add_argument("--ema55-touch-consecutive", type=int,
+                   default=d.ema55_touch_consecutive,
+                   help="Toques consecutivos suficientes para salir (default 2).")
+    p.add_argument("--ema55-touch-breakout-buffer-pct", type=float,
+                   default=d.ema55_touch_breakout_buffer_pct,
+                   help="Cierre por encima de EMA55 que invalida la debilidad (default 0.1%%).")
+    p.add_argument("--ema55-touch-exit-loss-pct", type=float,
+                   default=d.ema55_touch_exit_loss_pct,
+                   help="Pérdida abierta mínima para confirmar debilidad (default 0.7%%).")
     p.add_argument("--partial-tp", action=argparse.BooleanOptionalAction, default=d.partial_tp_enabled)
     p.add_argument("--partial-tp-r", type=float, default=d.partial_tp_r)
     p.add_argument("--partial-tp-pct", type=float, default=d.partial_tp_pct)
@@ -1528,6 +1601,13 @@ def config_from_args(a) -> Config:
         candle_pattern_exit_long_loss_pct=a.candle_pattern_exit_long_loss_pct,
         candle_pattern_exit_short_loss_pct=a.candle_pattern_exit_short_loss_pct,
         candle_pattern_exit_signed_loss_pct=a.candle_pattern_exit_signed_loss_pct,
+        ema55_touch_exit_enabled=a.ema55_touch_exit,
+        ema55_touch_tolerance_pct=a.ema55_touch_tolerance_pct,
+        ema55_touch_lookback_bars=a.ema55_touch_lookback_bars,
+        ema55_touch_min_touches=a.ema55_touch_min_touches,
+        ema55_touch_consecutive=a.ema55_touch_consecutive,
+        ema55_touch_breakout_buffer_pct=a.ema55_touch_breakout_buffer_pct,
+        ema55_touch_exit_loss_pct=a.ema55_touch_exit_loss_pct,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
         partial_tp2_r=a.partial_tp2_r, partial_tp2_pct=a.partial_tp2_pct,
         move_stop_to_breakeven=a.breakeven_stop,
