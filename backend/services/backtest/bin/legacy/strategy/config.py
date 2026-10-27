@@ -92,7 +92,7 @@ class Config:
 
     # --- Debilidad LONG en toques repetidos a EMA55 (30m únicamente) --------
     # Un toque es el rango de la vela intersectando EMA55 ± tolerancia. Se sale
-    # tras 2 toques seguidos o 3 dentro de 5 velas si no hay cierre de ruptura.
+    # tras 2 toques seguidos o 3 dentro de 5 velas, sin ruptura y con pérdida abierta.
     ema55_touch_exit_enabled: bool = True
     ema55_touch_tolerance_pct: float = 0.1
     ema55_touch_lookback_bars: int = 5
@@ -358,7 +358,7 @@ class Config:
             raise ValueError("Los umbrales de pérdida de salidas TA-Lib no pueden ser negativos.")
         if (self.ema55_touch_tolerance_pct < 0 or self.ema55_touch_breakout_buffer_pct < 0
                 or self.ema55_touch_exit_loss_pct < 0):
-            raise ValueError("Las tolerancias de EMA55 no pueden ser negativas.")
+            raise ValueError("Tolerancias y pérdida mínima de EMA55 no pueden ser negativas.")
         if min(self.ema55_touch_lookback_bars, self.ema55_touch_min_touches,
                self.ema55_touch_consecutive) < 1:
             raise ValueError("La ventana y los conteos de toques EMA55 deben ser >= 1.")

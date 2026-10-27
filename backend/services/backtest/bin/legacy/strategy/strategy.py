@@ -955,8 +955,9 @@ class Backtester:
         """Cierra LONG tras toques repetidos a EMA55 sin ruptura confirmada.
 
         El toque se cuenta cuando el rango de la vela roza/cruza EMA55 ± banda.
-        Se exige una secuencia de toques o varios dentro de la ventana, y que el
-        cierre actual no haya superado la EMA más allá del buffer de ruptura.
+        Se exige una secuencia de toques o varios dentro de la ventana, una
+        pérdida abierta mínima y que el cierre actual no haya superado la EMA
+        más allá del buffer de ruptura.
         La regla sólo está activa en barras de 30 minutos y nunca cierra SHORT.
         """
         pos = self.position
