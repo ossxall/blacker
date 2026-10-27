@@ -224,6 +224,12 @@ _CONFIG_ENV = {
     "entry_dmi_risk_spread_scale": ("STRATEGY_ENTRY_DMI_RISK_SPREAD_SCALE", env_float),
     "entry_dmi_risk_min": ("STRATEGY_ENTRY_DMI_RISK_MIN", env_float),
     "entry_dmi_risk_max": ("STRATEGY_ENTRY_DMI_RISK_MAX", env_float),
+    "entry_mfi_risk_scaling_enabled": ("STRATEGY_ENTRY_MFI_RISK_SCALING", env_bool),
+    "entry_mfi_len": ("STRATEGY_ENTRY_MFI_LEN", env_int),
+    "entry_mfi_risk_base": ("STRATEGY_ENTRY_MFI_RISK_BASE", env_float),
+    "entry_mfi_risk_spread_scale": ("STRATEGY_ENTRY_MFI_RISK_SPREAD_SCALE", env_float),
+    "entry_mfi_risk_min": ("STRATEGY_ENTRY_MFI_RISK_MIN", env_float),
+    "entry_mfi_risk_max": ("STRATEGY_ENTRY_MFI_RISK_MAX", env_float),
     # Gestión de posición: afecta el sizing y las salidas (stop/partial).
     "initial_capital": ("STRATEGY_INITIAL_CAPITAL", env_float),
     "commission_bps": ("STRATEGY_COMMISSION_BPS", env_float),

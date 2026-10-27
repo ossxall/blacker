@@ -42,6 +42,13 @@ class Config:
     entry_dmi_risk_spread_scale: float = 100.0
     entry_dmi_risk_min: float = 0.5
     entry_dmi_risk_max: float = 1.25
+    # MFI modula adicionalmente el tamaño según flujo de dinero a favor.
+    entry_mfi_risk_scaling_enabled: bool = True
+    entry_mfi_len: int = 14
+    entry_mfi_risk_base: float = 1.0
+    entry_mfi_risk_spread_scale: float = 100.0
+    entry_mfi_risk_min: float = 0.5
+    entry_mfi_risk_max: float = 1.25
 
     adx_exit_enabled: bool = True
     # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
@@ -341,6 +348,12 @@ class Config:
             or self.entry_dmi_risk_max < self.entry_dmi_risk_min
         ):
             raise ValueError("Configuración de escalado DMI de riesgo inválida.")
+        if self.entry_mfi_risk_scaling_enabled and (
+            self.entry_mfi_len <= 0 or self.entry_mfi_risk_spread_scale <= 0
+            or self.entry_mfi_risk_min <= 0
+            or self.entry_mfi_risk_max < self.entry_mfi_risk_min
+        ):
+            raise ValueError("Configuración de escalado MFI de riesgo inválida.")
         if self.entry_dmi_risk_scaling_enabled and (
             self.entry_adx_len <= 0 or self.entry_dmi_risk_spread_scale <= 0
             or self.entry_dmi_risk_min <= 0

@@ -462,6 +462,13 @@ class EMACrossStrategy:
             if cfg.entry_adx_enabled and entry_dmi is not None
             else np.full(len(bars), np.nan)
         )
+        entry_mfi = None
+        if cfg.entry_mfi_risk_scaling_enabled and "volume" in bars:
+            mfi_inputs = tuple(
+                np.ascontiguousarray(bars[column].to_numpy(dtype=np.float64))
+                for column in ("high", "low", "close", "volume")
+            )
+            entry_mfi = talib.MFI(*mfi_inputs, timeperiod=cfg.entry_mfi_len)
         if cfg.entry_adx_enabled:
             allowed = np.nan_to_num(entry_adx, nan=0.0) >= cfg.entry_adx_min
             up, down = up & allowed, down & allowed
@@ -488,6 +495,8 @@ class EMACrossStrategy:
         if cfg.entry_dmi_risk_scaling_enabled and entry_dmi is not None:
             output["entry_plus_di"] = entry_dmi["plus_di"].to_numpy(float)
             output["entry_minus_di"] = entry_dmi["minus_di"].to_numpy(float)
+        if entry_mfi is not None:
+            output["entry_mfi"] = np.asarray(entry_mfi, dtype=float)
         return pd.DataFrame(output, index=bars.index)
 
     def prepare_exits(self, raw: pd.DataFrame, bars: pd.DataFrame) -> tuple[
@@ -547,6 +556,10 @@ class Backtester:
         self.entry_minus_di = (
             self.signals["entry_minus_di"].to_numpy(float)
             if "entry_minus_di" in self.signals else None
+        )
+        self.entry_mfi = (
+            self.signals["entry_mfi"].to_numpy(float)
+            if "entry_mfi" in self.signals else None
         )
         pattern_arrays = (
             candle_bull_exit, candle_bear_exit, signed_bull_exit, signed_bear_exit, doji_exit
@@ -642,7 +655,8 @@ class Backtester:
         risk_unit = self._risk_per_unit(side, price, pct_sl) if pct_sl > 0 else 0.0
         by_risk = (
             self.cash * self.cfg.risk_pct * self._risk_multiplier()
-            * self._monthly_risk_scale() * self._entry_dmi_risk_multiplier(side) / risk_unit
+            * self._monthly_risk_scale() * self._entry_dmi_risk_multiplier(side)
+            * self._entry_mfi_risk_multiplier(side) / risk_unit
             if risk_unit > 0 else np.inf
         )
         by_lev = self.cash * self.cfg.max_leverage / price
@@ -760,6 +774,24 @@ class Backtester:
             spread_in_trade_direction / cfg.entry_dmi_risk_spread_scale
         )
         return float(np.clip(factor, cfg.entry_dmi_risk_min, cfg.entry_dmi_risk_max))
+
+    def _entry_mfi_risk_multiplier(self, side: int) -> float:
+        """Escala tamaño por flujo MFI de la última vela de señal ya cerrada."""
+        cfg = self.cfg
+        if (not cfg.entry_mfi_risk_scaling_enabled or self.entry_mfi is None
+                or side not in (1, -1)):
+            return 1.0
+        signal_index = self._bar_index - 1
+        if signal_index < 0 or signal_index >= len(self.entry_mfi):
+            return 1.0
+        value = self.entry_mfi[signal_index]
+        if not np.isfinite(value):
+            return 1.0
+        directional_flow = (value - 50.0) * side
+        factor = cfg.entry_mfi_risk_base + (
+            directional_flow / cfg.entry_mfi_risk_spread_scale
+        )
+        return float(np.clip(factor, cfg.entry_mfi_risk_min, cfg.entry_mfi_risk_max))
 
     def _monthly_risk_scale(self) -> float:
         """Escala de tamaño según el drawdown acumulado del mes calendario.
@@ -1467,6 +1499,15 @@ def parse_args():
                    help="Escala de diferencia DI direccional para el multiplicador de riesgo.")
     p.add_argument("--entry-dmi-risk-min", type=float, default=d.entry_dmi_risk_min)
     p.add_argument("--entry-dmi-risk-max", type=float, default=d.entry_dmi_risk_max)
+    p.add_argument("--entry-mfi-risk-scaling", action=argparse.BooleanOptionalAction,
+                   default=d.entry_mfi_risk_scaling_enabled,
+                   help="Modula el tamaño con MFI (precio/volumen), sin bloquear entradas.")
+    p.add_argument("--entry-mfi-len", type=int, default=d.entry_mfi_len)
+    p.add_argument("--entry-mfi-risk-base", type=float, default=d.entry_mfi_risk_base)
+    p.add_argument("--entry-mfi-risk-spread-scale", type=float,
+                   default=d.entry_mfi_risk_spread_scale)
+    p.add_argument("--entry-mfi-risk-min", type=float, default=d.entry_mfi_risk_min)
+    p.add_argument("--entry-mfi-risk-max", type=float, default=d.entry_mfi_risk_max)
     p.add_argument("--adx-exit", action=argparse.BooleanOptionalAction, default=d.adx_exit_enabled)
     p.add_argument("--adx-timeframe", default=d.adx_timeframe,
                    help="Timeframe(s) ADX de salida separados por coma; se combinan con OR (p. ej. 1D,30min).")
@@ -1653,6 +1694,12 @@ def config_from_args(a) -> Config:
         entry_dmi_risk_spread_scale=a.entry_dmi_risk_spread_scale,
         entry_dmi_risk_min=a.entry_dmi_risk_min,
         entry_dmi_risk_max=a.entry_dmi_risk_max,
+        entry_mfi_risk_scaling_enabled=a.entry_mfi_risk_scaling,
+        entry_mfi_len=a.entry_mfi_len,
+        entry_mfi_risk_base=a.entry_mfi_risk_base,
+        entry_mfi_risk_spread_scale=a.entry_mfi_risk_spread_scale,
+        entry_mfi_risk_min=a.entry_mfi_risk_min,
+        entry_mfi_risk_max=a.entry_mfi_risk_max,
         adx_exit_enabled=a.adx_exit, adx_timeframe=a.adx_timeframe, adx_dilen=a.adx_dilen,
         adx_adxlen=a.adx_adxlen, adx_key_level=a.adx_key_level, adx_exit_pct=a.adx_exit_pct,
         adx_exit_range=a.adx_exit_range,
