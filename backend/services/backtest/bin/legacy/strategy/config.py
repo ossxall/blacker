@@ -35,6 +35,13 @@ class Config:
     entry_adx_enabled: bool = True
     entry_adx_len: int = 14
     entry_adx_min: float = 20.0
+    # Escala el riesgo (no bloquea la señal) según DI direccional en la vela
+    # confirmada: factor = clamp(base + (DI a favor - DI en contra) / escala).
+    entry_dmi_risk_scaling_enabled: bool = True
+    entry_dmi_risk_base: float = 0.9
+    entry_dmi_risk_spread_scale: float = 100.0
+    entry_dmi_risk_min: float = 0.5
+    entry_dmi_risk_max: float = 1.25
 
     adx_exit_enabled: bool = True
     # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
@@ -89,6 +96,13 @@ class Config:
     candle_pattern_exit_short_loss_pct: float = 0.6
     # Bidireccionales: umbral más estricto para compensar el mayor ruido.
     candle_pattern_exit_signed_loss_pct: float = 0.8
+
+    # DI direccional modula el tamaño de entrada; no bloquea señales.
+    entry_dmi_risk_scaling_enabled: bool = True
+    entry_dmi_risk_base: float = 0.9
+    entry_dmi_risk_spread_scale: float = 100.0
+    entry_dmi_risk_min: float = 0.5
+    entry_dmi_risk_max: float = 1.25
 
     # --- Debilidad por toques repetidos a EMA55 (30m únicamente) ------------
     # Un toque es el rango de la vela intersectando EMA55 ± tolerancia. Se sale
@@ -321,6 +335,18 @@ class Config:
             raise ValueError("confirm_bars no puede ser negativo.")
         if self.entry_adx_enabled and (self.entry_adx_len <= 0 or self.entry_adx_min < 0):
             raise ValueError("Configuración de ADX de entrada inválida.")
+        if self.entry_dmi_risk_scaling_enabled and (
+            self.entry_adx_len <= 0 or self.entry_dmi_risk_spread_scale <= 0
+            or self.entry_dmi_risk_min <= 0
+            or self.entry_dmi_risk_max < self.entry_dmi_risk_min
+        ):
+            raise ValueError("Configuración de escalado DMI de riesgo inválida.")
+        if self.entry_dmi_risk_scaling_enabled and (
+            self.entry_adx_len <= 0 or self.entry_dmi_risk_spread_scale <= 0
+            or self.entry_dmi_risk_min <= 0
+            or self.entry_dmi_risk_max < self.entry_dmi_risk_min
+        ):
+            raise ValueError("Configuración de escalado DMI de riesgo inválida.")
         if self.adx_exit_enabled:
             if min(self.adx_dilen, self.adx_adxlen) <= 0 or self.adx_key_level < 0:
                 raise ValueError("Configuración de ADX de salida inválida.")

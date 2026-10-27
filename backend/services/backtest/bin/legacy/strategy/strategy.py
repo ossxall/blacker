@@ -452,7 +452,16 @@ class EMACrossStrategy:
         if cfg.confirm_bars:
             up = confirmed_crosses(up, fast > slow, cfg.confirm_bars)
             down = confirmed_crosses(down, fast < slow, cfg.confirm_bars)
-        entry_adx = adx(bars, cfg.entry_adx_len, cfg.entry_adx_len)["adx"].to_numpy(float) if cfg.entry_adx_enabled else np.full(len(bars), np.nan)
+        entry_dmi = (
+            adx(bars, cfg.entry_adx_len, cfg.entry_adx_len)
+            if cfg.entry_adx_enabled or cfg.entry_dmi_risk_scaling_enabled
+            else None
+        )
+        entry_adx = (
+            entry_dmi["adx"].to_numpy(float)
+            if cfg.entry_adx_enabled and entry_dmi is not None
+            else np.full(len(bars), np.nan)
+        )
         if cfg.entry_adx_enabled:
             allowed = np.nan_to_num(entry_adx, nan=0.0) >= cfg.entry_adx_min
             up, down = up & allowed, down & allowed
@@ -466,7 +475,7 @@ class EMACrossStrategy:
         down &= valid
         (long_candle_confirmation, short_candle_confirmation,
          neutral_candle_pattern) = self._candle_confirmations(bars, raw)
-        return pd.DataFrame({
+        output = {
             "ema_fast": fast, "ema_slow": slow, "adx_entry": entry_adx,
             "cross_up": up, "cross_down": down, "valid": valid,
             "long_candle_confirmation": long_candle_confirmation,
@@ -475,7 +484,11 @@ class EMACrossStrategy:
             "trend_bias": bias if bias is not None else np.zeros(len(bars), int),
             "chop_ok": chop if chop is not None else np.ones(len(bars), bool),
             "target": np.select([up, down], [1, -1], default=0),
-        }, index=bars.index)
+        }
+        if cfg.entry_dmi_risk_scaling_enabled and entry_dmi is not None:
+            output["entry_plus_di"] = entry_dmi["plus_di"].to_numpy(float)
+            output["entry_minus_di"] = entry_dmi["minus_di"].to_numpy(float)
+        return pd.DataFrame(output, index=bars.index)
 
     def prepare_exits(self, raw: pd.DataFrame, bars: pd.DataFrame) -> tuple[
             Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
@@ -527,6 +540,14 @@ class Backtester:
                  doji_exit: Optional[np.ndarray] = None):
         self.bars, self.cfg, self.verbose = bars, config, verbose
         self.signals = signals if signals is not None else EMACrossStrategy(config).generate_signals(bars)
+        self.entry_plus_di = (
+            self.signals["entry_plus_di"].to_numpy(float)
+            if "entry_plus_di" in self.signals else None
+        )
+        self.entry_minus_di = (
+            self.signals["entry_minus_di"].to_numpy(float)
+            if "entry_minus_di" in self.signals else None
+        )
         pattern_arrays = (
             candle_bull_exit, candle_bear_exit, signed_bull_exit, signed_bear_exit, doji_exit
         )
@@ -619,7 +640,11 @@ class Backtester:
             return
         pct_sl = self.cfg.stop_loss_pct
         risk_unit = self._risk_per_unit(side, price, pct_sl) if pct_sl > 0 else 0.0
-        by_risk = self.cash * self.cfg.risk_pct * self._risk_multiplier() * self._monthly_risk_scale() / risk_unit if risk_unit > 0 else np.inf
+        by_risk = (
+            self.cash * self.cfg.risk_pct * self._risk_multiplier()
+            * self._monthly_risk_scale() * self._entry_dmi_risk_multiplier(side) / risk_unit
+            if risk_unit > 0 else np.inf
+        )
         by_lev = self.cash * self.cfg.max_leverage / price
         qty_total = min(by_risk, by_lev)
         if not np.isfinite(qty_total) or qty_total <= 0:
@@ -716,6 +741,25 @@ class Backtester:
         win_rate = sum(wins) / len(wins)
         factor = 1 + cfg.adaptive_risk_k * (win_rate - 0.5)
         return float(min(max(factor, cfg.adaptive_risk_min), cfg.adaptive_risk_max))
+
+    def _entry_dmi_risk_multiplier(self, side: int) -> float:
+        """Escala tamaño por DMI de la vela confirmada, sin bloquear entradas."""
+        cfg = self.cfg
+        if (not cfg.entry_dmi_risk_scaling_enabled or self.entry_plus_di is None
+                or self.entry_minus_di is None or side not in (1, -1)):
+            return 1.0
+        signal_index = self._bar_index - 1
+        if signal_index < 0 or signal_index >= len(self.entry_plus_di):
+            return 1.0
+        plus_di = self.entry_plus_di[signal_index]
+        minus_di = self.entry_minus_di[signal_index]
+        if not (np.isfinite(plus_di) and np.isfinite(minus_di)):
+            return 1.0
+        spread_in_trade_direction = (plus_di - minus_di) * side
+        factor = cfg.entry_dmi_risk_base + (
+            spread_in_trade_direction / cfg.entry_dmi_risk_spread_scale
+        )
+        return float(np.clip(factor, cfg.entry_dmi_risk_min, cfg.entry_dmi_risk_max))
 
     def _monthly_risk_scale(self) -> float:
         """Escala de tamaño según el drawdown acumulado del mes calendario.
@@ -1414,6 +1458,15 @@ def parse_args():
     p.add_argument("--entry-adx-filter", action=argparse.BooleanOptionalAction, default=d.entry_adx_enabled)
     p.add_argument("--entry-adx-len", type=int, default=d.entry_adx_len)
     p.add_argument("--entry-adx-min", type=float, default=d.entry_adx_min)
+    p.add_argument("--entry-dmi-risk-scaling", action=argparse.BooleanOptionalAction,
+                   default=d.entry_dmi_risk_scaling_enabled,
+                   help="Modula el tamaño con DI+/DI- sin bloquear entradas.")
+    p.add_argument("--entry-dmi-risk-base", type=float, default=d.entry_dmi_risk_base)
+    p.add_argument("--entry-dmi-risk-spread-scale", type=float,
+                   default=d.entry_dmi_risk_spread_scale,
+                   help="Escala de diferencia DI direccional para el multiplicador de riesgo.")
+    p.add_argument("--entry-dmi-risk-min", type=float, default=d.entry_dmi_risk_min)
+    p.add_argument("--entry-dmi-risk-max", type=float, default=d.entry_dmi_risk_max)
     p.add_argument("--adx-exit", action=argparse.BooleanOptionalAction, default=d.adx_exit_enabled)
     p.add_argument("--adx-timeframe", default=d.adx_timeframe,
                    help="Timeframe(s) ADX de salida separados por coma; se combinan con OR (p. ej. 1D,30min).")
@@ -1595,6 +1648,11 @@ def config_from_args(a) -> Config:
         commission_bps=a.commission_bps, slippage_bps=a.slippage_bps, risk_pct=a.risk_pct,
         max_leverage=a.max_leverage, stop_loss_pct=a.stop_loss_pct, confirm_bars=a.confirm_bars,
         entry_adx_enabled=a.entry_adx_filter, entry_adx_len=a.entry_adx_len, entry_adx_min=a.entry_adx_min,
+        entry_dmi_risk_scaling_enabled=a.entry_dmi_risk_scaling,
+        entry_dmi_risk_base=a.entry_dmi_risk_base,
+        entry_dmi_risk_spread_scale=a.entry_dmi_risk_spread_scale,
+        entry_dmi_risk_min=a.entry_dmi_risk_min,
+        entry_dmi_risk_max=a.entry_dmi_risk_max,
         adx_exit_enabled=a.adx_exit, adx_timeframe=a.adx_timeframe, adx_dilen=a.adx_dilen,
         adx_adxlen=a.adx_adxlen, adx_key_level=a.adx_key_level, adx_exit_pct=a.adx_exit_pct,
         adx_exit_range=a.adx_exit_range,

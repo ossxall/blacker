@@ -219,6 +219,11 @@ _CONFIG_ENV = {
     "entry_adx_enabled": ("STRATEGY_ENTRY_ADX", env_bool),
     "entry_adx_len": ("STRATEGY_ENTRY_ADX_LEN", env_int),
     "entry_adx_min": ("STRATEGY_ENTRY_ADX_MIN", env_float),
+    "entry_dmi_risk_scaling_enabled": ("STRATEGY_ENTRY_DMI_RISK_SCALING", env_bool),
+    "entry_dmi_risk_base": ("STRATEGY_ENTRY_DMI_RISK_BASE", env_float),
+    "entry_dmi_risk_spread_scale": ("STRATEGY_ENTRY_DMI_RISK_SPREAD_SCALE", env_float),
+    "entry_dmi_risk_min": ("STRATEGY_ENTRY_DMI_RISK_MIN", env_float),
+    "entry_dmi_risk_max": ("STRATEGY_ENTRY_DMI_RISK_MAX", env_float),
     # Gestión de posición: afecta el sizing y las salidas (stop/partial).
     "initial_capital": ("STRATEGY_INITIAL_CAPITAL", env_float),
     "commission_bps": ("STRATEGY_COMMISSION_BPS", env_float),
