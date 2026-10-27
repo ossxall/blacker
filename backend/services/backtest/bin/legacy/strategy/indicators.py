@@ -35,6 +35,20 @@ def ema_band_touch_flags(
     return line, touched
 
 
+def efficiency_ratio(values: pd.Series, period: int = 20) -> pd.Series:
+    """Kaufman Efficiency Ratio: avance neto / recorrido total en ``period`` velas.
+
+    Devuelve valores en [0, 1]; 0 significa movimiento lateral y 1 movimiento
+    completamente direccional. Usa sólo cierres hasta la vela actual.
+    """
+    if period <= 0:
+        raise ValueError("El periodo Efficiency Ratio debe ser positivo.")
+    change = (values - values.shift(period)).abs()
+    path = values.diff().abs().rolling(period, min_periods=period).sum()
+    ratio = change / path.replace(0.0, np.nan)
+    return ratio.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 1.0)
+
+
 def rsi(values: pd.Series, length: int = 14) -> pd.Series:
     """RSI (suavizado Wilder) alineado con el índice de entrada.
 

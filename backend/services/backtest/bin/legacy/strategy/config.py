@@ -49,6 +49,13 @@ class Config:
     entry_mfi_risk_spread_scale: float = 100.0
     entry_mfi_risk_min: float = 0.5
     entry_mfi_risk_max: float = 1.25
+    # Efficiency Ratio suaviza el tamaño entre regímenes laterales y direccionales.
+    entry_er_risk_scaling_enabled: bool = True
+    entry_er_len: int = 20
+    entry_er_risk_base: float = 0.75
+    entry_er_risk_slope: float = 1.0
+    entry_er_risk_min: float = 0.5
+    entry_er_risk_max: float = 1.25
 
     adx_exit_enabled: bool = True
     # Uno o varios timeframes (combinados con OR). Acepta "1D", "1D,30min" o
@@ -354,6 +361,12 @@ class Config:
             or self.entry_mfi_risk_max < self.entry_mfi_risk_min
         ):
             raise ValueError("Configuración de escalado MFI de riesgo inválida.")
+        if self.entry_er_risk_scaling_enabled and (
+            self.entry_er_len <= 0 or self.entry_er_risk_slope < 0
+            or self.entry_er_risk_min <= 0
+            or self.entry_er_risk_max < self.entry_er_risk_min
+        ):
+            raise ValueError("Configuración de escalado Efficiency Ratio inválida.")
         if self.entry_dmi_risk_scaling_enabled and (
             self.entry_adx_len <= 0 or self.entry_dmi_risk_spread_scale <= 0
             or self.entry_dmi_risk_min <= 0
