@@ -90,7 +90,7 @@ class Config:
     # Bidireccionales: umbral más estricto para compensar el mayor ruido.
     candle_pattern_exit_signed_loss_pct: float = 0.8
 
-    # --- Debilidad LONG en toques repetidos a EMA55 (30m únicamente) --------
+    # --- Debilidad por toques repetidos a EMA55 (30m únicamente) ------------
     # Un toque es el rango de la vela intersectando EMA55 ± tolerancia. Se sale
     # tras 2 toques seguidos o 3 dentro de 5 velas, sin ruptura y con pérdida abierta.
     ema55_touch_exit_enabled: bool = True
@@ -99,7 +99,8 @@ class Config:
     ema55_touch_min_touches: int = 3
     ema55_touch_consecutive: int = 2
     ema55_touch_breakout_buffer_pct: float = 0.1
-    ema55_touch_exit_loss_pct: float = 0.7
+    ema55_touch_exit_loss_pct: float = 0.7        # LONG
+    ema55_touch_short_exit_loss_pct: float = 0.9  # SHORT, umbral más estricto
 
     # Gestión de salida orientada a reducir la racha de pérdidas en whipsaw:
     # al alcanzar `partial_tp_r` veces el riesgo inicial se asegura beneficio
@@ -357,7 +358,8 @@ class Config:
         ):
             raise ValueError("Los umbrales de pérdida de salidas TA-Lib no pueden ser negativos.")
         if (self.ema55_touch_tolerance_pct < 0 or self.ema55_touch_breakout_buffer_pct < 0
-                or self.ema55_touch_exit_loss_pct < 0):
+                or self.ema55_touch_exit_loss_pct < 0
+                or self.ema55_touch_short_exit_loss_pct < 0):
             raise ValueError("Tolerancias y pérdida mínima de EMA55 no pueden ser negativas.")
         if min(self.ema55_touch_lookback_bars, self.ema55_touch_min_touches,
                self.ema55_touch_consecutive) < 1:

@@ -955,21 +955,22 @@ class Backtester:
         """Cierra LONG tras toques repetidos a EMA55 sin ruptura confirmada.
 
         El toque se cuenta cuando el rango de la vela roza/cruza EMA55 ± banda.
-        Se exige una secuencia de toques o varios dentro de la ventana, una
-        pérdida abierta mínima y que el cierre actual no haya superado la EMA
-        más allá del buffer de ruptura.
-        La regla sólo está activa en barras de 30 minutos y nunca cierra SHORT.
+        Se exige una secuencia de toques o varios dentro de la ventana y una
+        pérdida abierta mínima. Para LONG, el cierre no debe confirmar ruptura
+        arriba; para SHORT, no debe confirmar ruptura abajo. Sólo corre en 30m.
         """
         pos = self.position
         cfg = self.cfg
-        if (pos is None or pos.side != 1 or not self.ema55_touch_exit_active
+        if (pos is None or pos.side not in (1, -1) or not self.ema55_touch_exit_active
                 or i >= len(self.ema55_touches)):
             return None
         line = self.ema55_line[i]
         if not np.isfinite(line):
             return None
-        open_pnl_pct = (self.c[i] / pos.entry_price - 1.0) * 100.0
-        if open_pnl_pct > -cfg.ema55_touch_exit_loss_pct:
+        open_pnl_pct = (self.c[i] / pos.entry_price - 1.0) * pos.side * 100.0
+        loss_threshold = cfg.ema55_touch_exit_loss_pct if pos.side == 1 \
+            else cfg.ema55_touch_short_exit_loss_pct
+        if open_pnl_pct > -loss_threshold:
             return None
 
         start = max(0, i - cfg.ema55_touch_lookback_bars + 1, pos.entry_bar_index)
@@ -984,9 +985,16 @@ class Backtester:
             return None
 
         failed_break_level = line * (1.0 + cfg.ema55_touch_breakout_buffer_pct / 100.0)
-        if self.c[i] > failed_break_level:
+        if pos.side == 1:
+            if self.c[i] > failed_break_level:
+                return None
+            return "EMA55_REPEATED_TOUCH_WEAKNESS"
+        failed_downside_break_level = line * (
+            1.0 - cfg.ema55_touch_breakout_buffer_pct / 100.0
+        )
+        if self.c[i] < failed_downside_break_level:
             return None
-        return "EMA55_REPEATED_TOUCH_WEAKNESS"
+        return "EMA55_REPEATED_TOUCH_WEAKNESS_SHORT"
 
     def _manage(self, i: int) -> bool:
         """Take-profit parcial y salidas parciales por precio.
@@ -1477,6 +1485,9 @@ def parse_args():
     p.add_argument("--ema55-touch-exit-loss-pct", type=float,
                    default=d.ema55_touch_exit_loss_pct,
                    help="Pérdida abierta mínima para confirmar debilidad (default 0.7%%).")
+    p.add_argument("--ema55-touch-short-exit-loss-pct", type=float,
+                   default=d.ema55_touch_short_exit_loss_pct,
+                   help="Pérdida mínima para la salida SHORT (default 0.9%%).")
     p.add_argument("--partial-tp", action=argparse.BooleanOptionalAction, default=d.partial_tp_enabled)
     p.add_argument("--partial-tp-r", type=float, default=d.partial_tp_r)
     p.add_argument("--partial-tp-pct", type=float, default=d.partial_tp_pct)
@@ -1609,6 +1620,7 @@ def config_from_args(a) -> Config:
         ema55_touch_consecutive=a.ema55_touch_consecutive,
         ema55_touch_breakout_buffer_pct=a.ema55_touch_breakout_buffer_pct,
         ema55_touch_exit_loss_pct=a.ema55_touch_exit_loss_pct,
+        ema55_touch_short_exit_loss_pct=a.ema55_touch_short_exit_loss_pct,
         partial_tp_enabled=a.partial_tp, partial_tp_r=a.partial_tp_r, partial_tp_pct=a.partial_tp_pct,
         partial_tp2_r=a.partial_tp2_r, partial_tp2_pct=a.partial_tp2_pct,
         move_stop_to_breakeven=a.breakeven_stop,

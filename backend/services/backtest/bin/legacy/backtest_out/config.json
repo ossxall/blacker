@@ -49,6 +49,7 @@
   "ema55_touch_consecutive": 2,
   "ema55_touch_breakout_buffer_pct": 0.1,
   "ema55_touch_exit_loss_pct": 0.7,
+  "ema55_touch_short_exit_loss_pct": 0.9,
   "partial_tp_enabled": true,
   "partial_tp_r": 1.0,
   "partial_tp_pct": 50.0,

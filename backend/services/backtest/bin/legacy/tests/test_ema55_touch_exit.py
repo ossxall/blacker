@@ -131,17 +131,31 @@ def test_repeated_touches_without_ema55_loss_threshold_do_not_exit():
     assert engine.position is not None
 
 
-def test_ema55_touch_exit_only_applies_to_longs_on_30m():
-    short = make_engine([100.2, 100.2, 100.0], [True, True, False], side=-1)
+def test_two_consecutive_ema55_touches_exit_short_on_failed_downside_break():
+    short = make_engine([100.2, 100.9, 100.0], [True, True, False], side=-1)
+
+    trades, _ = short.run()
+
+    assert trades.reason.tolist() == ["EMA55_REPEATED_TOUCH_WEAKNESS_SHORT"]
+    assert trades.exit_time.iloc[0] == short.bars.index[2]
+
+
+def test_short_touch_exit_uses_its_stricter_loss_threshold():
+    short = make_engine([100.2, 100.7, 100.0], [True, True, False], side=-1)
+
+    trades, _ = short.run()
+
+    assert trades.empty
+    assert short.position is not None
+
+
+def test_ema55_touch_exit_is_disabled_outside_30m():
     other_timeframe = make_engine(
-        [100.2, 100.2, 100.0], [True, True, False], timeframe="15min"
+        [100.2, 99.3, 100.0], [True, True, False], timeframe="15min"
     )
 
-    short_trades, _ = short.run()
     other_trades, _ = other_timeframe.run()
 
-    assert short_trades.empty
-    assert short.position is not None
     assert other_trades.empty
     assert other_timeframe.position is not None
 
